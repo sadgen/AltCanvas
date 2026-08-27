@@ -406,8 +406,7 @@
       }
 
       updateAuthUI(false);
-      return false;
-    }
+
       // Dev fallback mode if manual credentials are in storage
       if (config.api && config.userId && config.apiKey) {
         config.mode = 'direct';
@@ -882,7 +881,7 @@
         onChangeSidebarWidth: () => {},
         onChangeSidebarView: () => {},
         onToggleSidebar: () => {},
-        onOpenLink: (url) => { if (url) window.open(url, '_blank'); },
+        onOpenLink: (url) => { if (url) window.open(url, '_blank', 'noopener,noreferrer'); },
         onOpenContextMenu: () => {},
         onAddToNote: () => {},
         onOpenTagsPopup: () => {},

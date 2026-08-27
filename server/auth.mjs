@@ -59,11 +59,21 @@ export function generateCodeChallenge(verifier) {
 /**
  * Check if a hostname/IP is private/internal (SSRF protection)
  */
-function isPrivateHost(hostname) {
+export function isPrivateHost(hostname) {
   if (!hostname) return true;
-  const h = hostname.toLowerCase();
-  if (['localhost', '127.0.0.1', '::1', '0.0.0.0'].includes(h)) return true;
+  if (process.env.ALLOW_PRIVATE_HOSTS === 'true') return false;
+
+  // Remove IPv6 square brackets and normalize
+  const h = hostname.replace(/^\[|\]$/g, '').toLowerCase();
+
+  // Localhost and all-zeros
+  if (['localhost', '127.0.0.1', '::1', '::', '0.0.0.0'].includes(h)) return true;
   if (h.endsWith('.local') || h.endsWith('.internal') || h.endsWith('.lan')) return true;
+
+  // IPv6 Link-Local (fe80::/10), Unique Local Address (fc00::/7, fd00::/8), and IPv4-mapped (::ffff:)
+  if (h.startsWith('fe80:') || h.startsWith('fc') || h.startsWith('fd') || h.startsWith('::ffff:')) {
+    return true;
+  }
 
   // IPv4 private ranges
   const ipMatch = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
@@ -74,7 +84,7 @@ function isPrivateHost(hostname) {
     if (a === 169 && b === 254) return true; // 169.254.0.0/16 Link-Local
     if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12
     if (a === 192 && b === 168) return true; // 192.168.0.0/16
-    if (a === 0) return true;
+    if (a === 0) return true; // 0.0.0.0/8
   }
   return false;
 }

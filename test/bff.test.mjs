@@ -69,12 +69,30 @@ errWithCode.cause = { code: 'DEPTH_ZERO_SELF_SIGNED_CERT' };
 assert.equal(formatFetchError(errWithCode), 'fetch failed (DEPTH_ZERO_SELF_SIGNED_CERT)');
 console.log('✅ formatFetchError diagnostics test passed');
 
-// 5. Test SSRF Protection in sanitizeAlteroUrl
-import { sanitizeAlteroUrl } from '../server/auth.mjs';
+// 5. Test SSRF Protection in sanitizeAlteroUrl & isPrivateHost
+import { sanitizeAlteroUrl, isPrivateHost } from '../server/auth.mjs';
 
-assert.equal(sanitizeAlteroUrl('http://192.168.5.1'), process.env.ALTERO_API || 'http://localhost:8000');
-assert.equal(sanitizeAlteroUrl('http://10.0.0.1:9000'), process.env.ALTERO_API || 'http://localhost:8000');
+const defaultFallback = process.env.ALTERO_API || 'http://localhost:8000';
+
+// IPv4 private ranges
+assert.equal(sanitizeAlteroUrl('http://192.168.5.1'), defaultFallback);
+assert.equal(sanitizeAlteroUrl('http://10.0.0.1:9000'), defaultFallback);
+assert.equal(sanitizeAlteroUrl('http://172.16.1.1'), defaultFallback);
+assert.equal(sanitizeAlteroUrl('http://127.0.0.1:8000'), defaultFallback);
+assert.equal(sanitizeAlteroUrl('http://0.0.0.0:8000'), defaultFallback);
+
+// IPv6 private & loopback & link-local ranges
+assert.equal(sanitizeAlteroUrl('http://[::1]'), defaultFallback);
+assert.equal(sanitizeAlteroUrl('http://[::]:8000'), defaultFallback);
+assert.equal(sanitizeAlteroUrl('http://[fe80::1]'), defaultFallback);
+assert.equal(sanitizeAlteroUrl('http://[fc00::1]'), defaultFallback);
+assert.equal(sanitizeAlteroUrl('http://[fd12:3456::1]'), defaultFallback);
+assert.equal(sanitizeAlteroUrl('http://[::ffff:127.0.0.1]'), defaultFallback);
+
+// Valid public domains
 assert.equal(sanitizeAlteroUrl('https://my-valid-altero.com/'), 'https://my-valid-altero.com');
-console.log('✅ SSRF Protection & URL sanitization passed');
+assert.equal(sanitizeAlteroUrl('https://altero.example.org:8443'), 'https://altero.example.org:8443');
+
+console.log('✅ SSRF Protection & URL sanitization (IPv4 & IPv6) passed');
 
 console.log('🎉 All AltCanvas BFF Unit Tests Passed Successfully!');
