@@ -1,0 +1,6 @@
+[submodule "vendor/reader"]
+	path = vendor/reader
+	url = https://github.com/zotero/reader.git
+[submodule "vendor/web-library"]
+	path = vendor/web-library
+	url = https://github.com/zotero/web-library.git

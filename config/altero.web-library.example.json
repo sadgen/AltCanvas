@@ -1,0 +1,15 @@
+{
+  "userId": "<altero-user-id>",
+  "userSlug": "<local-user-slug>",
+  "apiKey": "<inject-at-runtime>",
+  "apiConfig": {
+    "apiAuthorityPart": "altero.example.com",
+    "apiVersion": 3,
+    "retry": 2
+  },
+  "libraries": {
+    "includeMyLibrary": true,
+    "includeUserGroups": true,
+    "include": []
+  }
+}
