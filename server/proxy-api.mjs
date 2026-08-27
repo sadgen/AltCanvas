@@ -1,4 +1,5 @@
 import { getSessionIdFromRequest, getSession, updateSession } from './session.mjs';
+import { formatFetchError } from './auth.mjs';
 
 const DEFAULT_ALTERO_API = (process.env.ALTERO_API || 'http://localhost:8000').replace(/\/$/, '');
 const OAUTH_CLIENT_ID = process.env.OAUTH_CLIENT_ID || 'altcanvas';
@@ -202,6 +203,6 @@ export async function handleApiProxy(req, res, url) {
   } catch (err) {
     console.error('API Proxy Upstream Error:', err);
     res.writeHead(502, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify({ error: 'bad_gateway', message: `上游 Altero 服务通信异常: ${err.message}` }));
+    res.end(JSON.stringify({ error: 'bad_gateway', message: `上游 Altero 服务通信异常: ${formatFetchError(err)}` }));
   }
 }

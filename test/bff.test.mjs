@@ -8,7 +8,7 @@ import {
   consumeAuthTransaction,
   generateRandomToken
 } from '../server/session.mjs';
-import { generateCodeChallenge } from '../server/auth.mjs';
+import { generateCodeChallenge, formatFetchError } from '../server/auth.mjs';
 
 console.log('🧪 Running AltCanvas BFF Unit Tests...');
 
@@ -55,5 +55,18 @@ assert.equal(tx.returnTo, '/doc/123');
 
 assert.equal(consumeAuthTransaction(state), null, 'Transaction must be single-use only');
 console.log('✅ PKCE & Auth Transaction Store passed');
+
+// 4. Test formatFetchError
+const simpleErr = new Error('fetch failed');
+assert.equal(formatFetchError(simpleErr), 'fetch failed');
+
+const errWithCause = new Error('fetch failed');
+errWithCause.cause = new Error('connect ECONNREFUSED 127.0.0.1:8000');
+assert.equal(formatFetchError(errWithCause), 'fetch failed (connect ECONNREFUSED 127.0.0.1:8000)');
+
+const errWithCode = new Error('fetch failed');
+errWithCode.cause = { code: 'DEPTH_ZERO_SELF_SIGNED_CERT' };
+assert.equal(formatFetchError(errWithCode), 'fetch failed (DEPTH_ZERO_SELF_SIGNED_CERT)');
+console.log('✅ formatFetchError diagnostics test passed');
 
 console.log('🎉 All AltCanvas BFF Unit Tests Passed Successfully!');

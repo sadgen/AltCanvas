@@ -1,4 +1,5 @@
 import { getSessionIdFromRequest, getSession } from './session.mjs';
+import { formatFetchError } from './auth.mjs';
 
 const DEFAULT_ALTERO_API = (process.env.ALTERO_API || 'http://localhost:8000').replace(/\/$/, '');
 
@@ -104,7 +105,7 @@ export async function handleFilesProxy(req, res, url) {
     console.error('File Streaming Proxy Error:', err);
     if (!res.headersSent) {
       res.writeHead(502, { 'Content-Type': 'text/plain; charset=utf-8' });
-      res.end(`502 Bad Gateway: 附件流式传输失败: ${err.message}`);
+      res.end(`502 Bad Gateway: 附件流式传输失败: ${formatFetchError(err)}`);
     }
   }
 }

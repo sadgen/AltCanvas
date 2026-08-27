@@ -11,9 +11,43 @@ import {
   getSessionIdFromRequest
 } from './session.mjs';
 
+// Allow self-signed TLS certificates for self-hosted Altero instances unless explicitly configured
+if (process.env.NODE_TLS_REJECT_UNAUTHORIZED === undefined) {
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+}
+
 const DEFAULT_ALTERO_API = (process.env.ALTERO_API || 'http://localhost:8000').replace(/\/$/, '');
 const OAUTH_CLIENT_ID = process.env.OAUTH_CLIENT_ID || 'altcanvas';
 const DEFAULT_SCOPES = 'openid profile library.read library.write annotations.read annotations.write files.read';
+
+/**
+ * Format fetch/network error including cause details
+ */
+export function formatFetchError(err) {
+  if (!err) return '未知错误';
+  if (err.cause) {
+    const cause = err.cause;
+    if (cause instanceof Error) {
+      return `${err.message} (${cause.message || cause.code || '网络/SSL连接异常'})`;
+    }
+    if (typeof cause === 'object') {
+      if (Array.isArray(cause.errors) && cause.errors.length > 0) {
+        const errDetails = cause.errors.map(e => e.message || e.code || String(e)).join('; ');
+        return `${err.message} (${errDetails})`;
+      }
+      if (cause.code || cause.message) {
+        return `${err.message} (${cause.code || cause.message})`;
+      }
+      try {
+        return `${err.message} (${JSON.stringify(cause)})`;
+      } catch {
+        return `${err.message} (${String(cause)})`;
+      }
+    }
+    return `${err.message} (${String(cause)})`;
+  }
+  return err.message || String(err);
+}
 
 /**
  * Generate PKCE S256 code challenge from verifier
@@ -92,21 +126,31 @@ export async function handleCallback(req, res, url, selfOrigin) {
   const errorDesc = url.searchParams.get('error_description');
 
   if (error) {
-    res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(`<h3>授权失败</h3><p>${error}: ${errorDesc || '用户取消或拒绝授权'}</p><p><a href="/">返回首页</a></p>`);
+    const errorMsg = `授权失败: ${error}${errorDesc ? ` (${errorDesc})` : ' (用户取消或拒绝授权)'}`;
+    res.writeHead(302, {
+      'Location': `/?auth_error=${encodeURIComponent(errorMsg)}`,
+      'Cache-Control': 'no-store'
+    });
+    res.end();
     return;
   }
 
   if (!code || !state) {
-    res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
-    res.end('400 Bad Request: 缺少 code 或 state 参数');
+    res.writeHead(302, {
+      'Location': `/?auth_error=${encodeURIComponent('缺少授权参数 (code 或 state)')}`,
+      'Cache-Control': 'no-store'
+    });
+    res.end();
     return;
   }
 
   const tx = consumeAuthTransaction(state);
   if (!tx) {
-    res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end('<h3>授权会话已过期或无效</h3><p>请重新发起登录。</p><p><a href="/">重新登录</a></p>');
+    res.writeHead(302, {
+      'Location': `/?auth_error=${encodeURIComponent('授权会话已过期或无效，请重新发起登录')}`,
+      'Cache-Control': 'no-store'
+    });
+    res.end();
     return;
   }
 
@@ -130,8 +174,14 @@ export async function handleCallback(req, res, url, selfOrigin) {
     });
 
     if (!tokenRes.ok) {
-      const errText = await tokenRes.text();
-      throw new Error(`Token endpoint responded HTTP ${tokenRes.status}: ${errText}`);
+      let errDetail = '';
+      try {
+        const errJson = await tokenRes.json();
+        errDetail = errJson.error_description || errJson.error || JSON.stringify(errJson);
+      } catch {
+        errDetail = await tokenRes.text();
+      }
+      throw new Error(`Altero 拒绝换取令牌 (HTTP ${tokenRes.status}${errDetail ? `: ${errDetail}` : ''})`);
     }
 
     const tokenData = await tokenRes.json();
@@ -139,7 +189,7 @@ export async function handleCallback(req, res, url, selfOrigin) {
     const expiresAt = tokenData.expires_in ? now + tokenData.expires_in * 1000 : now + 3600 * 1000;
 
     const session = createSession({
-      userId: tokenData.user_id || tokenData.userId || '1',
+      userId: String(tokenData.user_id || tokenData.userId || '1'),
       username: tokenData.username || tokenData.preferred_username || 'Researcher',
       displayName: tokenData.display_name || tokenData.displayName || tokenData.username || 'Researcher',
       accessToken: tokenData.access_token,
@@ -157,9 +207,13 @@ export async function handleCallback(req, res, url, selfOrigin) {
     });
     res.end();
   } catch (err) {
+    const detailedMessage = formatFetchError(err);
     console.error('OAuth Callback Error:', err);
-    res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(`<h3>令牌换取失败</h3><p>${err.message}</p><p><a href="/">返回首页</a></p>`);
+    res.writeHead(302, {
+      'Location': `/?auth_error=${encodeURIComponent(`令牌换取失败: ${detailedMessage}`)}`,
+      'Cache-Control': 'no-store'
+    });
+    res.end();
   }
 }
 

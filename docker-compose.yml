@@ -1,0 +1,15 @@
+services:
+  altcanvas:
+    build: .
+    image: ghcr.io/sadgen/altcanvas:latest
+    container_name: altcanvas
+    restart: unless-stopped
+    ports:
+      - "8088:8088"
+    environment:
+      - PORT=8088
+      - HOST=0.0.0.0
+      - ALTERO_API=https://altero.622276.xyz:8443
+      - OAUTH_CLIENT_ID=altcanvas
+    volumes:
+      - ./data:/app/data

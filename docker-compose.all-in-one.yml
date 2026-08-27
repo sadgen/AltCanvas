@@ -1,0 +1,42 @@
+services:
+  altcanvas:
+    image: ghcr.io/sadgen/altcanvas:latest
+    container_name: altcanvas
+    restart: unless-stopped
+    ports:
+      - "8088:8088"
+    environment:
+      - PORT=8088
+      - HOST=0.0.0.0
+      - ALTERO_API=http://altero:8000
+      - OAUTH_CLIENT_ID=altcanvas
+    volumes:
+      - ./data/altcanvas:/app/data
+    depends_on:
+      - altero
+
+  altero:
+    image: ghcr.io/eseifert/altero:latest
+    container_name: altero
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - ALTERO_DATABASE_URL=postgresql+asyncpg://altero:secretpassword@db:5432/altero
+      - ALTERO_STORAGE_DIR=/data/storage
+      - ALTERO_SECRET_KEY=change-this-to-a-secure-random-string-in-production
+    volumes:
+      - ./data/altero:/data
+    depends_on:
+      - db
+
+  db:
+    image: postgres:16-alpine
+    container_name: altero-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=altero
+      - POSTGRES_PASSWORD=secretpassword
+      - POSTGRES_DB=altero
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data

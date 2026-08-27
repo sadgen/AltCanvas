@@ -1,0 +1,23 @@
+{
+  "name": "altcanvas",
+  "version": "0.1.0",
+  "description": "Self-hosted AI Research Workspace based on Altero and Zotero-compatible data",
+  "type": "module",
+  "main": "scripts/dev-server.mjs",
+  "scripts": {
+    "start": "node scripts/dev-server.mjs",
+    "dev": "node scripts/dev-server.mjs",
+    "test": "node test/bff.test.mjs",
+    "build:css": "npx tailwindcss -i styles/input.css -o styles/altcanvas.css --minify"
+  },
+  "keywords": [
+    "zotero",
+    "altero",
+    "research",
+    "canvas",
+    "ai-workspace",
+    "pdf-reader"
+  ],
+  "author": "sadgen",
+  "license": "AGPL-3.0-or-later"
+}
