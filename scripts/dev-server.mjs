@@ -3,6 +3,10 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
+import { handleLogin, handleCallback, handleSession, handleLogout } from '../server/auth.mjs';
+import { handleApiProxy } from '../server/proxy-api.mjs';
+import { handleFilesProxy } from '../server/proxy-files.mjs';
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, '..');
 
@@ -68,27 +72,56 @@ function resolveFile(pathname) {
   return filePath;
 }
 
-const server = http.createServer((req, res) => {
-  if (!['GET', 'HEAD'].includes(req.method)) {
-    send(res, 405, '405 Method Not Allowed', { Allow: 'GET, HEAD' });
-    return;
-  }
-
-  let pathname;
+const server = http.createServer(async (req, res) => {
+  let url;
   try {
-    const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-    pathname = decodeURIComponent(url.pathname);
+    const proto = req.headers['x-forwarded-proto'] || (req.socket?.encrypted ? 'https' : 'http');
+    const host = req.headers['x-forwarded-host'] || req.headers.host || 'localhost:8088';
+    url = new URL(req.url, `${proto}://${host}`);
   } catch {
     send(res, 400, '400 Bad Request');
     return;
   }
 
-  // Default routes
-  if (pathname === '/' || pathname === '/index.html') {
-    pathname = '/index.html';
+  const selfOrigin = `${url.protocol}//${url.host}`;
+  const pathname = decodeURIComponent(url.pathname);
+
+  // --- BFF Router: Authentication Endpoints ---
+  if (pathname === '/auth/login' && ['GET', 'HEAD'].includes(req.method)) {
+    return await handleLogin(req, res, url, selfOrigin);
+  }
+  if (pathname === '/auth/callback' && ['GET', 'HEAD'].includes(req.method)) {
+    return await handleCallback(req, res, url, selfOrigin);
+  }
+  if (pathname === '/auth/session' && ['GET', 'HEAD'].includes(req.method)) {
+    return await handleSession(req, res);
+  }
+  if (pathname === '/auth/logout' && req.method === 'POST') {
+    return await handleLogout(req, res);
   }
 
-  const filePath = resolveFile(pathname);
+  // --- BFF Router: API Proxy ---
+  if (pathname.startsWith('/api/')) {
+    return await handleApiProxy(req, res, url);
+  }
+
+  // --- BFF Router: Streaming Files Proxy ---
+  if (pathname.startsWith('/files/')) {
+    return await handleFilesProxy(req, res, url);
+  }
+
+  // --- Static Asset Server ---
+  if (!['GET', 'HEAD'].includes(req.method)) {
+    send(res, 405, '405 Method Not Allowed', { Allow: 'GET, HEAD' });
+    return;
+  }
+
+  let filePathName = pathname;
+  if (filePathName === '/' || filePathName === '/index.html') {
+    filePathName = '/index.html';
+  }
+
+  const filePath = resolveFile(filePathName);
   if (!filePath) {
     send(res, 403, '403 Forbidden');
     return;
@@ -124,5 +157,5 @@ server.on('clientError', (_err, socket) => {
 
 const PORT = process.env.PORT || 8088;
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 AltCanvas Development Workspace running at http://0.0.0.0:${PORT}`);
+  console.log(`🚀 AltCanvas BFF & Web Workspace running at http://0.0.0.0:${PORT}`);
 });

@@ -7,6 +7,7 @@
   <link rel="stylesheet" href="/styles/altcanvas.css">
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+    .mobile-bottom-nav { display: none; }
     button:focus-visible, input:focus-visible { outline: 2px solid #60a5fa; outline-offset: 2px; }
     .custom-scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
     .custom-scrollbar::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
@@ -16,39 +17,83 @@
       #annotations-pane { width: 19rem; }
     }
     @media (max-width: 820px) {
-      body { min-height: 100vh; height: auto; overflow: auto; }
-      #top-bar { height: auto; min-height: 3.5rem; flex-wrap: wrap; gap: .5rem; padding-block: .65rem; }
-      #workspace { display: grid; grid-template-columns: 1fr; overflow: visible; }
-      #library-pane, #annotations-pane { width: 100%; height: 20rem; border-right: 0; }
-      #reader-pane { min-height: 38rem; border-right: 0; border-block: 1px solid #1e293b; }
-      #current-doc-title { max-width: 12rem; }
+      body { width: 100%; height: 100dvh; min-height: 100dvh; overflow: hidden; }
+      #top-bar { height: 3.5rem; min-height: 3.5rem; gap: .5rem; padding: max(.5rem, env(safe-area-inset-top)) .75rem .5rem; }
+      #top-bar > div:first-child { min-width: 0; flex: 1; }
+      #top-bar .mobile-hide, #connection-status-pill { display: none; }
+      #current-doc-title { min-width: 0; max-width: none; flex: 1; }
+      #workspace { min-height: 0; overflow: hidden; }
+      #library-pane, #reader-pane, #annotations-pane { display: none; width: 100%; height: 100%; min-height: 0; border: 0; }
+      body[data-mobile-pane="library"] #library-pane,
+      body[data-mobile-pane="reader"] #reader-pane,
+      body[data-mobile-pane="annotations"] #annotations-pane { display: flex; }
+      #reader-frame { width: 100%; height: 100%; }
+      .mobile-bottom-nav {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        flex: 0 0 auto;
+        min-height: 4rem;
+        padding: .3rem .5rem max(.3rem, env(safe-area-inset-bottom));
+        background: rgb(2 6 23 / .98);
+        border-top: 1px solid #1e293b;
+        z-index: 40;
+      }
+      .mobile-nav-button {
+        min-width: 0;
+        min-height: 3.25rem;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: .15rem;
+        border-radius: .65rem;
+        color: #64748b;
+        font-size: .68rem;
+        line-height: 1;
+      }
+      .mobile-nav-button svg { width: 1.25rem; height: 1.25rem; }
+      .mobile-nav-button[aria-selected="true"] { color: #bfdbfe; background: rgb(30 64 175 / .32); }
+      #workspace button, #top-bar button, #settings-modal button { min-height: 44px; min-width: 44px; }
+      #settings-modal { align-items: flex-end; padding: 0; }
+      #settings-panel { max-width: none; max-height: min(92dvh, 46rem); overflow-y: auto; border-radius: 1rem 1rem 0 0; padding-bottom: max(1.25rem, env(safe-area-inset-bottom)); }
+      #settings-modal input { min-height: 44px; font-size: 16px; }
+      #toast-container { left: 1rem; right: 1rem; bottom: calc(4.5rem + env(safe-area-inset-bottom)); }
+      #toast-container > div { width: 100%; }
     }
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
     }
   </style>
 </head>
-<body class="bg-slate-900 text-slate-100 h-screen w-screen flex flex-col overflow-hidden select-none">
+<body data-mobile-pane="library" class="bg-slate-900 text-slate-100 h-screen w-screen flex flex-col overflow-hidden">
   <!-- Top Bar -->
   <header id="top-bar" class="h-14 bg-slate-950 border-b border-slate-800 flex items-center justify-between px-4 z-20">
     <div class="flex items-center gap-3">
       <div class="flex items-center gap-2">
         <span class="text-xl font-bold bg-gradient-to-r from-blue-400 via-indigo-300 to-purple-400 bg-clip-text text-transparent">AltCanvas</span>
-        <span class="text-[11px] px-2 py-0.5 rounded bg-blue-950/80 text-blue-300 border border-blue-800/80 font-mono">v0.1.0</span>
+        <span class="mobile-hide text-[11px] px-2 py-0.5 rounded bg-blue-950/80 text-blue-300 border border-blue-800/80 font-mono">v0.1.0</span>
       </div>
-      <span class="text-slate-700">|</span>
+      <span class="mobile-hide text-slate-700">|</span>
       <div id="current-doc-title" class="text-xs font-medium text-slate-300 truncate max-w-md">未选择文档</div>
     </div>
 
     <!-- Connection & Auth Status -->
-    <div class="flex items-center gap-3 text-xs">
-      <button id="connection-status-pill" type="button" aria-label="打开连接设置" class="flex items-center gap-1.5 px-2.5 py-1 rounded bg-slate-900 border border-slate-800 text-slate-300 cursor-pointer hover:border-slate-700 transition">
-        <span id="status-dot" class="w-2 h-2 rounded-full bg-amber-500 animate-pulse"></span>
-        <span id="endpoint-label" class="font-mono">未连接</span>
-      </button>
-      <button id="btn-open-settings" type="button" class="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded transition border border-slate-700 flex items-center gap-1">
+    <div class="flex items-center gap-2.5 text-xs">
+      <div id="auth-container" class="flex items-center gap-2">
+        <button id="btn-login" type="button" class="px-3 py-1 bg-blue-600 hover:bg-blue-500 text-white font-medium rounded transition flex items-center gap-1 shadow-sm">
+          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1"></path></svg>
+          <span>登录 Altero</span>
+        </button>
+        <div id="user-badge" class="hidden flex items-center gap-2 bg-slate-900 border border-slate-800 rounded px-2.5 py-1 text-slate-300">
+          <span class="w-2 h-2 rounded-full bg-emerald-500"></span>
+          <span id="user-name-display" class="font-medium text-slate-200"></span>
+          <span id="user-server-tag" class="text-[10px] text-slate-500 font-mono"></span>
+          <button id="btn-logout" type="button" class="text-[11px] text-slate-400 hover:text-rose-400 ml-1 transition">退出</button>
+        </div>
+      </div>
+      <button id="btn-open-settings" type="button" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded transition border border-slate-700 flex items-center gap-1">
         <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
-        设置
+        <span class="mobile-hide">调试</span>
       </button>
     </div>
   </header>
@@ -139,9 +184,56 @@
     </aside>
   </main>
 
+  <nav id="mobile-bottom-nav" class="mobile-bottom-nav" role="tablist" aria-label="手机端主导航">
+    <button type="button" class="mobile-nav-button" role="tab" aria-selected="true" aria-controls="library-pane" data-mobile-target="library">
+      <svg aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 5.5A2.5 2.5 0 016.5 3H20v17H6.5A2.5 2.5 0 014 17.5v-12zM4 17.5A2.5 2.5 0 016.5 15H20"></path></svg>
+      <span>文库</span>
+    </button>
+    <button type="button" class="mobile-nav-button" role="tab" aria-selected="false" aria-controls="reader-pane" data-mobile-target="reader" tabindex="-1">
+      <svg aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 4h8a2 2 0 012 2v12a2 2 0 01-2 2H8a2 2 0 01-2-2V6a2 2 0 012-2zm2 4h4m-4 4h4"></path></svg>
+      <span>阅读</span>
+    </button>
+    <button type="button" class="mobile-nav-button" role="tab" aria-selected="false" aria-controls="annotations-pane" data-mobile-target="annotations" tabindex="-1">
+      <svg aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 3h10a2 2 0 012 2v14l-4-3-3 3-3-3-4 3V5a2 2 0 012-2z"></path></svg>
+      <span>标注</span>
+    </button>
+  </nav>
+
+  <!-- OAuth Server Selection & Login Modal -->
+  <div id="login-modal" role="dialog" aria-modal="true" aria-labelledby="login-title" class="fixed inset-0 bg-black/75 z-50 flex items-center justify-center p-4 hidden backdrop-blur-sm">
+    <div id="login-panel" class="bg-slate-900 border border-slate-800 rounded-xl max-w-md w-full p-6 space-y-4 shadow-2xl">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+        <h3 id="login-title" class="text-sm font-semibold text-slate-100 flex items-center gap-2">
+          <svg class="w-4 h-4 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1"></path></svg>
+          登录并授权 Altero
+        </h3>
+        <button id="btn-close-login" type="button" aria-label="关闭" class="text-slate-500 hover:text-slate-300 text-lg leading-none">&times;</button>
+      </div>
+
+      <div class="space-y-3 text-xs">
+        <p class="text-slate-400 leading-relaxed">
+          请输入您的自托管 Altero 服务端地址。AltCanvas 将跳转至该节点进行标准 OAuth 2.0 PKCE 授权，前端不存储您的明文密码。
+        </p>
+        <div>
+          <label for="input-oauth-server" class="block text-slate-300 font-medium mb-1.5">Altero 服务端地址 (URL)</label>
+          <input id="input-oauth-server" type="url" inputmode="url" autocomplete="url" placeholder="https://altero.622276.xyz:8443" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:outline-none focus:border-blue-500 font-mono text-xs">
+          <p class="text-[11px] text-slate-500 mt-1">例如：<code>https://altero.622276.xyz:8443</code> 或 <code>http://localhost:8000</code></p>
+        </div>
+      </div>
+
+      <div class="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+        <button id="btn-cancel-login" class="px-3.5 py-1.5 bg-transparent hover:bg-slate-800 text-slate-400 rounded text-xs transition">取消</button>
+        <button id="btn-submit-login" class="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs font-medium transition shadow-lg shadow-blue-600/20 flex items-center gap-1.5">
+          <span>前往 Altero 授权</span>
+          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 5l7 7m0 0l-7 7m7-7H3"></path></svg>
+        </button>
+      </div>
+    </div>
+  </div>
+
   <!-- Settings & Credentials Modal -->
   <div id="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title" class="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4 hidden backdrop-blur-sm">
-    <div class="bg-slate-900 border border-slate-800 rounded-xl max-w-md w-full p-5 space-y-4 shadow-2xl">
+    <div id="settings-panel" class="bg-slate-900 border border-slate-800 rounded-xl max-w-md w-full p-5 space-y-4 shadow-2xl">
       <div class="flex items-center justify-between border-b border-slate-800 pb-3">
         <h3 id="settings-title" class="text-sm font-semibold text-slate-100 flex items-center gap-2">
           <svg class="w-4 h-4 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
@@ -188,9 +280,11 @@
   <script type="module">
     // --- State Management ---
     let config = {
-      api: localStorage.getItem('altcanvas_api') || 'https://altero.622276.xyz:8443',
-      userId: localStorage.getItem('altcanvas_user_id') || '1',
-      apiKey: sessionStorage.getItem('altcanvas_key') || ''
+      mode: 'bff',
+      api: localStorage.getItem('altcanvas_api') || '',
+      userId: localStorage.getItem('altcanvas_user_id') || '',
+      apiKey: sessionStorage.getItem('altcanvas_key') || '',
+      user: null
     };
 
     let allItems = [];
@@ -203,10 +297,133 @@
     let libraryController = null;
     let documentController = null;
     let openRequestId = 0;
+    const mobileMedia = window.matchMedia('(max-width: 820px)');
+    const mobilePanes = new Set(['library', 'reader', 'annotations']);
+
+    function setMobilePane(pane, { focus = false } = {}) {
+      if (!mobilePanes.has(pane)) return;
+      document.body.dataset.mobilePane = pane;
+      document.querySelectorAll('[data-mobile-target]').forEach(button => {
+        const selected = button.dataset.mobileTarget === pane;
+        button.setAttribute('aria-selected', String(selected));
+        button.tabIndex = selected ? 0 : -1;
+        if (selected && focus) button.focus();
+      });
+    }
 
     const escapeHTML = (value) => String(value ?? '').replace(/[&<>'"]/g, char => ({
       '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
     })[char]);
+
+    function getApiUrl(path) {
+      if (config.mode === 'bff') {
+        return `/api${path}`;
+      }
+      return `${config.api}${path}`;
+    }
+
+    function getHeaders(extra = {}) {
+      const headers = {
+        'Zotero-API-Version': '3',
+        'Accept': 'application/json',
+        ...extra
+      };
+      if (config.mode !== 'bff' && config.apiKey) {
+        headers['Zotero-API-Key'] = config.apiKey;
+      }
+      return headers;
+    }
+
+    let defaultServerUrl = 'http://localhost:8000';
+
+    function updateAuthUI(authenticated, user = null, alteroApi = null) {
+      const btnLogin = document.getElementById('btn-login');
+      const userBadge = document.getElementById('user-badge');
+      const userNameDisplay = document.getElementById('user-name-display');
+      const userServerTag = document.getElementById('user-server-tag');
+
+      if (authenticated && user) {
+        btnLogin.classList.add('hidden');
+        userBadge.classList.remove('hidden');
+        userNameDisplay.textContent = user.displayName || user.username || `User ${user.id}`;
+        if (alteroApi) {
+          const displayHost = alteroApi.replace(/^https?:\/\//, '');
+          userServerTag.textContent = `[${displayHost}]`;
+          userServerTag.title = `连接到 Altero 节点: ${alteroApi}`;
+        }
+      } else {
+        btnLogin.classList.remove('hidden');
+        userBadge.classList.add('hidden');
+      }
+    }
+
+    function openLoginModal() {
+      const serverInput = document.getElementById('input-oauth-server');
+      const saved = localStorage.getItem('altcanvas_altero_server') || defaultServerUrl;
+      serverInput.value = saved;
+      document.getElementById('login-modal').classList.remove('hidden');
+      requestAnimationFrame(() => serverInput.focus());
+    }
+
+    function closeLoginModal() {
+      document.getElementById('login-modal').classList.add('hidden');
+    }
+
+    function submitLogin() {
+      const serverInput = document.getElementById('input-oauth-server');
+      const raw = serverInput.value.trim();
+      let serverUrl;
+      try {
+        const u = new URL(raw || defaultServerUrl);
+        serverUrl = u.toString().replace(/\/$/, '');
+      } catch (e) {
+        showToast('请输入合法的 HTTP/HTTPS 地址 (如 https://altero.622276.xyz:8443)', 'error');
+        return;
+      }
+      localStorage.setItem('altcanvas_altero_server', serverUrl);
+      window.location.href = `/auth/login?altero_api=${encodeURIComponent(serverUrl)}`;
+    }
+
+    async function checkSession() {
+      try {
+        const res = await fetch('/auth/session', { cache: 'no-store' });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.defaultServer) {
+            defaultServerUrl = data.defaultServer;
+          }
+          if (data.authenticated && data.user) {
+            config.mode = 'bff';
+            config.userId = String(data.user.id);
+            config.user = data.user;
+            config.alteroApi = data.alteroApi;
+            updateAuthUI(true, data.user, data.alteroApi);
+            return true;
+          }
+        }
+      } catch (err) {
+        console.warn('Session check error:', err);
+      }
+
+      updateAuthUI(false);
+
+      // Dev fallback mode if manual credentials are in storage
+      if (config.api && config.userId && config.apiKey) {
+        config.mode = 'direct';
+        return true;
+      }
+      return false;
+    }
+
+    async function handleLogout() {
+      try {
+        await fetch('/auth/logout', { method: 'POST' });
+      } catch (e) {
+        console.warn('Logout notice failed:', e);
+      }
+      updateAuthUI(false);
+      window.location.reload();
+    }
 
     function normalizeApi(value) {
       const url = new URL(value);
@@ -222,12 +439,16 @@
       const normalizedApi = normalizeApi(api);
       if (!/^[A-Za-z0-9_-]+$/.test(userId)) throw new Error('User ID 格式无效');
       if (!key) throw new Error('请输入 Zotero API Key');
-      return { api: normalizedApi, userId, apiKey: key };
+      return { api: normalizedApi, userId, apiKey: key, mode: 'direct' };
     }
 
     function errorMessage(error) {
       if (error?.name === 'AbortError') return '请求已取消';
-      return error instanceof Error ? error.message : String(error);
+      if (error instanceof Error) return error.message;
+      if (typeof error === 'object' && error !== null) {
+        return error.message || error.detail || JSON.stringify(error);
+      }
+      return String(error);
     }
 
     function setTestOutput(lines, success) {
@@ -241,14 +462,6 @@
         out.appendChild(row);
       }
       out.dataset.status = success ? 'success' : 'error';
-    }
-
-    function getHeaders() {
-      return {
-        'Zotero-API-Key': config.apiKey,
-        'Zotero-API-Version': '3',
-        'Accept': 'application/json'
-      };
     }
 
     // --- Toast UI ---
@@ -319,7 +532,14 @@
     }
 
     document.getElementById('btn-open-settings').onclick = openSettingsModal;
-    document.getElementById('connection-status-pill').onclick = openSettingsModal;
+    document.getElementById('btn-login').onclick = openLoginModal;
+    document.getElementById('btn-close-login').onclick = closeLoginModal;
+    document.getElementById('btn-cancel-login').onclick = closeLoginModal;
+    document.getElementById('btn-submit-login').onclick = submitLogin;
+    document.getElementById('input-oauth-server').onkeydown = (e) => {
+      if (e.key === 'Enter') submitLogin();
+    };
+    document.getElementById('btn-logout').onclick = handleLogout;
     document.getElementById('btn-close-settings').onclick = closeSettingsModal;
     document.getElementById('btn-cancel-settings').onclick = closeSettingsModal;
     document.getElementById('btn-toggle-key').onclick = () => {
@@ -355,27 +575,18 @@
 
       closeSettingsModal();
       showToast('配置已保存，正在重新加载文库...', 'success');
-      updateStatusPill(true);
       loadCollectionsAndLibrary();
     };
 
-    function updateStatusPill(connected, label = null) {
-      const dot = document.getElementById('status-dot');
-      const labelElem = document.getElementById('endpoint-label');
-      if (connected) {
-        dot.className = 'w-2 h-2 rounded-full bg-emerald-500 animate-pulse';
-        labelElem.textContent = label || config.api.replace(/^https?:\/\//, '');
-      } else {
-        dot.className = 'w-2 h-2 rounded-full bg-rose-500';
-        labelElem.textContent = '未配置或连接失败';
-      }
-    }
-
     // --- Collections & Library Loading ---
     async function loadCollectionsAndLibrary() {
-      if (!config.apiKey) {
-        updateStatusPill(false);
-        openSettingsModal();
+      if (!config.userId) {
+        document.getElementById('items-container').innerHTML = `
+          <div class="text-center text-slate-500 py-12 px-4 space-y-3">
+            <p class="text-xs">未检测到有效登录会话</p>
+            <button id="btn-empty-login" type="button" class="inline-block px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs transition shadow-sm">连接并登录 Altero</button>
+          </div>`;
+        document.getElementById('btn-empty-login')?.addEventListener('click', openLoginModal);
         return;
       }
 
@@ -385,24 +596,35 @@
       libraryController = new AbortController();
 
       try {
-        // 1. Fetch Collections
         const userId = encodeURIComponent(config.userId);
-        const colRes = await fetch(`${config.api}/users/${userId}/collections`, { headers: getHeaders(), signal: libraryController.signal });
+        const colUrl = getApiUrl(`/users/${userId}/collections`);
+        const itemUrl = getApiUrl(`/users/${userId}/items/top?limit=100`);
+
+        const [colRes, itemsRes] = await Promise.all([
+          fetch(colUrl, { headers: getHeaders(), signal: libraryController.signal }),
+          fetch(itemUrl, { headers: getHeaders(), signal: libraryController.signal })
+        ]);
+
+        if (colRes.status === 401 || itemsRes.status === 401) {
+          updateAuthUI(false);
+          container.innerHTML = `
+            <div class="text-center text-slate-500 py-12 px-4 space-y-3">
+              <p class="text-xs text-rose-400">登录会话已过期</p>
+              <a href="/auth/login" class="inline-block px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs transition">重新登录</a>
+            </div>`;
+          return;
+        }
+
         if (colRes.ok) {
           const collections = await colRes.json();
           renderCollections(collections);
         }
 
-        // 2. Fetch Top-level Items
-        const itemsRes = await fetch(`${config.api}/users/${userId}/items/top?limit=100`, { headers: getHeaders(), signal: libraryController.signal });
         if (!itemsRes.ok) throw new Error(`HTTP ${itemsRes.status}: 未能加载条目`);
         allItems = await itemsRes.json();
-
-        updateStatusPill(true);
         renderItems();
       } catch (err) {
         if (err?.name === 'AbortError') return;
-        updateStatusPill(false);
         container.innerHTML = `
           <div class="p-4 text-center space-y-2">
             <div class="text-rose-400 text-xs">加载失败: ${escapeHTML(errorMessage(err))}</div>
@@ -462,8 +684,9 @@
         const isSelected = currentItem?.key === item.key;
         const isPdfAttachment = item.data?.itemType === 'attachment' && item.data?.contentType === 'application/pdf';
 
-        const div = document.createElement('div');
-        div.className = `p-2.5 rounded cursor-pointer text-xs transition border ${
+        const div = document.createElement('button');
+        div.type = 'button';
+        div.className = `w-full text-left p-2.5 rounded cursor-pointer text-xs transition border ${
           isSelected
             ? 'bg-blue-950/60 border-blue-600/80 text-blue-100 shadow-md'
             : 'bg-slate-950/40 hover:bg-slate-900 border-slate-900 hover:border-slate-800 text-slate-300'
@@ -496,6 +719,7 @@
       const { signal } = documentController;
       currentItem = item;
       renderItems(); // Update active selection state
+      if (mobileMedia.matches) setMobilePane('reader');
 
       document.getElementById('current-doc-title').textContent = item.data?.title || item.data?.filename || item.key;
 
@@ -512,7 +736,8 @@
           pdfAttachment = item;
         } else {
           // Parent item: query children for PDF attachment
-          const res = await fetch(`${config.api}/users/${encodeURIComponent(config.userId)}/items/${encodeURIComponent(item.key)}/children`, { headers: getHeaders(), signal });
+          const childUrl = getApiUrl(`/users/${encodeURIComponent(config.userId)}/items/${encodeURIComponent(item.key)}/children`);
+          const res = await fetch(childUrl, { headers: getHeaders(), signal });
           if (!res.ok) throw new Error('未能获取子附件');
           const children = await res.json();
           if (requestId !== openRequestId) return;
@@ -529,7 +754,8 @@
         loadingText.textContent = '正在加载已有标注...';
 
         // Fetch existing annotations for this attachment
-        const annRes = await fetch(`${config.api}/users/${encodeURIComponent(config.userId)}/items/${encodeURIComponent(pdfAttachment.key)}/children`, { headers: getHeaders(), signal });
+        const annUrl = getApiUrl(`/users/${encodeURIComponent(config.userId)}/items/${encodeURIComponent(pdfAttachment.key)}/children`);
+        const annRes = await fetch(annUrl, { headers: getHeaders(), signal });
         const annChildren = annRes.ok ? await annRes.json() : [];
         if (requestId !== openRequestId) return;
         const rawAnnotations = annChildren.filter(c => c.data?.itemType === 'annotation');
@@ -577,6 +803,10 @@
 
     function ensureReaderWindow(signal) {
       const frame = document.getElementById('reader-frame');
+      currentReaderInstance = null;
+      if (frame.dataset.loaded === 'true' && frame.contentWindow?.createReader) {
+        return Promise.resolve(frame.contentWindow);
+      }
       frame.dataset.loaded = 'false';
       return new Promise((resolve, reject) => {
         const cleanup = () => {
@@ -600,16 +830,25 @@
         frame.addEventListener('load', handleLoad, { once: true });
         frame.addEventListener('error', handleError, { once: true });
         signal.addEventListener('abort', handleAbort, { once: true });
-        frame.src = frame.dataset.src;
+        if (!frame.src || frame.src === 'about:blank' || !frame.src.includes('reader.html')) {
+          frame.src = frame.dataset.src;
+        }
       });
     }
 
     async function initReaderEngine(attachmentKey, annotations, requestId, signal) {
       const readerWindowPromise = ensureReaderWindow(signal);
-      const fileUrl = `${config.api}/users/${encodeURIComponent(config.userId)}/items/${encodeURIComponent(attachmentKey)}/file/content`;
-      document.getElementById('reader-loading-text').textContent = '正在安全下载 PDF...';
+      
+      let fileUrl;
+      if (config.mode === 'bff') {
+        fileUrl = `/files/users/${encodeURIComponent(config.userId)}/items/${encodeURIComponent(attachmentKey)}`;
+      } else {
+        fileUrl = `${config.api}/users/${encodeURIComponent(config.userId)}/items/${encodeURIComponent(attachmentKey)}/file/content`;
+      }
+
+      document.getElementById('reader-loading-text').textContent = '正在安全流式加载 PDF...';
       const response = await fetch(fileUrl, { headers: getHeaders(), signal });
-      if (!response.ok) throw new Error(`PDF 下载失败 (HTTP ${response.status})`);
+      if (!response.ok) throw new Error(`PDF 加载失败 (HTTP ${response.status})`);
       const contentType = response.headers.get('content-type') || '';
       if (contentType && !contentType.includes('pdf') && !contentType.includes('octet-stream')) {
         throw new Error(`附件响应类型异常: ${contentType}`);
@@ -631,11 +870,42 @@
         type: 'pdf',
         data: { buf: data },
         annotations: annotations,
-        sidebarWidth: 260,
+        sidebarWidth: mobileMedia.matches ? 200 : 260,
+        sidebarOpen: false, // 手机及桌面初始均默认折叠侧边栏，将全部宽度留给 PDF 与标注工具栏
         sidebarView: 'annotations',
         showAnnotations: true,
         onSaveAnnotations: handleSaveAnnotations,
-        onDeleteAnnotations: handleDeleteAnnotations
+        onDeleteAnnotations: handleDeleteAnnotations,
+        onChangeViewState: () => {},
+        onChangeSidebarWidth: () => {},
+        onChangeSidebarView: () => {},
+        onToggleSidebar: () => {},
+        onOpenLink: (url) => { if (url) window.open(url, '_blank'); },
+        onOpenContextMenu: () => {},
+        onAddToNote: () => {},
+        onOpenTagsPopup: () => {},
+        onCopyImage: () => {},
+        onSaveImageAs: () => {},
+        onConfirm: () => true,
+        onRotatePages: () => {},
+        onDeletePages: () => {},
+        onToggleContextPane: () => {},
+        onToolbarShiftTab: () => {},
+        onIframeTab: () => {},
+        onBringReaderToFront: () => {},
+        onTextSelectionAnnotationModeChange: () => {},
+        onSaveCustomThemes: () => {},
+        onSetLightTheme: () => {},
+        onSetDarkTheme: () => {},
+        onSetDataTransferAnnotations: () => {},
+        onSetZoom: () => {},
+        onSetReadAloudVoice: () => {},
+        onSetReadAloudStatus: () => {},
+        onPurchaseReadAloudCredits: () => {},
+        onLogIn: () => {},
+        onOpenReadAloudFirstRunPopup: () => {},
+        onSetPopupPosition: () => {},
+        onChangeUndoHistory: () => {}
       });
 
       if (requestId !== openRequestId) return;
@@ -676,7 +946,8 @@
       // 1. Create New Annotations
       if (toCreate.length > 0) {
         try {
-          const res = await fetch(`${config.api}/users/${encodeURIComponent(config.userId)}/items`, {
+          const createUrl = getApiUrl(`/users/${encodeURIComponent(config.userId)}/items`);
+          const res = await fetch(createUrl, {
             method: 'POST',
             headers: { ...getHeaders(), 'Content-Type': 'application/json' },
             body: JSON.stringify(toCreate.map(c => c.data))
@@ -697,7 +968,8 @@
       // 2. Update Existing Annotations
       for (const item of toUpdate) {
         try {
-          const res = await fetch(`${config.api}/users/${encodeURIComponent(config.userId)}/items/${encodeURIComponent(item.key)}`, {
+          const updateUrl = getApiUrl(`/users/${encodeURIComponent(config.userId)}/items/${encodeURIComponent(item.key)}`);
+          const res = await fetch(updateUrl, {
             method: 'PATCH',
             headers: {
               ...getHeaders(),
@@ -727,7 +999,8 @@
 
       try {
         const keysParam = encodeURIComponent(deletedIds.join(','));
-        const res = await fetch(`${config.api}/users/${encodeURIComponent(config.userId)}/items?itemKey=${keysParam}`, {
+        const deleteUrl = getApiUrl(`/users/${encodeURIComponent(config.userId)}/items?itemKey=${keysParam}`);
+        const res = await fetch(deleteUrl, {
           method: 'DELETE',
           headers: getHeaders()
         });
@@ -833,6 +1106,7 @@
     }
 
     function jumpToAnnotation(annotationId, pageIndex) {
+      if (mobileMedia.matches) setMobilePane('reader');
       const frame = document.getElementById('reader-frame');
       const readerWin = frame.contentWindow;
 
@@ -873,18 +1147,47 @@
     document.getElementById('btn-refresh-cards').onclick = renderAnnotationCards;
     document.getElementById('btn-refresh').onclick = loadCollectionsAndLibrary;
 
+    document.querySelectorAll('[data-mobile-target]').forEach(button => {
+      button.onclick = () => setMobilePane(button.dataset.mobileTarget);
+      button.onkeydown = event => {
+        if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+        event.preventDefault();
+        const panes = ['library', 'reader', 'annotations'];
+        const currentIndex = panes.indexOf(button.dataset.mobileTarget);
+        const direction = event.key === 'ArrowRight' ? 1 : -1;
+        const nextPane = panes[(currentIndex + direction + panes.length) % panes.length];
+        setMobilePane(nextPane, { focus: true });
+      };
+    });
+    mobileMedia.addEventListener('change', event => {
+      if (event.matches) setMobilePane(currentItem ? 'reader' : 'library');
+    });
+
     document.getElementById('settings-modal').addEventListener('click', event => {
       if (event.target === event.currentTarget) closeSettingsModal();
     });
+    document.getElementById('login-modal').addEventListener('click', event => {
+      if (event.target === event.currentTarget) closeLoginModal();
+    });
     document.addEventListener('keydown', event => {
-      if (event.key === 'Escape' && !document.getElementById('settings-modal').classList.contains('hidden')) {
-        closeSettingsModal();
-        document.getElementById('btn-open-settings').focus();
+      if (event.key === 'Escape') {
+        if (!document.getElementById('login-modal').classList.contains('hidden')) {
+          closeLoginModal();
+          document.getElementById('btn-login').focus();
+        } else if (!document.getElementById('settings-modal').classList.contains('hidden')) {
+          closeSettingsModal();
+          document.getElementById('btn-open-settings').focus();
+        }
       }
     });
 
     // --- Init App on Load ---
-    loadCollectionsAndLibrary();
+    (async () => {
+      await checkSession();
+      if (config.userId) {
+        loadCollectionsAndLibrary();
+      }
+    })();
   </script>
 </body>
 </html>

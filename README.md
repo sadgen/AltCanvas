@@ -13,6 +13,7 @@ The next goal is to validate the web integration before building Canvas or AI.
 - `vendor/reader` — upstream Zotero Reader source
 - `docs/m0-validation.md` — integration checkpoints and test matrix
 - `docs/m1-api-adaptation.md` — Web Library endpoint, auth, CORS, and file contract
+- `docs/altero-auth-bff-design.md` — production login, OAuth/OIDC, BFF, token, and privacy design
 - `config/altero.web-library.example.json` — runtime-injected Web Library configuration
 - `scripts/probe-altero.mjs` — credential-free-in-repo API compatibility probe
 
@@ -53,3 +54,11 @@ After adding or changing Tailwind utility classes, rebuild the checked-in CSS:
 ```sh
 npx --yes tailwindcss@3.4.17 -i styles/input.css -o styles/altcanvas.css --minify --content index.html
 ```
+
+## Mobile workspace
+
+At widths up to 820px, AltCanvas uses a dedicated single-pane workspace with
+bottom navigation for the library, reader, and annotation cards. Selecting a
+library item opens the reader automatically. The embedded Reader starts with
+its own sidebar closed on mobile to preserve document width; annotation cards
+remain available from the bottom navigation.
