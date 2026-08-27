@@ -57,6 +57,39 @@ export function generateCodeChallenge(verifier) {
 }
 
 /**
+ * Check if a hostname/IP is private/internal (SSRF protection)
+ */
+export function isPrivateHost(hostname) {
+  if (!hostname) return true;
+  if (process.env.ALLOW_PRIVATE_HOSTS === 'true') return false;
+
+  // Remove IPv6 square brackets and normalize
+  const h = hostname.replace(/^\[|\]$/g, '').toLowerCase();
+
+  // Localhost and all-zeros
+  if (['localhost', '127.0.0.1', '::1', '::', '0.0.0.0'].includes(h)) return true;
+  if (h.endsWith('.local') || h.endsWith('.internal') || h.endsWith('.lan')) return true;
+
+  // IPv6 Link-Local (fe80::/10), Unique Local Address (fc00::/7, fd00::/8), and IPv4-mapped (::ffff:)
+  if (h.startsWith('fe80:') || h.startsWith('fc') || h.startsWith('fd') || h.startsWith('::ffff:')) {
+    return true;
+  }
+
+  // IPv4 private ranges
+  const ipMatch = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+  if (ipMatch) {
+    const [, a, b] = ipMatch.map(Number);
+    if (a === 10) return true; // 10.0.0.0/8
+    if (a === 127) return true; // 127.0.0.0/8
+    if (a === 169 && b === 254) return true; // 169.254.0.0/16 Link-Local
+    if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12
+    if (a === 192 && b === 168) return true; // 192.168.0.0/16
+    if (a === 0) return true; // 0.0.0.0/8
+  }
+  return false;
+}
+
+/**
  * Sanitize and validate Altero server URL
  */
 export function sanitizeAlteroUrl(raw) {
@@ -64,6 +97,10 @@ export function sanitizeAlteroUrl(raw) {
   try {
     const u = new URL(raw.trim());
     if (!['http:', 'https:'].includes(u.protocol) || u.username || u.password) {
+      return DEFAULT_ALTERO_API;
+    }
+    // Block SSRF to local/private network
+    if (isPrivateHost(u.hostname)) {
       return DEFAULT_ALTERO_API;
     }
     u.search = '';
@@ -229,7 +266,7 @@ export async function handleSession(req, res) {
 
   if (!session) {
     res.writeHead(200);
-    res.end(JSON.stringify({ authenticated: false, defaultServer: DEFAULT_ALTERO_API }));
+    res.end(JSON.stringify({ authenticated: false }));
     return;
   }
 
