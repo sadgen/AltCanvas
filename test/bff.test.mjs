@@ -69,4 +69,12 @@ errWithCode.cause = { code: 'DEPTH_ZERO_SELF_SIGNED_CERT' };
 assert.equal(formatFetchError(errWithCode), 'fetch failed (DEPTH_ZERO_SELF_SIGNED_CERT)');
 console.log('✅ formatFetchError diagnostics test passed');
 
+// 5. Test SSRF Protection in sanitizeAlteroUrl
+import { sanitizeAlteroUrl } from '../server/auth.mjs';
+
+assert.equal(sanitizeAlteroUrl('http://192.168.5.1'), process.env.ALTERO_API || 'http://localhost:8000');
+assert.equal(sanitizeAlteroUrl('http://10.0.0.1:9000'), process.env.ALTERO_API || 'http://localhost:8000');
+assert.equal(sanitizeAlteroUrl('https://my-valid-altero.com/'), 'https://my-valid-altero.com');
+console.log('✅ SSRF Protection & URL sanitization passed');
+
 console.log('🎉 All AltCanvas BFF Unit Tests Passed Successfully!');

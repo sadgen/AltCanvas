@@ -334,8 +334,6 @@
       return headers;
     }
 
-    let defaultServerUrl = 'http://localhost:8000';
-
     function updateAuthUI(authenticated, user = null, alteroApi = null) {
       const btnLogin = document.getElementById('btn-login');
       const userBadge = document.getElementById('user-badge');
@@ -359,7 +357,7 @@
 
     function openLoginModal() {
       const serverInput = document.getElementById('input-oauth-server');
-      const saved = localStorage.getItem('altcanvas_altero_server') || defaultServerUrl;
+      const saved = localStorage.getItem('altcanvas_altero_server') || '';
       serverInput.value = saved;
       document.getElementById('login-modal').classList.remove('hidden');
       requestAnimationFrame(() => serverInput.focus());
@@ -372,12 +370,17 @@
     function submitLogin() {
       const serverInput = document.getElementById('input-oauth-server');
       const raw = serverInput.value.trim();
+      if (!raw) {
+        showToast('请输入你的 Altero 服务端地址 (如 https://altero.example.com)', 'error');
+        serverInput.focus();
+        return;
+      }
       let serverUrl;
       try {
-        const u = new URL(raw || defaultServerUrl);
+        const u = new URL(raw);
         serverUrl = u.toString().replace(/\/$/, '');
       } catch (e) {
-        showToast('请输入合法的 HTTP/HTTPS 地址 (如 https://altero.example.com 或 http://localhost:8000)', 'error');
+        showToast('请输入合法的 HTTP/HTTPS 地址 (如 https://altero.example.com)', 'error');
         return;
       }
       localStorage.setItem('altcanvas_altero_server', serverUrl);
@@ -389,9 +392,6 @@
         const res = await fetch('/auth/session', { cache: 'no-store' });
         if (res.ok) {
           const data = await res.json();
-          if (data.defaultServer) {
-            defaultServerUrl = data.defaultServer;
-          }
           if (data.authenticated && data.user) {
             config.mode = 'bff';
             config.userId = String(data.user.id);
@@ -406,7 +406,8 @@
       }
 
       updateAuthUI(false);
-
+      return false;
+    }
       // Dev fallback mode if manual credentials are in storage
       if (config.api && config.userId && config.apiKey) {
         config.mode = 'direct';

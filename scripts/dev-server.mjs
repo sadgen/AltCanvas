@@ -3,14 +3,10 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-import { handleLogin, handleCallback, handleSession, handleLogout } from '../server/auth.mjs';
-import { handleApiProxy } from '../server/proxy-api.mjs';
-import { handleFilesProxy } from '../server/proxy-files.mjs';
-
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, '..');
 
-// Load .env configuration if present
+// Load .env configuration before importing server modules
 const envPath = path.resolve(root, '.env');
 if (fs.existsSync(envPath)) {
   try {
@@ -35,10 +31,13 @@ if (fs.existsSync(envPath)) {
   }
 }
 
-// Allow self-signed TLS certificates for self-hosted Altero instances unless explicitly configured
 if (process.env.NODE_TLS_REJECT_UNAUTHORIZED === undefined) {
   process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 }
+
+const { handleLogin, handleCallback, handleSession, handleLogout } = await import('../server/auth.mjs');
+const { handleApiProxy } = await import('../server/proxy-api.mjs');
+const { handleFilesProxy } = await import('../server/proxy-files.mjs');
 
 const mimeTypes = {
   '.html': 'text/html; charset=utf-8',
