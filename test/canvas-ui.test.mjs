@@ -67,6 +67,8 @@ assert.match(html, /canvasFetch\('\/ai\/config'\)/);
 assert.match(html, /canvasFetch\('\/ai\/test'/);
 assert.match(html, /\/workspaces\/\$\{canvasWorkspace\.id\}\/boards\/import/);
 assert.match(html, /\/nodes\/\$\{node\.id\}\/restore/);
+assert.match(html, /async function restoreCanvasAnnotationToPdf\(/,
+  'restore button must be wired to the annotation restore handler');
 assert.match(html, /Ctrl\+Z 撤销/);
 assert.match(html, /已连线 · Ctrl\+Z 撤销/);
 assert.doesNotMatch(html, /showToast\('已从画板移除/);

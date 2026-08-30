@@ -2788,6 +2788,84 @@
       await deleteCanvasNodes([node]);
     }
 
+    // Rebuild a PDF annotation from the card's snapshot after the original was
+    // deleted in the library, then relink the card to the freshly created item
+    // via the canvas source PATCH endpoint (provenance: node.source_relinked).
+    const canvasSourceRestoreInFlight = new Set();
+
+    async function restoreCanvasAnnotationToPdf(node, sourceRef) {
+      if (canvasSourceRestoreInFlight.has(node.id)) return;
+      if (!sourceRef?.attachmentKey || !sourceRef?.position || typeof sourceRef.position !== 'object') {
+        showToast('该卡片缺少批注快照，无法恢复', 'error');
+        return;
+      }
+      if (!currentAttachment || !currentReaderInstance || !isSameLibrary(currentDocumentLibrary, sourceRef)
+        || currentAttachment.key !== sourceRef.attachmentKey) {
+        showToast('请先通过卡片标题的 ↗ 打开批注所在的 PDF，再执行恢复', 'info');
+        return;
+      }
+
+      canvasSourceRestoreInFlight.add(node.id);
+      setCanvasSaveState('恢复中…');
+      try {
+        const position = sourceRef.position;
+        const pageIndex = getAnnotationPageIndex(sourceRef);
+        const pageLabel = sourceRef.pageLabel || String(pageIndex + 1);
+        const text = cleanAnnotationText(sourceRef.quoteSnapshot || node.body || '');
+        const annotation = currentReaderInstance._annotationManager?.addAnnotation({
+          type: 'highlight',
+          color: node.color || '#ffd400',
+          position,
+          sortIndex: `${String(pageIndex).padStart(5, '0')}|000000|00000`,
+          text,
+          pageLabel,
+          comment: ''
+        });
+        if (!annotation) throw new Error('阅读器当前为只读状态，无法创建批注');
+
+        const deadline = Date.now() + 15000;
+        let serverKey = clientAnnotationIdMap.get(annotation.id);
+        while (!serverKey && Date.now() < deadline) {
+          await new Promise(resolve => setTimeout(resolve, 150));
+          serverKey = clientAnnotationIdMap.get(annotation.id);
+        }
+        if (!serverKey) throw new Error('批注保存超时，未能重新绑定卡片');
+
+        const saved = currentAnnotationsMap.get(serverKey);
+        const resource = await canvasFetch(`/nodes/${node.id}/source`, {
+          method: 'PATCH',
+          headers: { 'If-Match': `W/"${node.version}"` },
+          body: {
+            source: {
+              libraryType: sourceRef.libraryType || 'user',
+              libraryId: sourceRef.libraryId,
+              itemKey: sourceRef.itemKey || null,
+              attachmentKey: sourceRef.attachmentKey,
+              annotationKey: serverKey,
+              annotationVersion: saved?.version ?? null,
+              pageLabel,
+              position,
+              quoteSnapshot: sourceRef.quoteSnapshot ?? null
+            }
+          }
+        });
+        if (resource?.node) canvasNodes.set(resource.node.id, resource.node);
+        if (resource?.source && resource.node?.sourceRefId) {
+          canvasSources.set(resource.node.sourceRefId, resource.source);
+        }
+        forgetDeletedAnnotation(sourceRef);
+        renderCanvas();
+        setCanvasSaveState('已保存', 'ok');
+        showToast('已用新批注恢复到 PDF 并重新绑定卡片', 'success');
+      } catch (err) {
+        reportApplicationError('canvas.restore-annotation', err);
+        setCanvasSaveState('恢复失败', 'error');
+        showToast(`恢复批注失败: ${errorMessage(err)}`, 'error');
+      } finally {
+        canvasSourceRestoreInFlight.delete(node.id);
+      }
+    }
+
     async function handleCanvasConnectSelection(nodeId) {
       const button = document.getElementById('btn-canvas-connect');
       if (button.getAttribute('aria-pressed') !== 'true') return;
