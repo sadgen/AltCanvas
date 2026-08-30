@@ -26,6 +26,32 @@ jobs:
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            vendor/reader/package-lock.json
+            vendor/web-library/package-lock.json
+
+      - name: Run AltCanvas tests
+        run: npm test
+
+      - name: Build Zotero Reader assets
+        working-directory: vendor/reader
+        env:
+          NODE_OPTIONS: --openssl-legacy-provider
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build Zotero Web Library assets
+        working-directory: vendor/web-library
+        run: |
+          npm ci
+          npm run build
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 

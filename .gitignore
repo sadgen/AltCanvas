@@ -3,8 +3,10 @@ dist/
 build/
 .DS_Store
 *.log
+/.debug/
 .env
 .env.*
 !.env.example
 config/*.local.json
 config/altero.web-library.json
+/data/

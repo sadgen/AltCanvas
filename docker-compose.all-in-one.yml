@@ -3,15 +3,37 @@ services:
     image: ghcr.io/sadgen/altcanvas:latest
     container_name: altcanvas
     restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
     ports:
       - "8088:8088"
     environment:
       - PORT=8088
       - HOST=0.0.0.0
-      - ALTERO_API=http://altero:8000
+      - PUBLIC_ORIGIN=${PUBLIC_ORIGIN:-http://localhost:8088}
+      # *.localhost resolves to loopback in browsers; the network alias below
+      # resolves the same hostname to the Altero container for BFF requests.
+      - ALTERO_API=http://altero.localhost:8000
       - OAUTH_CLIENT_ID=altcanvas
+      - SESSION_SECRET=${SESSION_SECRET:?set SESSION_SECRET}
+      - MAX_CANVAS_BODY_BYTES=${MAX_CANVAS_BODY_BYTES:-524288}
+      - CANVAS_DB_PATH=/app/data/altcanvas-canvas.sqlite
+      - ALLOW_PRIVATE_HOSTS=true
+      - ALLOW_DYNAMIC_ALTERO=false
+      - ALLOW_INSECURE_OAUTH=true
+      - AI_BASE_URL=${AI_BASE_URL:-}
+      - AI_MODEL=${AI_MODEL:-}
+      - AI_API_KEY=${AI_API_KEY:-}
+      - ALLOW_PRIVATE_AI_HOSTS=${ALLOW_PRIVATE_AI_HOSTS:-false}
+      - ALLOW_INSECURE_AI=${ALLOW_INSECURE_AI:-false}
     volumes:
-      - ./data/altcanvas:/app/data
+      - ${ALTCANVAS_DATA_DIR:-./data/altcanvas}:/app/data
     depends_on:
       - altero
 
@@ -22,13 +44,17 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - ALTERO_DATABASE_URL=postgresql+asyncpg://altero:secretpassword@db:5432/altero
+      - ALTERO_DATABASE_URL=postgresql+asyncpg://altero:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@db:5432/altero
       - ALTERO_STORAGE_DIR=/data/storage
-      - ALTERO_SECRET_KEY=change-this-to-a-secure-random-string-in-production
+      - ALTERO_SECRET_KEY=${ALTERO_SECRET_KEY:?set ALTERO_SECRET_KEY}
     volumes:
       - ./data/altero:/data
     depends_on:
       - db
+    networks:
+      default:
+        aliases:
+          - altero.localhost
 
   db:
     image: postgres:16-alpine
@@ -36,7 +62,7 @@ services:
     restart: unless-stopped
     environment:
       - POSTGRES_USER=altero
-      - POSTGRES_PASSWORD=secretpassword
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
       - POSTGRES_DB=altero
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
