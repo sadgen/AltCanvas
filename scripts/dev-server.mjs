@@ -1,10 +1,42 @@
 import http from 'http';
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, '..');
+
+function contentHash(value) {
+  return `'sha256-${crypto.createHash('sha256').update(value).digest('base64')}'`;
+}
+
+function buildIndexContentSecurityPolicy() {
+  const html = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
+  const scripts = [...html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/gi)]
+    .map(match => contentHash(match[1]));
+  const styles = [...html.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/gi)]
+    .map(match => contentHash(match[1]));
+  return [
+    "default-src 'self'",
+    `script-src 'self' ${scripts.join(' ')}`,
+    "style-src 'self'",
+    `style-src-elem 'self' ${styles.join(' ')}`,
+    // Canvas coordinates, sizes, colors, and viewport transforms are dynamic.
+    // Script execution remains hash-restricted; only style attributes need inline values.
+    "style-src-attr 'unsafe-inline'",
+    "img-src 'self' data: blob:",
+    "font-src 'self' data:",
+    "connect-src 'self'",
+    "frame-src 'self'",
+    "worker-src 'self' blob:",
+    "object-src 'none'",
+    "base-uri 'none'",
+    "frame-ancestors 'none'"
+  ].join('; ');
+}
+
+const indexContentSecurityPolicy = buildIndexContentSecurityPolicy();
 
 // Load .env configuration before importing server modules
 const envPath = path.resolve(root, '.env');
@@ -31,13 +63,32 @@ if (fs.existsSync(envPath)) {
   }
 }
 
-if (process.env.NODE_TLS_REJECT_UNAUTHORIZED === undefined) {
-  process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+if (process.env.NODE_ENV === 'production') {
+  if (!process.env.SESSION_SECRET || process.env.SESSION_SECRET.length < 32) {
+    throw new Error('SESSION_SECRET (at least 32 characters) is required in production');
+  }
+  if (!process.env.PUBLIC_ORIGIN) {
+    throw new Error('PUBLIC_ORIGIN is required in production');
+  }
+  if (!process.env.PUBLIC_ORIGIN.startsWith('https://') && process.env.ALLOW_INSECURE_OAUTH !== 'true') {
+    throw new Error('PUBLIC_ORIGIN must use HTTPS in production');
+  }
 }
+
+const {
+  devLoggingEnabled,
+  handleBrowserLog,
+  handleDebugConfig,
+  installDevLogging,
+  writeDevLog,
+} = await import('../server/dev-logger.mjs');
+installDevLogging();
 
 const { handleLogin, handleCallback, handleSession, handleLogout } = await import('../server/auth.mjs');
 const { handleApiProxy } = await import('../server/proxy-api.mjs');
 const { handleFilesProxy } = await import('../server/proxy-files.mjs');
+const { handleCanvasApi } = await import('../server/canvas-api.mjs');
+const { consumeRateLimit, getRequestOrigin, isSameOriginRequest } = await import('../server/security.mjs');
 
 const mimeTypes = {
   '.html': 'text/html; charset=utf-8',
@@ -104,16 +155,63 @@ function resolveFile(pathname) {
 const server = http.createServer(async (req, res) => {
   let url;
   try {
-    const proto = req.headers['x-forwarded-proto'] || (req.socket?.encrypted ? 'https' : 'http');
-    const host = req.headers['x-forwarded-host'] || req.headers.host || 'localhost:8088';
-    url = new URL(req.url, `${proto}://${host}`);
+    const requestOrigin = getRequestOrigin(req);
+    url = new URL(req.url, requestOrigin);
   } catch {
     send(res, 400, '400 Bad Request');
     return;
   }
 
-  const selfOrigin = `${url.protocol}//${url.host}`;
-  const pathname = decodeURIComponent(url.pathname);
+  const selfOrigin = url.origin;
+  let pathname;
+  try {
+    pathname = decodeURIComponent(url.pathname);
+  } catch {
+    send(res, 400, '400 Bad Request');
+    return;
+  }
+
+  const isUnsafe = !['GET', 'HEAD', 'OPTIONS'].includes(req.method);
+  const isCookieAuthenticatedRoute = pathname === '/auth/logout' || pathname === '/debug/browser-log'
+    || pathname.startsWith('/api/') || pathname.startsWith('/canvas/');
+  if (isUnsafe && isCookieAuthenticatedRoute && !isSameOriginRequest(req, selfOrigin)) {
+    send(res, 403, '403 Forbidden: cross-origin request rejected');
+    return;
+  }
+
+  if (pathname === '/auth/login' || pathname === '/auth/callback') {
+    const rate = consumeRateLimit(req, 'auth', { limit: 30, windowMs: 60 * 1000 });
+    if (!rate.allowed) {
+      send(res, 429, '429 Too Many Requests', { 'Retry-After': String(rate.retryAfter) });
+      return;
+    }
+  }
+  if (pathname.startsWith('/api/') || pathname.startsWith('/files/')) {
+    const rate = consumeRateLimit(req, 'proxy', { limit: 600, windowMs: 60 * 1000 });
+    if (!rate.allowed) {
+      send(res, 429, '429 Too Many Requests', { 'Retry-After': String(rate.retryAfter) });
+      return;
+    }
+  }
+  if (pathname.startsWith('/canvas/')) {
+    const rate = consumeRateLimit(req, 'canvas', { limit: 300, windowMs: 60 * 1000 });
+    if (!rate.allowed) {
+      send(res, 429, '429 Too Many Requests', { 'Retry-After': String(rate.retryAfter) });
+      return;
+    }
+  }
+
+  if (pathname === '/debug/config' && ['GET', 'HEAD'].includes(req.method)) {
+    return handleDebugConfig(req, res);
+  }
+  if (pathname === '/debug/browser-log' && req.method === 'POST') {
+    const rate = consumeRateLimit(req, 'browser-debug', { limit: 120, windowMs: 60 * 1000 });
+    if (!rate.allowed) {
+      send(res, 429, '429 Too Many Requests', { 'Retry-After': String(rate.retryAfter) });
+      return;
+    }
+    return await handleBrowserLog(req, res);
+  }
 
   // --- BFF Router: Authentication Endpoints ---
   if (pathname === '/auth/login' && ['GET', 'HEAD'].includes(req.method)) {
@@ -137,6 +235,11 @@ const server = http.createServer(async (req, res) => {
   // --- BFF Router: Streaming Files Proxy ---
   if (pathname.startsWith('/files/')) {
     return await handleFilesProxy(req, res, url);
+  }
+
+  // --- AltCanvas-owned persistent workspace API ---
+  if (pathname.startsWith('/canvas/')) {
+    return await handleCanvasApi(req, res, url);
   }
 
   // --- Static Asset Server ---
@@ -170,7 +273,13 @@ const server = http.createServer(async (req, res) => {
       'Cache-Control': ext === '.html' ? 'no-cache' : 'public, max-age=3600',
       'X-Content-Type-Options': 'nosniff',
       'Referrer-Policy': 'no-referrer',
+      'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), payment=(), usb=()',
       'X-Frame-Options': 'SAMEORIGIN',
+      ...(filePathName === '/index.html' ? {
+        'Content-Security-Policy': process.env.NODE_ENV === 'production'
+          ? indexContentSecurityPolicy
+          : buildIndexContentSecurityPolicy()
+      } : {}),
     });
     if (req.method === 'HEAD') {
       res.end();
@@ -180,7 +289,8 @@ const server = http.createServer(async (req, res) => {
   });
 });
 
-server.on('clientError', (_err, socket) => {
+server.on('clientError', (err, socket) => {
+  if (devLoggingEnabled) writeDevLog('warn', 'server.clientError', err.message);
   socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
 });
 

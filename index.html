@@ -21,10 +21,49 @@
     .annotation-color-orange { background-color: #f19837; }
     .annotation-color-gray { background-color: #aaaaaa; }
     #library-pane { width: var(--library-w, 20rem); }
-    #annotations-pane { width: var(--annotations-w, 24rem); }
+    #annotations-pane { width: var(--annotations-w, 32rem); }
+    .canvas-surface {
+      position: relative;
+      overflow: hidden;
+      min-height: 0;
+      background-color: #020617;
+      background-image: radial-gradient(circle, rgba(100,116,139,.28) 1px, transparent 1px);
+      background-size: 24px 24px;
+      touch-action: none;
+      cursor: grab;
+    }
+    .canvas-surface.is-panning { cursor: grabbing; }
+    .canvas-world { position: absolute; inset: 0 auto auto 0; width: 4000px; height: 4000px; transform-origin: 0 0; }
+    .canvas-edges { position: absolute; inset: 0; width: 4000px; height: 4000px; overflow: visible; pointer-events: none; }
+    .canvas-edge { stroke: #6366f1; stroke-width: 2; vector-effect: non-scaling-stroke; opacity: .72; }
+    .canvas-edge-label { fill: #a5b4fc; font-size: 11px; paint-order: stroke; stroke: #020617; stroke-width: 4px; stroke-linejoin: round; }
+    .canvas-node {
+      position: absolute; display: flex; flex-direction: column; overflow: hidden;
+      min-width: 80px; min-height: 40px; border: 1px solid #334155; border-radius: 10px;
+      background: rgba(15,23,42,.96); box-shadow: 0 12px 30px rgba(0,0,0,.28);
+      color: #e2e8f0; cursor: default;
+    }
+    .canvas-node:hover, .canvas-node:focus-within { border-color: #6366f1; }
+    .canvas-node.is-connect-source { outline: 2px solid #a5b4fc; outline-offset: 2px; }
+    .canvas-node.is-selected { outline: 2px solid #a855f7; outline-offset: 2px; box-shadow: 0 0 0 4px rgba(168, 85, 247, 0.25), 0 12px 30px rgba(0,0,0,.35); }
+    .canvas-node-header { cursor: move; user-select: none; touch-action: none; }
+    .canvas-node-body { overflow: auto; overflow-wrap: anywhere; }
+    .canvas-node-text { white-space: pre-wrap; word-break: break-word; }
+    .canvas-resize-handle {
+      position: absolute; right: 0; bottom: 0; width: 18px; height: 18px;
+      cursor: nwse-resize; touch-action: none;
+    }
+    .canvas-resize-handle::after {
+      content: ''; position: absolute; right: 4px; bottom: 4px; width: 7px; height: 7px;
+      border-right: 2px solid #64748b; border-bottom: 2px solid #64748b;
+    }
+    .canvas-toolbar { scrollbar-width: none; }
+    .canvas-toolbar::-webkit-scrollbar { display: none; }
+    #provenance-panel { max-height: min(70vh, 44rem); overflow: hidden; }
+    #provenance-list { min-height: 0; max-height: calc(min(70vh, 44rem) - 7rem); overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; scrollbar-color: #475569 transparent; }
     @media (max-width: 1180px) {
       #library-pane { width: var(--library-w, 17rem); }
-      #annotations-pane { width: var(--annotations-w, 19rem); }
+      #annotations-pane { width: var(--annotations-w, 24rem); }
     }
     /* Draggable pane dividers (desktop only) */
     .pane-divider { display: none; }
@@ -99,6 +138,7 @@
       .mobile-nav-button svg { width: 1.25rem; height: 1.25rem; }
       .mobile-nav-button[aria-selected="true"] { color: #bfdbfe; background: rgb(30 64 175 / .32); }
       #workspace button, #top-bar button, #settings-modal button { min-height: 44px; min-width: 44px; }
+      .canvas-node button { min-height: 32px !important; min-width: 32px !important; }
       #settings-modal { align-items: flex-end; padding: 0; }
       #settings-panel { max-width: none; max-height: min(92dvh, 46rem); overflow-y: auto; border-radius: 1rem 1rem 0 0; padding-bottom: max(1.25rem, env(safe-area-inset-bottom)); }
       #settings-modal input { min-height: 44px; font-size: 16px; }
@@ -204,34 +244,49 @@
     <!-- Draggable divider between reader and annotations -->
     <div id="divider-annotations" class="pane-divider" role="separator" aria-orientation="vertical" aria-label="拖拽调整标注栏宽度"></div>
 
-    <!-- Right: AltCanvas Live Annotation Whiteboard -->
+    <!-- Right: AltCanvas persistent spatial Canvas -->
     <aside id="annotations-pane" aria-label="研究标注白板" class="w-96 bg-slate-950 flex flex-col flex-shrink-0">
       <div class="p-3 border-b border-slate-800 flex items-center justify-between">
         <div class="flex items-center gap-2">
-          <span class="text-xs font-semibold text-indigo-400 tracking-wider uppercase">研究标注白板 (Cards)</span>
+          <span class="text-xs font-semibold text-indigo-400 tracking-wider uppercase">研究画板</span>
           <span id="annotations-count" class="text-[10px] px-1.5 py-0.5 bg-indigo-950 text-indigo-300 rounded border border-indigo-800">0</span>
         </div>
         <div class="flex items-center gap-1">
-          <button id="btn-refresh-cards" title="刷新标注" class="text-slate-400 hover:text-slate-200 text-xs p-1 rounded hover:bg-slate-900">
+          <span id="canvas-save-state" class="text-[10px] text-slate-500">未连接</span>
+          <button id="btn-refresh-cards" type="button" title="重新加载画板" aria-label="重新加载画板" class="text-slate-400 hover:text-slate-200 text-xs p-1 rounded hover:bg-slate-900">
             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
           </button>
         </div>
       </div>
 
-      <!-- Filter bar for cards -->
-      <div class="px-3 py-2 border-b border-slate-800/80 bg-slate-950/50 flex items-center justify-between text-[11px]">
-        <div class="flex gap-1.5 text-slate-400">
-          <span class="text-slate-500">类型:</span>
-          <button data-type-filter="all" class="card-filter font-medium text-indigo-300 hover:text-indigo-200">全部</button>
-          <button data-type-filter="highlight" class="card-filter hover:text-slate-300">高亮</button>
-          <button data-type-filter="note" class="card-filter hover:text-slate-300">笔记</button>
-        </div>
+      <div class="canvas-toolbar px-2 py-2 border-b border-slate-800/80 bg-slate-950/70 flex items-center gap-1.5 text-[11px] overflow-x-auto whitespace-nowrap">
+        <button id="btn-canvas-add-note" type="button" title="新建手写卡片 (N)" class="px-2 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white">+ 手写卡片</button>
+        <button id="btn-canvas-import" type="button" class="px-2 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 disabled:opacity-40 disabled:cursor-not-allowed">加入当前标注</button>
+        <button id="btn-canvas-connect" type="button" aria-pressed="false" title="切换连线模式 (C)" class="px-2 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200">连线</button>
+        <button id="btn-canvas-ai" type="button" class="px-2 py-1.5 rounded bg-purple-900/80 hover:bg-purple-800 text-purple-200 border border-purple-700/50 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1" disabled title="选中卡片后点击启动 AI 翻译/综合/问答">
+          <span>✨ AI 助手</span>
+        </button>
+        <span class="w-px h-5 bg-slate-800"></span>
+        <button id="btn-canvas-export-json" type="button" title="导出画板 JSON" class="px-2 py-1.5 rounded hover:bg-slate-800 text-slate-300">导出</button>
+        <label id="lbl-canvas-import-json" title="导入画板 JSON" class="px-2 py-1.5 rounded hover:bg-slate-800 text-slate-300 cursor-pointer">
+          导入<input id="input-canvas-import-file" type="file" accept=".json,.altcanvas.json" class="hidden">
+        </label>
+        <button id="btn-canvas-history" type="button" title="查看操作溯源历史 (H)" class="px-2 py-1.5 rounded hover:bg-slate-800 text-slate-300">历史</button>
+        <span class="w-px h-5 bg-slate-800"></span>
+        <button id="btn-canvas-zoom-out" type="button" aria-label="缩小画板" class="px-2 py-1.5 rounded hover:bg-slate-800 text-slate-300">−</button>
+        <button id="btn-canvas-zoom-reset" type="button" class="px-2 py-1.5 rounded hover:bg-slate-800 text-slate-400 font-mono">100%</button>
+        <button id="btn-canvas-zoom-in" type="button" aria-label="放大画板" class="px-2 py-1.5 rounded hover:bg-slate-800 text-slate-300">+</button>
       </div>
 
-      <!-- Canvas Excerpt Cards List -->
-      <div id="canvas-cards" class="flex-1 overflow-y-auto custom-scrollbar p-3 space-y-3">
-        <div class="text-center text-slate-600 py-16 text-xs leading-relaxed">
-          选择文档并在阅读器中划词标注<br>标注将自动同步至此白板
+      <div id="canvas-cards" class="canvas-surface flex-1" tabindex="0" aria-label="空间画板；Delete 删除，Ctrl+Z 撤销，N 新建卡片，C 连线，H 历史">
+        <div id="canvas-empty" class="absolute inset-0 z-10 flex items-center justify-center pointer-events-none p-6">
+          <div class="text-center text-slate-500 text-xs leading-relaxed bg-slate-950/80 border border-slate-800 rounded-xl p-4">
+            登录后创建手写卡片<br>或把当前文档标注加入持久化画板
+          </div>
+        </div>
+        <div id="canvas-world" class="canvas-world">
+          <svg id="canvas-edges" class="canvas-edges" aria-hidden="true"></svg>
+          <div id="canvas-nodes"></div>
         </div>
       </div>
     </aside>
@@ -296,6 +351,7 @@
       </div>
 
       <div class="space-y-3 text-xs">
+        <div id="legacy-direct-settings" class="space-y-3">
         <div>
           <label for="input-api" class="block text-slate-400 mb-1">Altero API 地址</label>
           <input id="input-api" type="url" inputmode="url" autocomplete="url" placeholder="https://altero.example.com" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:outline-none focus:border-blue-500 font-mono">
@@ -311,17 +367,111 @@
             <button id="btn-toggle-key" type="button" class="absolute right-2 top-2 text-[10px] text-slate-400 hover:text-slate-200">显示/隐藏</button>
           </div>
         </div>
+        </div>
+
+        <!-- AI Model Configuration -->
+        <div class="pt-2 border-t border-slate-800 space-y-2.5">
+          <div class="font-medium text-slate-300 flex items-center gap-1.5 text-xs">
+            <span class="text-purple-400">✨</span>
+            <span>AI 大模型接口 (OpenAI / DeepSeek / Ollama 兼容)</span>
+          </div>
+          <div id="ai-provider-status" class="rounded border border-slate-800 bg-slate-950 p-2.5 text-[11px] text-slate-400">
+            <div>供应商：<span id="ai-provider-name" class="font-mono text-slate-300">未配置</span></div>
+            <div class="mt-1">模型：<span id="ai-provider-model" class="font-mono text-purple-300">未配置</span></div>
+            <div class="mt-1.5 text-[10px] text-slate-500">端点和 API Key 仅由服务器环境变量配置，不会保存到浏览器。</div>
+          </div>
+          <button id="btn-test-ai-conn" type="button" class="px-3 py-1 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-purple-300 rounded text-xs transition border border-slate-700">测试服务端 AI 连接</button>
+        </div>
 
         <!-- Connection Test Output -->
         <div id="test-output" class="p-2.5 rounded bg-slate-950 border border-slate-800 text-[11px] space-y-1 hidden"></div>
       </div>
 
       <div class="flex items-center justify-between pt-2 border-t border-slate-800">
-        <button id="btn-test-conn" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded text-xs transition border border-slate-700">测试连接</button>
+        <button id="btn-test-conn" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded text-xs transition border border-slate-700">测试 Altero 连接</button>
         <div class="flex gap-2">
           <button id="btn-cancel-settings" class="px-3 py-1.5 bg-transparent hover:bg-slate-800 text-slate-400 rounded text-xs transition">取消</button>
-          <button id="btn-save-settings" class="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs font-medium transition shadow-lg shadow-blue-600/20">保存并连接</button>
+          <button id="btn-save-settings" class="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs font-medium transition shadow-lg shadow-blue-600/20">保存设置</button>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Canvas Provenance History Modal -->
+  <div id="provenance-modal" role="dialog" aria-modal="true" aria-labelledby="provenance-title" class="fixed inset-0 bg-black/75 z-50 flex items-center justify-center p-4 hidden backdrop-blur-sm">
+    <div id="provenance-panel" class="bg-slate-900 border border-slate-800 rounded-xl max-w-sm w-full p-4 space-y-3 shadow-2xl max-h-[70vh] flex flex-col">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-2.5">
+        <h3 id="provenance-title" class="text-xs font-semibold text-slate-100 flex items-center gap-2">
+          <svg class="w-4 h-4 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+          画板溯源历史
+        </h3>
+        <button id="btn-close-provenance" type="button" aria-label="关闭" class="text-slate-500 hover:text-slate-300 text-base leading-none">&times;</button>
+      </div>
+      <div id="provenance-list" class="flex-1 overflow-y-auto space-y-1.5 text-xs custom-scrollbar pr-1 max-h-[320px]">
+        <div class="text-center text-slate-500 py-4">加载中…</div>
+      </div>
+      <div class="flex items-center justify-end pt-2 border-t border-slate-800">
+        <button id="btn-done-provenance" class="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-xs transition">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- AI Assistant & Synthesis Modal -->
+  <div id="ai-modal" role="dialog" aria-modal="true" aria-labelledby="ai-title" class="fixed inset-0 bg-black/75 z-50 flex items-center justify-center p-4 hidden backdrop-blur-sm">
+    <div id="ai-panel" class="bg-slate-900 border border-slate-800 rounded-xl max-w-md w-full p-5 space-y-4 shadow-2xl max-h-[85vh] flex flex-col">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+        <h3 id="ai-title" class="text-sm font-semibold text-purple-300 flex items-center gap-2">
+          <svg class="w-4 h-4 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+          AI 空间研究助手
+        </h3>
+        <button id="btn-close-ai" type="button" aria-label="关闭" class="text-slate-500 hover:text-slate-300 text-lg leading-none">&times;</button>
+      </div>
+
+      <div class="space-y-3 text-xs">
+        <div>
+          <label class="block text-slate-400 mb-1.5 font-medium">已选卡片上下文 (<span id="ai-selected-count">0</span> 张)</label>
+          <div id="ai-selected-chips" class="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto p-2 bg-slate-950 border border-slate-800 rounded custom-scrollbar"></div>
+        </div>
+
+        <div>
+          <label class="block text-slate-400 mb-1.5 font-medium">分析任务类型</label>
+          <div class="grid grid-cols-2 gap-1.5">
+            <button type="button" class="ai-task-tab px-2.5 py-2 rounded bg-purple-950/80 border border-purple-800 text-purple-200 font-medium text-left flex items-center gap-1.5" data-task="translate">
+              <span>🌐</span><span>忠实中译</span>
+            </button>
+            <button type="button" class="ai-task-tab px-2.5 py-2 rounded bg-slate-950 border border-slate-800 text-slate-300 text-left flex items-center gap-1.5" data-task="synthesize">
+              <span>✨</span><span>综合总结</span>
+            </button>
+            <button type="button" class="ai-task-tab px-2.5 py-2 rounded bg-slate-950 border border-slate-800 text-slate-300 text-left flex items-center gap-1.5" data-task="compare">
+              <span>⚖️</span><span>观点对比</span>
+            </button>
+            <button type="button" class="ai-task-tab px-2.5 py-2 rounded bg-slate-950 border border-slate-800 text-slate-300 text-left flex items-center gap-1.5" data-task="explain">
+              <span>💬</span><span>针对问答/解读</span>
+            </button>
+          </div>
+        </div>
+
+        <div>
+          <label for="input-ai-prompt" class="block text-slate-400 mb-1 font-medium">补充指令 / 自定义提问 (可选)</label>
+          <textarea id="input-ai-prompt" rows="3" placeholder="可选输入特殊学术术语要求或具体提问…" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:outline-none focus:border-purple-500 font-sans text-xs resize-none"></textarea>
+        </div>
+
+        <div class="flex items-center justify-between text-[10px] text-slate-500 bg-slate-950/60 px-2.5 py-1.5 rounded border border-slate-800/80">
+          <span>当前模型: <strong id="ai-current-model-tag" class="text-purple-400 font-mono">deepseek-chat</strong></span>
+          <button id="btn-open-ai-settings" type="button" class="text-indigo-400 hover:text-indigo-300 underline cursor-pointer">配置模型</button>
+        </div>
+
+        <div id="ai-loading-state" class="p-3 rounded bg-purple-950/30 border border-purple-800/40 text-purple-300 text-center space-y-2 hidden">
+          <div class="w-5 h-5 border-2 border-purple-500 border-t-transparent rounded-full animate-spin mx-auto"></div>
+          <p class="text-xs">AI 正在深度思考并生成卡片，请稍候…</p>
+        </div>
+      </div>
+
+      <div class="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+        <button id="btn-cancel-ai" class="px-3.5 py-1.5 bg-transparent hover:bg-slate-800 text-slate-400 rounded text-xs transition">取消</button>
+        <button id="btn-submit-ai" class="px-4 py-1.5 bg-purple-600 hover:bg-purple-500 text-white rounded text-xs font-medium transition shadow-lg shadow-purple-600/20 flex items-center gap-1.5">
+          <span>🚀 开始生成</span>
+        </button>
       </div>
     </div>
   </div>
@@ -331,6 +481,158 @@
 
   <!-- App Driver -->
   <script type="module">
+    // Development-only browser diagnostics. The server returns 404 in production,
+    // so no browser events leave the page unless the local debug endpoint opts in.
+    const browserDebug = (() => {
+      const nativeFetch = window.fetch.bind(window);
+      const pending = [];
+      const recent = new Map();
+      let enabled = null;
+      let flushTimer = null;
+
+      const redact = (value, limit = 4000) => {
+        const text = typeof value === 'string'
+          ? value
+          : value instanceof Error
+            ? `${value.name}: ${value.message}`
+            : (() => {
+              try { return JSON.stringify(value); } catch { return String(value); }
+            })();
+        if (/^data:|^[A-Za-z0-9+/]{200,}={0,2}$/.test(text)) return '[binary/base64 omitted]';
+        return text
+          .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]')
+          .replace(/([?&](?:access_token|refresh_token|api_key|key|password)=)[^&#\s]*/gi, '$1[REDACTED]')
+          .replace(/((?:authorization|cookie|password|secret|token|api[-_]?key)\s*[:=]\s*)(?!\[REDACTED\])[^,;\s}\]]+/gi, '$1[REDACTED]')
+          .slice(0, limit);
+      };
+
+      const safeUrl = value => {
+        try {
+          const parsed = new URL(value, location.href);
+          if (parsed.origin !== location.origin) return '[external endpoint]';
+          return parsed.pathname
+            .replace(/\/(users|groups)\/[^/]+/g, '/$1/:library')
+            .replace(/\/items\/[^/]+/g, '/items/:item')
+            .replace(/\/(workspaces|boards|nodes|edges)\/[0-9a-f-]{16,}/gi, '/$1/:id');
+        } catch {
+          return redact(value, 500);
+        }
+      };
+
+      const send = async events => {
+        try {
+          await nativeFetch('/debug/browser-log', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ events }),
+            keepalive: true,
+          });
+        } catch {
+          // Debug transport must never interfere with the application.
+        }
+      };
+
+      const flush = () => {
+        flushTimer = null;
+        if (enabled !== true || pending.length === 0) return;
+        void send(pending.splice(0, 25));
+      };
+
+      const report = event => {
+        const normalized = {
+          timestamp: new Date().toISOString(),
+          level: event.level || 'error',
+          source: redact(event.source || 'browser', 160),
+          message: redact(event.message || 'Unknown browser error'),
+          stack: event.stack ? redact(event.stack, 8000) : undefined,
+          url: location.pathname,
+          route: location.pathname,
+          request: event.request ? {
+            method: redact(event.request.method || 'GET', 12),
+            endpoint: safeUrl(event.request.endpoint || ''),
+            status: event.request.status,
+            responseSummary: redact(event.request.responseSummary || '', 1000),
+          } : undefined,
+        };
+        const signature = `${normalized.level}|${normalized.source}|${normalized.message}|${normalized.request?.status || ''}`;
+        const now = Date.now();
+        if (now - (recent.get(signature) || 0) < 5000) return;
+        recent.set(signature, now);
+        pending.push(normalized);
+        if (pending.length > 50) pending.shift();
+        if (enabled === true && !flushTimer) flushTimer = setTimeout(flush, 250);
+      };
+
+      window.addEventListener('error', event => report({
+        source: 'window.error',
+        message: event.message || event.error?.message,
+        stack: event.error?.stack,
+      }));
+      window.addEventListener('unhandledrejection', event => report({
+        source: 'window.unhandledrejection',
+        message: event.reason?.message || event.reason,
+        stack: event.reason?.stack,
+      }));
+
+      for (const method of ['warn', 'error']) {
+        const original = console[method].bind(console);
+        console[method] = (...args) => {
+          original(...args);
+          report({
+            level: method,
+            source: `console.${method}`,
+            message: args.map(value => redact(value, 1200)).join(' '),
+            stack: args.find(value => value instanceof Error)?.stack,
+          });
+        };
+      }
+
+      window.fetch = async (input, init = {}) => {
+        const method = String(init.method || (input instanceof Request ? input.method : 'GET')).toUpperCase();
+        const endpoint = input instanceof Request ? input.url : String(input);
+        const expectedStatuses = Array.isArray(init.debugExpectedStatuses) ? init.debugExpectedStatuses : [];
+        const { debugExpectedStatuses: _debugExpectedStatuses, ...fetchInit } = init;
+        try {
+          const response = await nativeFetch(input, fetchInit);
+          if (!response.ok && !expectedStatuses.includes(response.status) && safeUrl(endpoint) !== '/debug/config') {
+            let responseSummary = '';
+            try { responseSummary = await response.clone().text(); } catch { /* non-text response */ }
+            report({
+              source: 'fetch.response',
+              message: `HTTP ${response.status} ${method} ${safeUrl(endpoint)}`,
+              request: { method, endpoint, status: response.status, responseSummary },
+            });
+          }
+          return response;
+        } catch (error) {
+          report({
+            source: 'fetch.network',
+            message: error?.message || `Network failure: ${method} ${safeUrl(endpoint)}`,
+            stack: error?.stack,
+            request: { method, endpoint },
+          });
+          throw error;
+        }
+      };
+
+      void nativeFetch('/debug/config', { cache: 'no-store' })
+        .then(response => response.ok ? response.json() : { enabled: false })
+        .then(config => {
+          enabled = config?.enabled === true;
+          if (enabled) {
+            report({ level: 'info', source: 'debug.lifecycle', message: 'Browser diagnostics connected' });
+            flush();
+          }
+          else pending.length = 0;
+        })
+        .catch(() => {
+          enabled = false;
+          pending.length = 0;
+        });
+
+      return { report };
+    })();
+
     // --- State Management ---
     let config = {
       mode: 'bff',
@@ -344,9 +646,48 @@
     let currentSelectedCollection = 'all';
     let currentItem = null;
     let currentAttachment = null;
+    let currentDocumentLibrary = null;
     let currentReaderInstance = null;
     let currentAnnotationsMap = new Map(); // key -> { version, data }
-    let activeTypeFilter = 'all';
+    const clientAnnotationIdMap = new Map(); // clientId (e.g. REBD-1057) -> serverItemKey
+    let canvasWorkspace = null;
+    let canvasBoard = null;
+    let canvasNodes = new Map();
+    let canvasEdges = new Map();
+    let canvasSources = new Map();
+    let canvasReady = false;
+    let canvasConnectSourceId = null;
+    let knownDeletedAnnotationKeys = new Set();
+
+    function deletedAnnotationsStorageKey() {
+      return `altcanvas.deletedAnnotations.${config.userId || 'anonymous'}`;
+    }
+
+    function loadKnownDeletedAnnotations() {
+      try {
+        const stored = JSON.parse(localStorage.getItem(deletedAnnotationsStorageKey()) || '[]');
+        knownDeletedAnnotationKeys = new Set(Array.isArray(stored) ? stored : []);
+      } catch {
+        knownDeletedAnnotationKeys = new Set();
+      }
+    }
+
+    function saveKnownDeletedAnnotations() {
+      try {
+        localStorage.setItem(deletedAnnotationsStorageKey(), JSON.stringify([...knownDeletedAnnotationKeys].slice(-500)));
+      } catch {}
+    }
+
+    let canvasSelectedNodeIds = new Set();
+    let currentAiTask = 'translate';
+    let aiConfig = { configured: false, provider: '', model: '' };
+    let canvasLayoutTimer = null;
+    let canvasSaveInFlight = false;
+    let canvasMutationRevision = 0;
+    const canvasUndoStack = [];
+    let canvasUndoInFlight = false;
+    let canvasDeleteInFlight = false;
+    let canvasRestoreSourceInFlight = false;
     let libraryController = null;
     let documentController = null;
     let openRequestId = 0;
@@ -384,11 +725,146 @@
       return colors[String(value || '').toLowerCase()] || 'annotation-color-yellow';
     }
 
+    function cleanAnnotationText(text) {
+      if (!text) return '';
+      let str = String(text);
+      if (/<[a-z][\s\S]*>/i.test(str)) {
+        str = str
+          .replace(/<\/?(br|p|div|li)[^>]*>/gi, '\n')
+          .replace(/<[^>]+>/g, '');
+      }
+      str = str.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+      const lines = str.split('\n').map(l => l.trim());
+      const result = [];
+      let prevEmpty = false;
+      for (const line of lines) {
+        if (!line) {
+          if (!prevEmpty && result.length > 0) {
+            result.push('');
+            prevEmpty = true;
+          }
+        } else {
+          result.push(line);
+          prevEmpty = false;
+        }
+      }
+      while (result.length > 0 && result[result.length - 1] === '') {
+        result.pop();
+      }
+      return result.join('\n').trim();
+    }
+
+    function getAnnotationPosition(data) {
+      if (!data) return {};
+      const raw = data.annotationPosition ?? data.position;
+      if (typeof raw === 'object' && raw !== null) return raw;
+      if (typeof raw === 'string' && raw.trim()) {
+        try {
+          return JSON.parse(raw);
+        } catch {
+          return {};
+        }
+      }
+      return {};
+    }
+
+    function getAnnotationPageIndex(data) {
+      if (!data) return 0;
+      const pos = getAnnotationPosition(data);
+      if (typeof pos.pageIndex === 'number') return pos.pageIndex;
+      if (typeof pos.page_index === 'number') return pos.page_index;
+      if (typeof pos.page === 'number') return Math.max(0, pos.page - 1);
+      if (pos.pageIndex !== undefined && !isNaN(Number(pos.pageIndex))) return Number(pos.pageIndex);
+      if (pos.page_index !== undefined && !isNaN(Number(pos.page_index))) return Number(pos.page_index);
+      if (pos.page !== undefined && !isNaN(Number(pos.page))) return Math.max(0, Number(pos.page) - 1);
+
+      if (Array.isArray(pos.rects) && pos.rects.length > 0 && Array.isArray(pos.rects[0]) && pos.rects[0].length >= 5) {
+        const p = Number(pos.rects[0][0]);
+        if (!isNaN(p)) return p;
+      }
+
+      if (typeof data.annotationSortIndex === 'string') {
+        const parts = data.annotationSortIndex.split('|');
+        if (parts.length >= 1 && /^\d+$/.test(parts[0])) {
+          return Number(parts[0]);
+        }
+      }
+
+      if (data.annotationPageLabel && /^\d+$/.test(String(data.annotationPageLabel).trim())) {
+        return Math.max(0, Number(String(data.annotationPageLabel).trim()) - 1);
+      }
+
+      return 0;
+    }
+
+    function getAnnotationPageLabel(data) {
+      if (!data) return '1';
+      const pos = getAnnotationPosition(data);
+      const pageIdx = pos.pageIndex ?? pos.page_index ?? (pos.page !== undefined ? Number(pos.page) - 1 : undefined);
+      if (pageIdx !== undefined && pageIdx !== null && !isNaN(Number(pageIdx))) {
+        return String(Number(pageIdx) + 1);
+      }
+      if (Array.isArray(pos.rects) && pos.rects.length > 0 && Array.isArray(pos.rects[0]) && pos.rects[0].length >= 5) {
+        const p = Number(pos.rects[0][0]);
+        if (!isNaN(p)) return String(p + 1);
+      }
+      if (typeof data.annotationSortIndex === 'string') {
+        const parts = data.annotationSortIndex.split('|');
+        if (parts.length >= 1 && /^\d+$/.test(parts[0])) {
+          return String(Number(parts[0]) + 1);
+        }
+      }
+      if (data.annotationPageLabel && String(data.annotationPageLabel).trim()) {
+        return String(data.annotationPageLabel).trim();
+      }
+      if (data.pageLabel && String(data.pageLabel).trim()) {
+        return String(data.pageLabel).trim();
+      }
+      return '1';
+    }
+
     function getApiUrl(path) {
       if (config.mode === 'bff') {
         return `/api${path}`;
       }
       return `${config.api}${path}`;
+    }
+
+    function normalizeLibraryContext(sourceRef = null) {
+      const libraryType = sourceRef?.libraryType === 'group' ? 'group' : 'user';
+      const libraryId = String(sourceRef?.libraryId || config.userId || '');
+      return { libraryType, libraryId };
+    }
+
+    function libraryApiPrefix(sourceRef = null) {
+      const library = normalizeLibraryContext(sourceRef);
+      const segment = library.libraryType === 'group' ? 'groups' : 'users';
+      return `/${segment}/${encodeURIComponent(library.libraryId)}`;
+    }
+
+    function sourceIdentity(sourceRef) {
+      if (!sourceRef?.annotationKey) return '';
+      const library = normalizeLibraryContext(sourceRef);
+      return `${library.libraryType}:${library.libraryId}:${sourceRef.annotationKey}`;
+    }
+
+    function isSameLibrary(left, right) {
+      const a = normalizeLibraryContext(left);
+      const b = normalizeLibraryContext(right);
+      return a.libraryType === b.libraryType && a.libraryId === b.libraryId;
+    }
+
+    function rememberDeletedAnnotation(annotationKey, libraryContext = currentDocumentLibrary) {
+      const identity = sourceIdentity({ ...normalizeLibraryContext(libraryContext), annotationKey });
+      if (identity) knownDeletedAnnotationKeys.add(identity);
+    }
+
+    function forgetDeletedAnnotation(sourceRef) {
+      const identity = sourceIdentity(sourceRef);
+      if (!identity) return;
+      knownDeletedAnnotationKeys.delete(identity);
+      sourceFreshnessMap.delete(identity);
+      saveKnownDeletedAnnotations();
     }
 
     function getHeaders(extra = {}) {
@@ -426,7 +902,7 @@
 
     function openLoginModal() {
       const serverInput = document.getElementById('input-oauth-server');
-      const saved = localStorage.getItem('altcanvas_altero_server') || '';
+      const saved = localStorage.getItem('altcanvas_altero_server') || config.defaultAlteroApi || '';
       serverInput.value = saved;
       document.getElementById('login-modal').classList.remove('hidden');
       requestAnimationFrame(() => serverInput.focus());
@@ -468,6 +944,7 @@
           const data = await res.json();
           directModeAllowed = data.allowDirectMode === true;
           dynamicAlteroAllowed = data.allowDynamicAltero === true;
+          config.defaultAlteroApi = data.defaultAlteroApi || '';
           document.getElementById('btn-open-settings').classList.toggle('hidden', !directModeAllowed);
           if (directModeAllowed) {
             config.api = localStorage.getItem('altcanvas_api') || '';
@@ -542,6 +1019,15 @@
       return String(error);
     }
 
+    function reportApplicationError(source, error, context) {
+      browserDebug.report({
+        source: `application.${source}`,
+        message: errorMessage(error),
+        stack: error instanceof Error ? error.stack : undefined,
+        request: context,
+      });
+    }
+
     function setTestOutput(lines, success) {
       const out = document.getElementById('test-output');
       out.replaceChildren();
@@ -556,7 +1042,18 @@
     }
 
     // --- Toast UI ---
+    let lastToastText = '';
+    let lastToastTime = 0;
+
     function showToast(message, type = 'info') {
+      const now = Date.now();
+      const textContent = String(message ?? '');
+      if (textContent === lastToastText && now - lastToastTime < 1500) {
+        return;
+      }
+      lastToastText = textContent;
+      lastToastTime = now;
+
       const container = document.getElementById('toast-container');
       const toast = document.createElement('div');
       const bgColors = {
@@ -566,7 +1063,7 @@
       };
       toast.className = `px-3 py-2 rounded-lg border text-xs shadow-xl backdrop-blur-sm transition-all duration-300 translate-y-2 opacity-0 flex items-center gap-2 pointer-events-auto ${bgColors[type] || bgColors.info}`;
       const text = document.createElement('span');
-      text.textContent = String(message);
+      text.textContent = textContent;
       toast.appendChild(text);
       container.appendChild(toast);
 
@@ -586,13 +1083,53 @@
       document.getElementById('input-api').value = config.api;
       document.getElementById('input-user-id').value = config.userId;
       document.getElementById('input-key').value = config.apiKey;
+      document.getElementById('legacy-direct-settings').classList.toggle('hidden', config.mode === 'bff');
+      document.getElementById('btn-test-conn').classList.toggle('hidden', config.mode === 'bff');
+      document.getElementById('ai-provider-name').textContent = aiConfig.provider || '未配置';
+      document.getElementById('ai-provider-model').textContent = aiConfig.model || '未配置';
+      document.getElementById('btn-test-ai-conn').disabled = !aiConfig.configured;
       document.getElementById('test-output').classList.add('hidden');
       document.getElementById('settings-modal').classList.remove('hidden');
-      requestAnimationFrame(() => document.getElementById(config.apiKey ? 'input-api' : 'input-key').focus());
+      requestAnimationFrame(() => document.getElementById(config.mode === 'bff' ? 'btn-test-ai-conn' : (config.apiKey ? 'input-api' : 'input-key')).focus());
     }
 
     function closeSettingsModal() {
       document.getElementById('settings-modal').classList.add('hidden');
+    }
+
+    async function loadAiConfig() {
+      if (config.mode !== 'bff' || !config.user) return;
+      try {
+        aiConfig = await canvasFetch('/ai/config');
+      } catch (err) {
+        aiConfig = { configured: false, provider: '', model: '' };
+        reportApplicationError('ai.config', err);
+      }
+      updateCanvasAiToolbar();
+    }
+
+    async function testAiConnection() {
+      const out = document.getElementById('test-output');
+      out.classList.remove('hidden');
+      out.replaceChildren();
+      const pending = document.createElement('span');
+      pending.className = 'text-purple-400 animate-pulse';
+      pending.textContent = '正在连接 AI 端点测试...';
+      out.appendChild(pending);
+
+      try {
+        const result = await canvasFetch('/ai/test', { method: 'POST', body: {} });
+
+        setTestOutput([
+          ['✓ AI 模型端点连接成功！', 'text-emerald-400 font-medium'],
+          [`模型: ${result.model}`, 'text-slate-300'],
+          [`供应商: ${result.provider}`, 'text-slate-400']
+        ], true);
+        return true;
+      } catch (err) {
+        setTestOutput([[`✕ AI 端点连接失败: ${errorMessage(err)}`, 'text-rose-400 font-medium']], false);
+        return false;
+      }
     }
 
     async function testConnection(api, userId, key) {
@@ -638,6 +1175,7 @@
       const input = document.getElementById('input-key');
       input.type = input.type === 'password' ? 'text' : 'password';
     };
+    document.getElementById('btn-test-ai-conn').onclick = testAiConnection;
 
     document.getElementById('btn-test-conn').onclick = () => {
       const api = document.getElementById('input-api').value.trim();
@@ -647,6 +1185,10 @@
     };
 
     document.getElementById('btn-save-settings').onclick = async () => {
+      if (config.mode === 'bff') {
+        closeSettingsModal();
+        return;
+      }
       const api = document.getElementById('input-api').value.trim();
       const userId = document.getElementById('input-user-id').value.trim();
       const key = document.getElementById('input-key').value.trim();
@@ -808,12 +1350,14 @@
     }
 
     // --- Document & PDF Opening ---
-    async function openItem(item) {
+    async function openItem(item, libraryContext = null) {
       const requestId = ++openRequestId;
       documentController?.abort();
       documentController = new AbortController();
       const { signal } = documentController;
       currentItem = item;
+      currentDocumentLibrary = normalizeLibraryContext(libraryContext);
+      const documentLibraryPrefix = libraryApiPrefix(currentDocumentLibrary);
       renderItems(); // Update active selection state
       if (mobileMedia.matches) setMobilePane('reader');
 
@@ -832,7 +1376,7 @@
           pdfAttachment = item;
         } else {
           // Parent item: query children for PDF attachment
-          const childUrl = getApiUrl(`/users/${encodeURIComponent(config.userId)}/items/${encodeURIComponent(item.key)}/children`);
+          const childUrl = getApiUrl(`${documentLibraryPrefix}/items/${encodeURIComponent(item.key)}/children`);
           const res = await fetch(childUrl, { headers: getHeaders(), signal });
           if (!res.ok) throw new Error('未能获取子附件');
           const children = await res.json();
@@ -850,7 +1394,7 @@
         loadingText.textContent = '正在加载已有标注...';
 
         // Fetch existing annotations for this attachment
-        const annUrl = getApiUrl(`/users/${encodeURIComponent(config.userId)}/items/${encodeURIComponent(pdfAttachment.key)}/children`);
+        const annUrl = getApiUrl(`${documentLibraryPrefix}/items/${encodeURIComponent(pdfAttachment.key)}/children`);
         const annRes = await fetch(annUrl, { headers: getHeaders(), signal });
         const annChildren = annRes.ok ? await annRes.json() : [];
         if (requestId !== openRequestId) return;
@@ -858,26 +1402,28 @@
 
         // Populate Annotations Map
         currentAnnotationsMap.clear();
+        clientAnnotationIdMap.clear();
         const readerAnnotations = [];
 
         for (const a of rawAnnotations) {
+          const annData = a.data || {};
           currentAnnotationsMap.set(a.key, {
-            version: a.version || a.data?.version || 0,
-            data: a.data
+            version: a.version || annData.version || 0,
+            data: annData
           });
 
-          let pos = {};
-          try { pos = JSON.parse(a.data?.annotationPosition || '{}'); } catch(e) {}
+          const pos = getAnnotationPosition(annData);
+          const pageIndex = getAnnotationPageIndex(annData);
 
           readerAnnotations.push({
             id: a.key,
-            type: a.data?.annotationType || 'highlight',
-            color: a.data?.annotationColor || '#ffd400',
-            pageIndex: pos.pageIndex || 0,
+            type: annData.annotationType || 'highlight',
+            color: annData.annotationColor || '#ffd400',
+            pageIndex: pageIndex,
             position: pos,
-            text: a.data?.annotationText || '',
-            comment: a.data?.annotationComment || '',
-            tags: a.data?.tags || []
+            text: cleanAnnotationText(annData.annotationText),
+            comment: cleanAnnotationText(annData.annotationComment),
+            tags: annData.tags || []
           });
         }
 
@@ -888,10 +1434,11 @@
         document.getElementById('reader-wrapper').classList.remove('hidden');
 
         loadingText.textContent = '正在初始化阅读器引擎...';
-        await initReaderEngine(pdfAttachment.key, readerAnnotations, requestId, signal);
+        await initReaderEngine(pdfAttachment.key, readerAnnotations, requestId, signal, currentDocumentLibrary);
 
       } catch (err) {
         if (err?.name === 'AbortError' || requestId !== openRequestId) return;
+        reportApplicationError('reader.open', err);
         loadingOverlay.classList.add('hidden');
         showToast(`打开失败: ${errorMessage(err)}`, 'error');
       }
@@ -910,7 +1457,18 @@
         const handleLoad = () => {
           cleanup();
           frame.dataset.loaded = 'true';
-          resolve(frame.contentWindow);
+          const readerWindow = frame.contentWindow;
+          readerWindow.addEventListener('error', event => browserDebug.report({
+            source: 'reader.window.error',
+            message: event.message || event.error?.message,
+            stack: event.error?.stack,
+          }));
+          readerWindow.addEventListener('unhandledrejection', event => browserDebug.report({
+            source: 'reader.window.unhandledrejection',
+            message: event.reason?.message || event.reason,
+            stack: event.reason?.stack,
+          }));
+          resolve(readerWindow);
         };
         const handleError = () => {
           cleanup();
@@ -929,18 +1487,19 @@
       });
     }
 
-    async function initReaderEngine(attachmentKey, annotations, requestId, signal) {
+    async function initReaderEngine(attachmentKey, annotations, requestId, signal, libraryContext) {
       const readerWindowPromise = ensureReaderWindow(signal);
       
       let fileUrl;
       let readerData;
+      const documentLibraryPrefix = libraryApiPrefix(libraryContext);
       if (config.mode === 'bff') {
-        fileUrl = `/files/users/${encodeURIComponent(config.userId)}/items/${encodeURIComponent(attachmentKey)}`;
+        fileUrl = `/files${documentLibraryPrefix}/items/${encodeURIComponent(attachmentKey)}`;
         // Let PDF.js fetch the same-origin URL directly so it can use HTTP Range
         // requests and avoid buffering the entire document in the parent page.
         readerData = { url: fileUrl };
       } else {
-        fileUrl = `${config.api}/users/${encodeURIComponent(config.userId)}/items/${encodeURIComponent(attachmentKey)}/file/content`;
+        fileUrl = `${config.api}${documentLibraryPrefix}/items/${encodeURIComponent(attachmentKey)}/file/content`;
         // Legacy development mode still needs a header-authenticated fetch because
         // PDF.js cannot attach the manually supplied Zotero API key to its requests.
         const response = await fetch(fileUrl, { headers: getHeaders(), signal });
@@ -981,7 +1540,6 @@
         onChangeSidebarView: () => {},
         onToggleSidebar: () => {},
         onOpenLink: (url) => { if (url) window.open(url, '_blank', 'noopener,noreferrer'); },
-        onOpenContextMenu: () => {},
         onAddToNote: () => {},
         onOpenTagsPopup: () => {},
         onCopyImage: () => {},
@@ -1011,6 +1569,19 @@
       if (requestId !== openRequestId) return;
       document.getElementById('reader-loading').classList.add('hidden');
       showToast('文档加载完毕', 'success');
+      scheduleAcxMobileToolbar();
+    }
+
+    async function waitForReaderPageReady(reader, pageIndex, signal, timeoutMs = 15000) {
+      const deadline = Date.now() + timeoutMs;
+      while (true) {
+        if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+        const primaryView = reader?._primaryView;
+        const pageView = primaryView?._iframeWindow?.PDFViewerApplication?.pdfViewer?._pages?.[pageIndex];
+        if (pageView?.viewport) return;
+        if (Date.now() >= deadline) throw new Error('目标 PDF 页面尚未准备好');
+        await new Promise(resolve => setTimeout(resolve, 80));
+      }
     }
 
     // --- Annotation Sync (Save / Update / Delete) ---
@@ -1022,22 +1593,27 @@
       const toUpdate = [];
 
       for (const ann of savedAnns) {
-        const existing = currentAnnotationsMap.get(ann.id);
+        const serverId = clientAnnotationIdMap.get(ann.id) || ann.id;
+        const existing = currentAnnotationsMap.get(serverId) || currentAnnotationsMap.get(ann.id);
+        const pageIdx = typeof ann.pageIndex === 'number' ? ann.pageIndex : 0;
+        const pageLabel = `${pageIdx + 1}`;
+        const cleanText = cleanAnnotationText(ann.text);
+        const cleanComment = cleanAnnotationText(ann.comment);
         const zoteroAnnData = {
           itemType: 'annotation',
           parentItem: currentAttachment.key,
           annotationType: ann.type || 'highlight',
-          annotationText: ann.text || '',
-          annotationComment: ann.comment || '',
+          annotationText: cleanText,
+          annotationComment: cleanComment,
           annotationColor: ann.color || '#ffd400',
-          annotationPageLabel: `${(ann.pageIndex || 0) + 1}`,
-          annotationSortIndex: existing?.data?.annotationSortIndex || '00000|000000|00000',
-          annotationPosition: JSON.stringify(ann.position || { pageIndex: ann.pageIndex, rects: [] }),
+          annotationPageLabel: pageLabel,
+          annotationSortIndex: existing?.data?.annotationSortIndex || `${String(pageIdx).padStart(5, '0')}|000000|00000`,
+          annotationPosition: JSON.stringify(ann.position || { pageIndex: pageIdx, rects: [] }),
           tags: ann.tags?.length ? ann.tags : [{ tag: 'AltCanvas' }]
         };
 
         if (existing) {
-          toUpdate.push({ key: ann.id, version: existing.version, data: zoteroAnnData });
+          toUpdate.push({ key: serverId, clientId: ann.id, version: existing.version, data: zoteroAnnData });
         } else {
           toCreate.push({ id: ann.id, data: zoteroAnnData });
         }
@@ -1046,7 +1622,7 @@
       // 1. Create New Annotations
       if (toCreate.length > 0) {
         try {
-          const createUrl = getApiUrl(`/users/${encodeURIComponent(config.userId)}/items`);
+          const createUrl = getApiUrl(`${libraryApiPrefix(currentDocumentLibrary)}/items`);
           const res = await fetch(createUrl, {
             method: 'POST',
             headers: { ...getHeaders(), 'Content-Type': 'application/json' },
@@ -1056,8 +1632,16 @@
           const result = await res.json();
           const successful = result.successful || result;
           const createdItems = Array.isArray(successful) ? successful : Object.values(successful || {});
-          createdItems.forEach(item => {
-            if (item?.key) currentAnnotationsMap.set(item.key, { version: item.version, data: item.data });
+          createdItems.forEach((item, idx) => {
+            const clientObj = toCreate[idx];
+            const clientId = clientObj?.id;
+            const version = item.version || item.data?.version || 1;
+            if (item?.key) {
+              currentAnnotationsMap.set(item.key, { version, data: item.data || {} });
+              if (clientId && clientId !== item.key) {
+                clientAnnotationIdMap.set(clientId, item.key);
+              }
+            }
           });
           showToast(`已创建并同步 ${createdItems.length} 条新标注`, 'success');
         } catch (e) {
@@ -1068,7 +1652,7 @@
       // 2. Update Existing Annotations
       for (const item of toUpdate) {
         try {
-          const updateUrl = getApiUrl(`/users/${encodeURIComponent(config.userId)}/items/${encodeURIComponent(item.key)}`);
+          const updateUrl = getApiUrl(`${libraryApiPrefix(currentDocumentLibrary)}/items/${encodeURIComponent(item.key)}`);
           const res = await fetch(updateUrl, {
             method: 'PATCH',
             headers: {
@@ -1081,6 +1665,9 @@
           if (res.ok) {
             const newVersion = parseInt(res.headers.get('Last-Modified-Version') || `${item.version + 1}`);
             currentAnnotationsMap.set(item.key, { version: newVersion, data: item.data });
+            if (item.clientId && item.clientId !== item.key) {
+              clientAnnotationIdMap.set(item.clientId, item.key);
+            }
           } else {
             throw new Error(`HTTP ${res.status}`);
           }
@@ -1093,35 +1680,189 @@
       renderAnnotationCards();
     }
 
+    const activeAnnotationDeletions = new Set();
+
     async function handleDeleteAnnotations(deletedIds) {
       if (!deletedIds || deletedIds.length === 0) return;
       console.log('🗑️ onDeleteAnnotations triggered:', deletedIds);
-      await deleteAnnotationsByIds(deletedIds);
+      // Deletions triggered from inside the reader already updated reader state.
+      // Do not notify reader again to avoid echo loops.
+      await deleteAnnotationsByIds(deletedIds, { notifyReader: false });
     }
 
     // Shared deletion path: server DELETE + local map cleanup + best-effort
     // removal inside the reader iframe (so highlights disappear without reload).
-    async function deleteAnnotationsByIds(deletedIds) {
+    // Altero rejects unconditioned writes (HTTP 428 Precondition Required), so
+    // each item is deleted individually with its stored version — same
+    // precondition model the PATCH path already relies on.
+    async function deleteAnnotationsByIds(deletedIds, { notifyReader = false } = {}) {
       if (!currentAttachment || !deletedIds?.length) return;
 
-      try {
-        const keysParam = encodeURIComponent(deletedIds.join(','));
-        const deleteUrl = getApiUrl(`/users/${encodeURIComponent(config.userId)}/items?itemKey=${keysParam}`);
-        const res = await fetch(deleteUrl, {
-          method: 'DELETE',
-          headers: getHeaders()
-        });
+      const unhandledIds = deletedIds.filter(id => !activeAnnotationDeletions.has(id));
+      if (!unhandledIds.length) return;
+      for (const id of unhandledIds) activeAnnotationDeletions.add(id);
 
-        if (res.ok || res.status === 204) {
-          deletedIds.forEach(id => currentAnnotationsMap.delete(id));
-          removeAnnotationsInReader(deletedIds);
-          renderAnnotationCards();
-          showToast(`已同步删除 ${deletedIds.length} 条标注`, 'info');
-        } else {
-          throw new Error(`HTTP ${res.status}`);
+      const deleted = [];
+      const failed = [];
+      const readerIdsToRemove = new Set();
+
+      const forgetAnnotation = (rawId, serverId) => {
+        currentAnnotationsMap.delete(rawId);
+        currentAnnotationsMap.delete(serverId);
+        if (notifyReader) {
+          if (rawId) readerIdsToRemove.add(rawId);
+          if (serverId) readerIdsToRemove.add(serverId);
         }
-      } catch (e) {
-        showToast(`删除标注失败: ${e.message}`, 'error');
+        for (const [clientId, mappedServerId] of clientAnnotationIdMap) {
+          if (clientId === rawId || mappedServerId === serverId) {
+            if (notifyReader) readerIdsToRemove.add(clientId);
+            currentAnnotationsMap.delete(clientId);
+            clientAnnotationIdMap.delete(clientId);
+          }
+        }
+      };
+
+      const fetchItemVersion = async serverId => {
+        const itemUrl = getApiUrl(`${libraryApiPrefix(currentDocumentLibrary)}/items/${encodeURIComponent(serverId)}`);
+        const res = await fetch(itemUrl, { headers: getHeaders(), debugExpectedStatuses: [404] });
+        if (res.status === 404) return { missing: true, version: null };
+        if (!res.ok) throw new Error(`读取标注版本失败 (HTTP ${res.status})`);
+        const item = await res.json().catch(() => null);
+        const headerVersion = Number(res.headers.get('Last-Modified-Version'));
+        const version = Number(item?.version ?? item?.data?.version ?? headerVersion);
+        if (!Number.isFinite(version) || version <= 0) {
+          throw new Error('服务端未返回有效的标注版本');
+        }
+        return { missing: false, version };
+      };
+
+      try {
+        for (const rawId of unhandledIds) {
+          try {
+            const mappedId = clientAnnotationIdMap.get(rawId);
+            const serverId = mappedId || rawId;
+            const record = currentAnnotationsMap.get(serverId) || currentAnnotationsMap.get(rawId);
+            let version = Number(record?.version ?? record?.data?.version);
+
+            if (!Number.isFinite(version) || version <= 0) {
+              // A reader-only annotation can be deleted before its first sync has
+              // produced a server key. Try the exact key once; only an untracked
+              // 400/404 is treated as a local-only annotation.
+              try {
+                const lookup = await fetchItemVersion(serverId);
+                if (lookup.missing) {
+                  forgetAnnotation(rawId, serverId);
+                  deleted.push(rawId);
+                  continue;
+                }
+                version = lookup.version;
+              } catch (err) {
+                if (!mappedId && !record && /HTTP 400/.test(err.message)) {
+                  forgetAnnotation(rawId, serverId);
+                  deleted.push(rawId);
+                  continue;
+                }
+                throw err;
+              }
+            }
+
+            const itemUrl = getApiUrl(`${libraryApiPrefix(currentDocumentLibrary)}/items/${encodeURIComponent(serverId)}`);
+            const remove = itemVersion => fetch(itemUrl, {
+              method: 'DELETE',
+              headers: getHeaders({ 'If-Unmodified-Since-Version': String(itemVersion) }),
+              debugExpectedStatuses: [409, 412, 428, 500, 501, 502, 503, 504]
+            });
+
+            let res = await remove(version);
+            if ([409, 412, 428].includes(res.status)) {
+              const lookup = await fetchItemVersion(serverId);
+              if (lookup.missing) {
+                forgetAnnotation(rawId, serverId);
+                deleted.push(rawId);
+                continue;
+              }
+              res = await remove(lookup.version);
+            }
+            if (res.status === 412) {
+              // Zotero's single-item endpoint uses the item version. Some Altero
+              // releases currently validate DELETE against the library version
+              // instead ("Library has been modified..."). Fall back to the
+              // documented multi-item endpoint, scoped to this one exact key.
+              const libraryUrl = getApiUrl(`${libraryApiPrefix(currentDocumentLibrary)}/items?limit=1`);
+              const libraryRes = await fetch(libraryUrl, { headers: getHeaders() });
+              const libraryVersion = Number(libraryRes.headers.get('Last-Modified-Version'));
+              if (!libraryRes.ok || !Number.isFinite(libraryVersion) || libraryVersion <= 0) {
+                throw new Error(`无法读取最新文库版本 (HTTP ${libraryRes.status})`);
+              }
+              const batchUrl = getApiUrl(`${libraryApiPrefix(currentDocumentLibrary)}/items?itemKey=${encodeURIComponent(serverId)}`);
+              res = await fetch(batchUrl, {
+                method: 'DELETE',
+                headers: getHeaders({ 'If-Unmodified-Since-Version': String(libraryVersion) }),
+                debugExpectedStatuses: [500, 501, 502, 503, 504]
+              });
+            }
+            if (res.status >= 500) {
+              // Affected Altero builds can fail both v3 DELETE variants after
+              // version validation. Trashing the exact annotation is the safe,
+              // recoverable equivalent used by its own web UI.
+              const lookup = await fetchItemVersion(serverId);
+              if (lookup.missing) {
+                forgetAnnotation(rawId, serverId);
+                deleted.push(rawId);
+                continue;
+              }
+              res = await fetch(itemUrl, {
+                method: 'PATCH',
+                headers: getHeaders({
+                  'Content-Type': 'application/json',
+                  'If-Unmodified-Since-Version': String(lookup.version)
+                }),
+                body: JSON.stringify({ deleted: true })
+              });
+            }
+            if (res.status === 404) {
+              forgetAnnotation(rawId, serverId);
+              deleted.push(rawId);
+              continue;
+            }
+            if (!res.ok && res.status !== 204) {
+              const detail = await res.text().catch(() => '');
+              throw new Error(`HTTP ${res.status}${detail ? `: ${detail.slice(0, 240)}` : ''}`);
+            }
+
+            forgetAnnotation(rawId, serverId);
+            deleted.push(rawId);
+          } catch (e) {
+            console.error('Delete annotation error:', e);
+            failed.push({ id: rawId, message: e.message });
+          }
+        }
+      } finally {
+        for (const id of unhandledIds) {
+          setTimeout(() => activeAnnotationDeletions.delete(id), 1200);
+        }
+      }
+
+      if (notifyReader && readerIdsToRemove.size > 0) {
+        removeAnnotationsInReader([...readerIdsToRemove].filter(Boolean));
+      }
+
+      if (deleted.length) {
+        deleted.forEach(id => {
+          rememberDeletedAnnotation(id);
+          const mapped = clientAnnotationIdMap.get(id);
+          if (mapped) rememberDeletedAnnotation(mapped);
+        });
+        saveKnownDeletedAnnotations();
+        renderAnnotationCards();
+      }
+
+      if (failed.length === 0) {
+        // Successful deletion is already visible in the Reader; avoid an extra toast.
+      } else {
+        showToast(deleted.length
+          ? `已删除 ${deleted.length} 条，${failed.length} 条失败（${failed[0].message}）`
+          : `删除标注失败: ${failed[0].message}`, 'error');
       }
     }
 
@@ -1142,105 +1883,1035 @@
       }
     }
 
-    // --- Right Sidebar Canvas Cards Rendering ---
-    function renderAnnotationCards() {
-      const container = document.getElementById('canvas-cards');
-      const countBadge = document.getElementById('annotations-count');
+    // --- Mobile reader toolbar cleanup --------------------------------------
+    // The vendored reader toolbar assumes a desktop: zoom steppers, page
+    // up/down, go-back, appearance popup and read-aloud do not fit on a phone,
+    // and several are wired to no-op hosts here anyway. Hide them with an
+    // injected stylesheet inside the same-origin reader document and collect
+    // their replacements into an overflow "⋯" menu appended next to Find.
+    const ACX_READER_STYLE_ID = 'acx-mobile-reader-style';
+    const ACX_MENU_HOST_CLASS = 'acx-menu-host';
+    let acxMenuCloseHandler = null;
+    let acxSetupTimer = null;
 
-      const entries = Array.from(currentAnnotationsMap.entries());
-      const filtered = activeTypeFilter === 'all'
-        ? entries
-        : entries.filter(([_, item]) => (item.data?.annotationType || 'highlight') === activeTypeFilter);
+    function acxReaderWindow() {
+      return document.getElementById('reader-frame')?.contentWindow || null;
+    }
 
-      countBadge.textContent = entries.length;
-
-      if (entries.length === 0) {
-        container.innerHTML = `
-          <div class="text-center text-slate-600 py-16 text-xs leading-relaxed">
-            当前文档暂无标注<br>在左侧 PDF 中使用高亮/笔记工具添加
-          </div>
-        `;
-        return;
-      }
-
-      if (filtered.length === 0) {
-        container.innerHTML = '<div class="text-center text-slate-600 py-16 text-xs">当前筛选条件下暂无标注</div>';
-        return;
-      }
-
-      container.innerHTML = '';
-
-      for (const [key, item] of filtered) {
-        const ann = item.data || {};
-        const type = ann.annotationType || 'highlight';
-        const colorClass = annotationColorClass(ann.annotationColor);
-        const text = ann.annotationText || '';
-        const comment = ann.annotationComment || '';
-        const pageLabel = ann.annotationPageLabel || '1';
-
-        let pos = {};
-        try { pos = JSON.parse(ann.annotationPosition || '{}'); } catch(e) {}
-
-        const card = document.createElement('div');
-        card.className = 'p-3 rounded-lg bg-slate-900/90 border border-slate-800/90 hover:border-indigo-900/80 text-xs space-y-2 transition shadow-sm group';
-
-        const typeNames = { highlight: '高亮', note: '笔记', underline: '下划线', image: '区域' };
-
-        card.innerHTML = `
-          <div class="flex items-center justify-between">
-            <div class="flex items-center gap-1.5 font-medium">
-              <span class="w-2.5 h-2.5 rounded-full ${colorClass}"></span>
-              <span class="text-indigo-300">${escapeHTML(typeNames[type] || type)}</span>
-              <span class="text-[10px] text-slate-500 font-mono">p.${escapeHTML(pageLabel)}</span>
-            </div>
-            <span class="text-[10px] text-slate-500 font-mono">#${escapeHTML(key)}</span>
-          </div>
-
-          ${text ? `
-            <p class="text-slate-200 leading-relaxed bg-slate-950/60 p-2 rounded border border-slate-800/60 select-text font-serif text-[11px]">
-              “${escapeHTML(text)}”
-            </p>
-          ` : ''}
-
-          ${comment ? `
-            <div class="text-slate-300 text-[11px] bg-indigo-950/20 p-2 rounded border border-indigo-950/40">
-              💬 ${escapeHTML(comment)}
-            </div>
-          ` : ''}
-
-          <div class="flex items-center justify-between text-[10px] text-slate-500 pt-1 border-t border-slate-800/40">
-            <span class="text-emerald-500/80 flex items-center gap-1">
-              <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>已同步
-            </span>
-            <div class="flex items-center gap-2">
-              <button type="button" class="btn-jump text-indigo-400 hover:text-indigo-300 transition font-medium flex items-center gap-0.5">
-                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7l5 5m0 0l-5 5m5-5H6"></path></svg>
-                反向定位
-              </button>
-              <button type="button" class="btn-delete text-rose-400/80 hover:text-rose-300 transition font-medium flex items-center gap-0.5">
-                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
-                删除
-              </button>
-            </div>
-          </div>
-        `;
-
-        // Bind Reverse Jump
-        card.querySelector('.btn-jump').onclick = () => {
-          jumpToAnnotation(key, pos.pageIndex || 0);
-        };
-
-        // Bind Delete (card entry; removes on server + local + reader)
-        card.querySelector('.btn-delete').onclick = async () => {
-          if (!confirm('确定删除这条标注？此操作会同步删除 Altero 服务端的标注。')) return;
-          await deleteAnnotationsByIds([key]);
-        };
-
-        container.appendChild(card);
+    function acxTeardownMobileToolbar() {
+      clearTimeout(acxSetupTimer);
+      acxSetupTimer = null;
+      const frameWin = acxReaderWindow();
+      const frameDoc = frameWin?.document;
+      if (!frameDoc) return;
+      frameDoc.getElementById(ACX_READER_STYLE_ID)?.remove();
+      frameDoc.querySelector(`.${ACX_MENU_HOST_CLASS}`)?.remove();
+      if (acxMenuCloseHandler) {
+        frameDoc.removeEventListener('pointerdown', acxMenuCloseHandler, true);
+        acxMenuCloseHandler = null;
       }
     }
 
-    function jumpToAnnotation(annotationId, pageIndex) {
+    const ACX_MOBILE_READER_CSS = `
+      /* Free horizontal space: touch has pinch zoom and continuous scroll,
+         back-navigation/read-aloud/appearance are unusable in AltCanvas. */
+      .toolbar-button.zoomOut, .toolbar-button.zoomIn, .toolbar-button.zoomAuto,
+      .toolbar-button.navigateBack, .toolbar-button.pageUp, .toolbar-button.pageDown,
+      input#pageNumber, #numPages, #read-aloud, #appearance {
+        display: none !important;
+      }
+      .acx-divider-hide { display: none !important; }
+      .toolbar > .end { padding-right: 40px !important; }
+      .${ACX_MENU_HOST_CLASS} {
+        position: absolute; top: 50%; right: 3px; transform: translateY(-50%);
+        height: 100%; z-index: 60; display: flex; align-items: center;
+      }
+      .acx-menu-trigger {
+        width: 36px; min-width: 36px; height: 32px; margin: 0;
+        display: flex; align-items: center; justify-content: center;
+        border-radius: 6px; cursor: pointer; opacity: .82;
+      }
+      .acx-menu-trigger:hover, .acx-menu-trigger.acx-open { opacity: 1; background: rgba(128,138,160,.18); }
+      .acx-menu-panel {
+        position: fixed; right: 6px; z-index: 90; min-width: 168px; max-height: 62vh;
+        overflow-y: auto; padding: 5px; border-radius: 12px;
+        background: rgba(26,29,37,.97); border: 1px solid rgba(99,112,140,.35);
+        box-shadow: 0 10px 32px rgba(0,0,0,.45); backdrop-filter: blur(6px);
+        font-family: system-ui, sans-serif; user-select: none;
+      }
+      .acx-menu-group-title {
+        padding: 7px 10px 3px; font-size: 10.5px; letter-spacing: .08em;
+        color: #8391ab; text-transform: uppercase;
+      }
+      .acx-menu-item {
+        display: flex; align-items: center; gap: 8px; width: calc(100% - 8px);
+        margin: 1px 4px; padding: 9px 10px; border: 0; border-radius: 8px;
+        background: transparent; color: #dbe2f1; font-size: 13.5px; line-height: 1.2;
+        text-align: left; cursor: pointer; white-space: nowrap;
+      }
+      .acx-menu-item:hover, .acx-menu-item:active { background: rgba(87,98,178,.35); }
+    `;
+
+    function acxPruneOrphanDividers(toolbarEl) {
+      const isVisible = el => !!(el.offsetWidth || el.offsetHeight || getComputedStyle(el).position === 'absolute');
+      toolbarEl.querySelectorAll(':scope > div > .divider').forEach(divider => {
+        const peers = Array.from(divider.parentElement.children);
+        const idx = peers.indexOf(divider);
+        let hasVisibleBefore = false;
+        let hasVisibleAfter = false;
+        for (let i = idx - 1; i >= 0; i--) {
+          if (peers[i].classList.contains('divider')) continue;
+          hasVisibleBefore = isVisible(peers[i]);
+          break;
+        }
+        for (let i = idx + 1; i < peers.length; i++) {
+          if (peers[i].classList.contains('divider')) continue;
+          hasVisibleAfter = isVisible(peers[i]);
+          break;
+        }
+        if (!hasVisibleBefore || !hasVisibleAfter) divider.classList.add('acx-divider-hide');
+      });
+    }
+
+    function acxBuildMobileMenu(frameWin, toolbarEl) {
+      const reader = frameWin._reader;
+      const run = fn => { try { fn(); } catch (e) { console.warn('Mobile reader action failed:', e); } };
+      const clickHidden = sel => {
+        const btn = toolbarEl.querySelector(sel);
+        if (btn && !btn.disabled) btn.click();
+      };
+
+      const groups = [
+        { title: '缩放', items: [
+          ['放大', () => run(() => reader.zoomIn())],
+          ['缩小', () => run(() => reader.zoomOut())],
+          ['适应宽度', () => run(() => reader.zoomAuto ? reader.zoomAuto() : reader.zoomPageWidth())],
+          ['原始大小', () => run(() => reader.zoomReset())]
+        ] },
+        { title: '页面', items: [
+          ['上一页', () => run(() => reader.navigateToPreviousPage())],
+          ['下一页', () => run(() => reader.navigateToNextPage())],
+          ['跳转到页…', () => run(() => {
+            const raw = prompt('跳转到第几页？');
+            const page = parseInt(raw, 10);
+            if (Number.isFinite(page) && page >= 1) reader.navigate({ pageNumber: page });
+          })]
+        ] },
+        { title: '显示', items: [
+          ['切换排版模式', () => clickHidden('#readingMode')],
+          ['深色背景', () => run(() => reader.setColorScheme('dark'))],
+          ['浅色背景', () => run(() => reader.setColorScheme('light'))],
+          ['跟随系统', () => run(() => reader.setColorScheme('auto'))]
+        ] }
+      ];
+
+      const menuIconSvg = '<svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor">' +
+        '<circle cx="5" cy="12" r="1.9"/><circle cx="12" cy="12" r="1.9"/><circle cx="19" cy="12" r="1.9"/></svg>';
+
+      const host = frameWin.document.createElement('div');
+      host.className = ACX_MENU_HOST_CLASS;
+      const trigger = frameWin.document.createElement('button');
+      trigger.type = 'button';
+      trigger.className = 'toolbar-button acx-menu-trigger';
+      trigger.title = '更多工具';
+      trigger.innerHTML = menuIconSvg;
+      const panel = frameWin.document.createElement('div');
+      panel.className = 'acx-menu-panel';
+      panel.hidden = true;
+      for (const group of groups) {
+        const title = frameWin.document.createElement('div');
+        title.className = 'acx-menu-group-title';
+        title.textContent = group.title;
+        panel.appendChild(title);
+        for (const [label, action] of group.items) {
+          const item = frameWin.document.createElement('button');
+          item.type = 'button';
+          item.className = 'acx-menu-item';
+          item.textContent = label;
+          item.onclick = () => { action(); panel.hidden = true; trigger.classList.remove('acx-open'); };
+          panel.appendChild(item);
+        }
+      }
+      host.append(trigger, panel);
+
+      trigger.addEventListener('click', e => {
+        e.stopPropagation();
+        panel.hidden = !panel.hidden;
+        trigger.classList.toggle('acx-open', !panel.hidden);
+        if (!panel.hidden) {
+          const rect = toolbarEl.getBoundingClientRect();
+          const naturalHeight = Math.min(panel.scrollHeight, Math.round(window.innerHeight * 0.62));
+          panel.style.top = `${Math.min(rect.bottom + 4, Math.max(window.innerHeight - naturalHeight - 6, rect.top))}px`;
+        }
+      });
+
+      acxMenuCloseHandler = e => {
+        if (!panel.hidden && !host.contains(e.target)) {
+          panel.hidden = true;
+          trigger.classList.remove('acx-open');
+        }
+      };
+      frameWin.document.addEventListener('pointerdown', acxMenuCloseHandler, true);
+
+      return host;
+    }
+
+    function acxInstallMobileToolbar() {
+      const frameWin = acxReaderWindow();
+      const frameDoc = frameWin?.document;
+      const toolbarEl = frameDoc?.querySelector('.toolbar');
+      if (!frameWin?._reader || !toolbarEl) return false;
+
+      if (!frameDoc.getElementById(ACX_READER_STYLE_ID)) {
+        const style = frameDoc.createElement('style');
+        style.id = ACX_READER_STYLE_ID;
+        style.textContent = ACX_MOBILE_READER_CSS;
+        frameDoc.head.appendChild(style);
+        toolbarEl.style.position = 'relative';
+      }
+      if (!toolbarEl.querySelector(`.${ACX_MENU_HOST_CLASS}`)) {
+        toolbarEl.appendChild(acxBuildMobileMenu(frameWin, toolbarEl));
+      }
+      acxPruneOrphanDividers(toolbarEl);
+      return true;
+    }
+
+    // React renders the toolbar asynchronously after createReader, and the
+    // iframe is reloaded for every opened document, so poll briefly and bail
+    // out silently if the breakpoint changed meanwhile.
+    function scheduleAcxMobileToolbar(retries = 40) {
+      clearTimeout(acxSetupTimer);
+      if (!mobileMedia.matches) return;
+      if (acxInstallMobileToolbar()) return;
+      if (retries <= 0) return;
+      acxSetupTimer = setTimeout(() => scheduleAcxMobileToolbar(retries - 1), 200);
+    }
+
+    mobileMedia.addEventListener('change', e => {
+      if (e.matches) scheduleAcxMobileToolbar();
+      else acxTeardownMobileToolbar();
+    });
+
+
+    // --- Persistent Spatial Canvas ----------------------------------------
+    function setCanvasSaveState(label, tone = 'muted') {
+      const element = document.getElementById('canvas-save-state');
+      element.textContent = label;
+      element.className = `text-[10px] ${tone === 'ok' ? 'text-emerald-500' : tone === 'error' ? 'text-rose-400' : 'text-slate-500'}`;
+    }
+
+    async function canvasFetch(path, options = {}) {
+      const headers = { Accept: 'application/json', ...(options.headers || {}) };
+      if (options.body !== undefined && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
+      const response = await fetch(`/canvas${path}`, {
+        ...options,
+        headers,
+        body: options.body === undefined || typeof options.body === 'string'
+          ? options.body : JSON.stringify(options.body)
+      });
+      if (response.status === 204) return null;
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        const err = new Error(payload?.error?.message || `Canvas HTTP ${response.status}`);
+        err.status = response.status;
+        err.code = payload?.error?.code;
+        throw err;
+      }
+      return payload?.data;
+    }
+
+    function applyCanvasSnapshot(snapshot) {
+      canvasBoard = snapshot.board;
+      canvasNodes = new Map((snapshot.nodes || []).map(node => [node.id, node]));
+      canvasEdges = new Map((snapshot.edges || []).map(edge => [edge.id, edge]));
+      canvasSources = new Map((snapshot.sources || []).map(sourceRef => [sourceRef.id, sourceRef]));
+      canvasReady = true;
+      canvasConnectSourceId = null;
+      renderCanvas();
+      setCanvasSaveState('已保存', 'ok');
+    }
+
+    let sourceFreshnessMap = new Map(); // source identity -> intact | modified | deleted | inaccessible | error
+    let sourceFreshnessInFlight = false;
+
+    async function checkSourcesFreshness() {
+      if (!canvasSources.size || !config.userId || sourceFreshnessInFlight) return;
+      sourceFreshnessInFlight = true;
+
+      const attachmentSources = new Map();
+      const directAnnotationSources = [];
+      let hasChanges = false;
+      const setStatus = (sourceRef, status) => {
+        const identity = sourceIdentity(sourceRef);
+        if (!identity) return;
+        if (sourceFreshnessMap.get(identity) !== status) hasChanges = true;
+        sourceFreshnessMap.set(identity, status);
+        if (status === 'deleted') rememberDeletedAnnotation(sourceRef.annotationKey, sourceRef);
+      };
+
+      try {
+        for (const sourceRef of canvasSources.values()) {
+          if (!sourceRef?.annotationKey) continue;
+          if (sourceRef.attachmentKey) {
+            const groupKey = `${libraryApiPrefix(sourceRef)}|${sourceRef.attachmentKey}`;
+            const group = attachmentSources.get(groupKey) || { sourceRef, attachmentKey: sourceRef.attachmentKey, sources: [] };
+            group.sources.push(sourceRef);
+            attachmentSources.set(groupKey, group);
+          } else {
+            directAnnotationSources.push(sourceRef);
+          }
+        }
+
+        for (const group of attachmentSources.values()) {
+          const annUrl = getApiUrl(`${libraryApiPrefix(group.sourceRef)}/items/${encodeURIComponent(group.attachmentKey)}/children`);
+          try {
+            const res = await fetch(annUrl, { headers: getHeaders(), debugExpectedStatuses: [401, 403, 404] });
+            if ([401, 403].includes(res.status)) {
+              group.sources.forEach(sourceRef => setStatus(sourceRef, 'inaccessible'));
+              continue;
+            }
+            if (res.status === 404) {
+              group.sources.forEach(sourceRef => setStatus(sourceRef, 'deleted'));
+              continue;
+            }
+            if (!res.ok) throw new Error(`来源检查失败 (HTTP ${res.status})`);
+            const children = await res.json();
+            const liveMap = new Map(children
+              .filter(item => item.data?.itemType === 'annotation')
+              .map(item => [item.key, Number(item.version || item.data?.version || 0)]));
+            for (const sourceRef of group.sources) {
+              if (!liveMap.has(sourceRef.annotationKey)) setStatus(sourceRef, 'deleted');
+              else if (sourceRef.annotationVersion && liveMap.get(sourceRef.annotationKey) > sourceRef.annotationVersion) setStatus(sourceRef, 'modified');
+              else setStatus(sourceRef, 'intact');
+            }
+          } catch (err) {
+            group.sources.forEach(sourceRef => setStatus(sourceRef, 'error'));
+            reportApplicationError('canvas.source-freshness', err, { method: 'GET', endpoint: annUrl });
+          }
+        }
+
+        for (const sourceRef of directAnnotationSources) {
+          const itemUrl = getApiUrl(`${libraryApiPrefix(sourceRef)}/items/${encodeURIComponent(sourceRef.annotationKey)}`);
+          try {
+            const res = await fetch(itemUrl, { headers: getHeaders(), debugExpectedStatuses: [401, 403, 404] });
+            if ([401, 403].includes(res.status)) setStatus(sourceRef, 'inaccessible');
+            else if (res.status === 404) setStatus(sourceRef, 'deleted');
+            else if (!res.ok) throw new Error(`来源检查失败 (HTTP ${res.status})`);
+            else {
+              const item = await res.json();
+              const liveVersion = Number(item?.version || item?.data?.version || 0);
+              setStatus(sourceRef, sourceRef.annotationVersion && liveVersion > sourceRef.annotationVersion ? 'modified' : 'intact');
+            }
+          } catch (err) {
+            setStatus(sourceRef, 'error');
+            reportApplicationError('canvas.source-freshness', err, { method: 'GET', endpoint: itemUrl });
+          }
+        }
+      } finally {
+        sourceFreshnessInFlight = false;
+        if (hasChanges) {
+          saveKnownDeletedAnnotations();
+          if (canvasReady) renderCanvas();
+        }
+      }
+    }
+
+    async function loadCanvasSnapshot() {
+      if (!canvasBoard) return;
+      const loadingBoardId = canvasBoard.id;
+      setCanvasSaveState('加载中…');
+      const snapshot = await canvasFetch(`/boards/${loadingBoardId}/snapshot`);
+      if (canvasBoard?.id !== loadingBoardId) return;
+      applyCanvasSnapshot(snapshot);
+      void checkSourcesFreshness();
+    }
+
+    async function initCanvasWorkspace() {
+      if (config.mode !== 'bff' || !config.user) {
+        canvasReady = false;
+        setCanvasSaveState('需 OIDC 登录', 'error');
+        renderCanvas();
+        return;
+      }
+      try {
+        setCanvasSaveState('初始化…');
+        let workspaces = await canvasFetch('/workspaces');
+        canvasWorkspace = workspaces[0] || await canvasFetch('/workspaces', {
+          method: 'POST', body: { name: '我的研究工作区' }
+        });
+        let boards = await canvasFetch(`/workspaces/${canvasWorkspace.id}/boards`);
+        const preferredBoardId = localStorage.getItem(`altcanvas.canvasBoard.${config.userId}`);
+        canvasBoard = boards.find(board => board.id === preferredBoardId) || boards[0]
+          || await canvasFetch(`/workspaces/${canvasWorkspace.id}/boards`, {
+            method: 'POST', body: { name: '研究画板' }
+          });
+        localStorage.setItem(`altcanvas.canvasBoard.${config.userId}`, canvasBoard.id);
+        await loadCanvasSnapshot();
+      } catch (err) {
+        reportApplicationError('canvas.initialize', err);
+        canvasReady = false;
+        setCanvasSaveState(err.status === 401 ? '请重新登录' : '加载失败', 'error');
+        renderCanvas();
+        showToast(`画板初始化失败: ${errorMessage(err)}`, 'error');
+      }
+    }
+
+    function renderAnnotationCards() {
+      updateCanvasImportState();
+      if (canvasReady) renderCanvas();
+    }
+
+    function updateCanvasImportState() {
+      const button = document.getElementById('btn-canvas-import');
+      const imported = new Set([...canvasSources.values()].map(sourceRef => sourceRef.annotationKey).filter(Boolean));
+      const available = [...currentAnnotationsMap.keys()].filter(key => !imported.has(key)).length;
+      button.disabled = !canvasReady || !currentAttachment || available === 0;
+      button.textContent = available > 0 ? `加入当前标注 (${available})` : '加入当前标注';
+      button.title = currentAttachment ? '把当前 PDF 中尚未加入的标注持久化到画板' : '请先打开 PDF 文档';
+    }
+
+    function canvasViewport() {
+      return canvasBoard?.viewport || { x: 0, y: 0, zoom: 1 };
+    }
+
+    function updateCanvasTransform() {
+      const viewportState = canvasViewport();
+      document.getElementById('canvas-world').style.transform = `translate(${viewportState.x}px, ${viewportState.y}px) scale(${viewportState.zoom})`;
+      document.getElementById('btn-canvas-zoom-reset').textContent = `${Math.round(viewportState.zoom * 100)}%`;
+      document.getElementById('canvas-cards').style.backgroundPosition = `${viewportState.x}px ${viewportState.y}px`;
+      document.getElementById('canvas-cards').style.backgroundSize = `${24 * viewportState.zoom}px ${24 * viewportState.zoom}px`;
+    }
+
+    function renderCanvas() {
+      const world = document.getElementById('canvas-world');
+      const nodesContainer = document.getElementById('canvas-nodes');
+      const empty = document.getElementById('canvas-empty');
+      const count = document.getElementById('annotations-count');
+      updateCanvasTransform();
+      count.textContent = canvasNodes.size;
+      empty.classList.toggle('hidden', canvasNodes.size > 0);
+      if (!canvasReady && canvasNodes.size === 0) {
+        empty.querySelector('div').innerHTML = 'Canvas 需要 OIDC 登录<br>开发用 API key 模式不会访问画板数据';
+      } else if (canvasNodes.size === 0) {
+        empty.querySelector('div').innerHTML = '画板还是空的<br>创建手写卡片或加入当前文档标注';
+      }
+      nodesContainer.replaceChildren();
+      for (const node of canvasNodes.values()) nodesContainer.appendChild(createCanvasNodeElement(node));
+      renderCanvasEdges();
+      updateCanvasImportState();
+    }
+
+    function createCanvasNodeElement(node) {
+      const sourceRef = node.sourceRefId ? canvasSources.get(node.sourceRefId) : null;
+      const element = document.createElement('article');
+      const isSelected = canvasSelectedNodeIds.has(node.id);
+      element.className = `canvas-node ${canvasConnectSourceId === node.id ? 'is-connect-source' : ''} ${isSelected ? 'is-selected' : ''} ${node.type === 'ai_output' ? 'border-purple-800/80 bg-purple-950/20' : ''}`;
+      element.dataset.nodeId = node.id;
+      element.tabIndex = 0;
+      element.style.left = `${node.x}px`;
+      element.style.top = `${node.y}px`;
+      element.style.width = `${node.width}px`;
+      element.style.height = `${node.height}px`;
+      element.style.zIndex = String(node.zIndex);
+      if (node.color) element.style.borderTop = `3px solid ${node.color}`;
+      const typeNames = {
+        annotation: '文献标注', manual_note: '手写卡片', zotero_item: '文献',
+        attachment: '附件', image: '图片', ai_output: 'AI 输出', group: '分组'
+      };
+      const displayPageLabel = sourceRef ? getAnnotationPageLabel(sourceRef) : null;
+      const cleanBody = cleanAnnotationText(node.body) || '空白卡片';
+      const showTitle = node.type === 'manual_note' || node.type === 'ai_output'
+        ? Boolean(node.title)
+        : (node.title && !/^第\s*\d+\s*页$/.test(node.title.trim()) && node.title !== '文献标注');
+
+      let sourceStatus = null;
+      let sourceStatusTitle = '';
+      if (sourceRef?.annotationKey) {
+        const identity = sourceIdentity(sourceRef);
+        const freshStatus = sourceFreshnessMap.get(identity);
+        if (freshStatus === 'deleted' || knownDeletedAnnotationKeys.has(identity)) {
+          sourceStatus = 'deleted';
+          sourceStatusTitle = '原批注已在文库中删除（画板已保留当时摘录快照）';
+        } else if (freshStatus === 'modified') {
+          sourceStatus = 'modified';
+          sourceStatusTitle = '原批注在文库中已有更新';
+        } else if (freshStatus === 'inaccessible') {
+          sourceStatus = 'inaccessible';
+          sourceStatusTitle = '当前会话无权访问原批注所在文库';
+        } else if (freshStatus === 'error') {
+          sourceStatus = 'error';
+          sourceStatusTitle = '暂时无法检查原批注状态';
+        } else if (currentAttachment && isSameLibrary(currentDocumentLibrary, sourceRef)
+          && (currentAttachment.key === sourceRef.attachmentKey || currentAnnotationsMap.has(sourceRef.annotationKey))) {
+          const liveAnn = currentAnnotationsMap.get(sourceRef.annotationKey);
+          if (!liveAnn) {
+            sourceStatus = 'deleted';
+            sourceStatusTitle = '原批注已在文库中删除（画板已保留当时摘录快照）';
+            rememberDeletedAnnotation(sourceRef.annotationKey, sourceRef);
+            sourceFreshnessMap.set(identity, 'deleted');
+            saveKnownDeletedAnnotations();
+          } else if (sourceRef.annotationVersion && liveAnn.version && liveAnn.version > sourceRef.annotationVersion) {
+            sourceStatus = 'modified';
+            sourceStatusTitle = '原批注在文库中已有更新';
+            sourceFreshnessMap.set(identity, 'modified');
+          }
+        }
+      }
+
+      let headerTitleHtml = '';
+      if (node.type === 'ai_output') {
+        headerTitleHtml = `<span class="text-purple-300 font-medium truncate flex items-center gap-1"><span>✨</span><span>${escapeHTML(node.title || 'AI 输出')}</span></span>`;
+      } else if (sourceRef?.annotationKey) {
+        headerTitleHtml = `<button type="button" class="canvas-node-jump text-indigo-300 hover:text-indigo-200 font-medium truncate flex items-center gap-1 hover:underline text-left cursor-pointer" title="点击在阅读器中跳转定位"><span>${escapeHTML(typeNames[node.type] || node.type)}</span>${displayPageLabel ? `<span class="text-slate-400 font-mono text-[9px]">p.${escapeHTML(displayPageLabel)}</span>` : ''}<span class="text-indigo-400 text-[10px]">↗</span></button>`;
+      } else {
+        headerTitleHtml = `<span class="text-indigo-300 font-medium truncate">${escapeHTML(typeNames[node.type] || node.type)}</span>`;
+      }
+
+      const isEditable = node.type === 'manual_note' || node.type === 'ai_output' || node.type === 'annotation';
+      let footerHtml = '';
+      if (node.type === 'ai_output') {
+        footerHtml = `<div class="mt-2 pt-1.5 border-t border-purple-900/50 text-[9px] text-purple-400 font-mono flex items-center justify-between"><span>✨ AI 智能生成</span><button type="button" class="canvas-node-focus-sources text-purple-300 hover:text-purple-200 underline cursor-pointer" title="在画板上高亮关联的输入卡片">溯源输入</button></div>`;
+      } else if (sourceRef?.annotationKey) {
+        footerHtml = `<div class="mt-2 pt-1.5 border-t border-slate-800 text-[9px] text-slate-500 font-mono flex items-center justify-between"><span>#${escapeHTML(sourceRef.annotationKey)}</span>${sourceRef.itemKey ? `<span class="text-slate-600">Doc #${escapeHTML(sourceRef.itemKey)}</span>` : ''}</div>`;
+      }
+
+      element.innerHTML = `
+        <div class="canvas-node-header flex items-center justify-between gap-2 px-2.5 py-2 border-b border-slate-800 ${node.type === 'ai_output' ? 'bg-purple-950/60' : 'bg-slate-900/90'} text-[10px]">
+          <div class="min-w-0 flex items-center gap-1.5 flex-wrap">
+            ${headerTitleHtml}
+            ${sourceStatus === 'deleted' ? `<span class="px-1 py-0.5 rounded bg-rose-950/80 border border-rose-800/80 text-rose-300 text-[9px]" title="${escapeHTML(sourceStatusTitle)}">原注已删</span>` : ''}
+            ${sourceStatus === 'modified' ? `<span class="px-1 py-0.5 rounded bg-amber-950/80 border border-amber-800/80 text-amber-300 text-[9px]" title="${escapeHTML(sourceStatusTitle)}">原文已更</span>` : ''}
+            ${sourceStatus === 'inaccessible' ? `<span class="px-1 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-300 text-[9px]" title="${escapeHTML(sourceStatusTitle)}">无权访问</span>` : ''}
+            ${sourceStatus === 'error' ? `<span class="px-1 py-0.5 rounded bg-slate-900 border border-slate-700 text-slate-400 text-[9px]" title="${escapeHTML(sourceStatusTitle)}">状态未知</span>` : ''}
+          </div>
+          <div class="flex items-center gap-0.5 shrink-0">
+            ${sourceStatus === 'deleted' && sourceRef?.attachmentKey && sourceRef?.position ? '<button type="button" class="canvas-node-restore-source text-emerald-400 hover:text-emerald-300" title="以新批注恢复到 PDF 并重新绑定">↺</button>' : ''}
+            ${isEditable ? '<button type="button" class="canvas-node-edit text-slate-400 hover:text-slate-200" title="编辑卡片内容">✎</button>' : ''}
+            <button type="button" class="canvas-node-delete text-rose-400/80 hover:text-rose-300" title="从画板移除">×</button>
+          </div>
+        </div>
+        <div class="canvas-node-body custom-scrollbar flex-1 p-2.5 text-[11px] leading-relaxed">${showTitle && node.type !== 'ai_output' ? `<div class="font-semibold text-slate-200 mb-1.5">${escapeHTML(node.title)}</div>` : ''}<div class="canvas-node-text ${node.type === 'annotation' ? 'font-serif text-slate-300' : 'text-slate-300'}">${escapeHTML(cleanBody)}</div>${footerHtml}</div>
+        <div class="canvas-resize-handle" role="button" aria-label="调整卡片大小" tabindex="0"></div>
+      `;
+
+      const header = element.querySelector('.canvas-node-header');
+      header.addEventListener('pointerdown', event => beginCanvasNodeDrag(event, node, element));
+      element.querySelectorAll('button').forEach(button => button.addEventListener('pointerdown', event => event.stopPropagation()));
+      element.querySelector('.canvas-node-delete').onclick = event => {
+        event.stopPropagation();
+        deleteCanvasNode(node);
+      };
+      element.querySelector('.canvas-node-edit')?.addEventListener('click', event => {
+        event.stopPropagation();
+        editCanvasNote(node, element);
+      });
+      element.querySelector('.canvas-node-restore-source')?.addEventListener('click', event => {
+        event.stopPropagation();
+        restoreCanvasAnnotationToPdf(node, sourceRef);
+      });
+      element.querySelector('.canvas-node-jump')?.addEventListener('click', event => {
+        event.stopPropagation();
+        jumpToSourceAnnotation(sourceRef);
+      });
+      element.querySelector('.canvas-node-focus-sources')?.addEventListener('click', event => {
+        event.stopPropagation();
+        focusAiInputSources(node.id);
+      });
+      element.querySelector('.canvas-resize-handle').addEventListener('pointerdown', event => beginCanvasNodeResize(event, node, element));
+      element.addEventListener('click', event => {
+        if (element.dataset.suppressClick === 'true' || event.target.closest('button') || event.target.closest('.canvas-resize-handle')) return;
+        if (document.getElementById('btn-canvas-connect').getAttribute('aria-pressed') === 'true') {
+          handleCanvasConnectSelection(node.id);
+          return;
+        }
+
+        element.focus({ preventScroll: true });
+        if (event.shiftKey || event.ctrlKey || event.metaKey) {
+          if (canvasSelectedNodeIds.has(node.id)) {
+            canvasSelectedNodeIds.delete(node.id);
+          } else {
+            canvasSelectedNodeIds.add(node.id);
+          }
+        } else {
+          if (canvasSelectedNodeIds.has(node.id) && canvasSelectedNodeIds.size === 1) {
+            canvasSelectedNodeIds.clear();
+          } else {
+            canvasSelectedNodeIds.clear();
+            canvasSelectedNodeIds.add(node.id);
+          }
+        }
+        renderCanvasSelectedState();
+        updateCanvasAiToolbar();
+      });
+      element.addEventListener('keydown', event => {
+        if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key) || event.target !== element) return;
+        event.preventDefault();
+        const step = event.shiftKey ? 40 : 10;
+        if (event.key === 'ArrowLeft') node.x -= step;
+        if (event.key === 'ArrowRight') node.x += step;
+        if (event.key === 'ArrowUp') node.y -= step;
+        if (event.key === 'ArrowDown') node.y += step;
+        renderCanvas();
+        scheduleCanvasLayoutSave();
+      });
+      return element;
+    }
+
+    function renderCanvasEdges() {
+      const svg = document.getElementById('canvas-edges');
+      svg.replaceChildren();
+      for (const edge of canvasEdges.values()) {
+        const sourceNode = canvasNodes.get(edge.sourceNodeId);
+        const targetNode = canvasNodes.get(edge.targetNodeId);
+        if (!sourceNode || !targetNode) continue;
+        const x1 = sourceNode.x + sourceNode.width / 2;
+        const y1 = sourceNode.y + sourceNode.height / 2;
+        const x2 = targetNode.x + targetNode.width / 2;
+        const y2 = targetNode.y + targetNode.height / 2;
+        const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        line.setAttribute('class', 'canvas-edge');
+        line.setAttribute('x1', x1); line.setAttribute('y1', y1);
+        line.setAttribute('x2', x2); line.setAttribute('y2', y2);
+        svg.appendChild(line);
+        if (edge.label || edge.relation !== 'related') {
+          const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+          label.setAttribute('class', 'canvas-edge-label');
+          label.setAttribute('x', (x1 + x2) / 2);
+          label.setAttribute('y', (y1 + y2) / 2 - 5);
+          label.setAttribute('text-anchor', 'middle');
+          label.textContent = edge.label || edge.relation;
+          svg.appendChild(label);
+        }
+      }
+    }
+
+    function beginCanvasNodeDrag(event, node, element) {
+      if (event.button !== 0 || event.target.closest('button')) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const startX = event.clientX;
+      const startY = event.clientY;
+      const originX = node.x;
+      const originY = node.y;
+      let moved = false;
+      const onMove = moveEvent => {
+        const zoom = canvasViewport().zoom;
+        node.x = originX + (moveEvent.clientX - startX) / zoom;
+        node.y = originY + (moveEvent.clientY - startY) / zoom;
+        moved ||= Math.abs(moveEvent.clientX - startX) + Math.abs(moveEvent.clientY - startY) > 3;
+        element.style.left = `${node.x}px`;
+        element.style.top = `${node.y}px`;
+        renderCanvasEdges();
+      };
+      const onUp = () => {
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', onUp);
+        if (moved) {
+          element.dataset.suppressClick = 'true';
+          setTimeout(() => { delete element.dataset.suppressClick; }, 0);
+          scheduleCanvasLayoutSave();
+        }
+      };
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp, { once: true });
+    }
+
+    function beginCanvasNodeResize(event, node, element) {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const startX = event.clientX;
+      const startY = event.clientY;
+      const originWidth = node.width;
+      const originHeight = node.height;
+      const onMove = moveEvent => {
+        const zoom = canvasViewport().zoom;
+        node.width = Math.min(5000, Math.max(80, originWidth + (moveEvent.clientX - startX) / zoom));
+        node.height = Math.min(5000, Math.max(40, originHeight + (moveEvent.clientY - startY) / zoom));
+        element.style.width = `${node.width}px`;
+        element.style.height = `${node.height}px`;
+        renderCanvasEdges();
+      };
+      const onUp = () => {
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', onUp);
+        scheduleCanvasLayoutSave();
+      };
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp, { once: true });
+    }
+
+    function scheduleCanvasLayoutSave(delay = 450, markMutation = true) {
+      if (!canvasReady) return;
+      if (markMutation) canvasMutationRevision += 1;
+      clearTimeout(canvasLayoutTimer);
+      canvasLayoutTimer = setTimeout(saveCanvasLayout, delay);
+      setCanvasSaveState('未保存');
+    }
+
+    async function saveCanvasLayout() {
+      canvasLayoutTimer = null;
+      if (!canvasReady || canvasSaveInFlight) {
+        if (canvasSaveInFlight) scheduleCanvasLayoutSave(500);
+        return;
+      }
+      canvasSaveInFlight = true;
+      const savingBoardId = canvasBoard.id;
+      const saveRevision = canvasMutationRevision;
+      const latestViewport = () => ({ ...canvasViewport() });
+      setCanvasSaveState('保存中…');
+      try {
+        const snapshot = await canvasFetch(`/boards/${savingBoardId}/layout`, {
+          method: 'PATCH',
+          headers: { 'If-Match': `W/"${canvasBoard.version}"` },
+          body: {
+            viewport: canvasViewport(),
+            nodes: [...canvasNodes.values()].map(node => ({
+              id: node.id, version: node.version, x: node.x, y: node.y,
+              width: node.width, height: node.height, zIndex: node.zIndex
+            }))
+          }
+        });
+        if (canvasBoard?.id !== savingBoardId) return;
+        if (saveRevision === canvasMutationRevision) {
+          applyCanvasSnapshot(snapshot);
+        } else {
+          const pendingViewport = latestViewport();
+          const pendingGeometry = new Map([...canvasNodes.values()].map(node => [node.id, {
+            x: node.x, y: node.y, width: node.width, height: node.height, zIndex: node.zIndex
+          }]));
+          snapshot.board.viewport = pendingViewport;
+          for (const node of snapshot.nodes) Object.assign(node, pendingGeometry.get(node.id) || {});
+          applyCanvasSnapshot(snapshot);
+          scheduleCanvasLayoutSave(100, false);
+        }
+      } catch (err) {
+        if (canvasBoard?.id !== savingBoardId) return;
+        reportApplicationError('canvas.layout', err);
+        setCanvasSaveState('保存冲突', 'error');
+        showToast(`画板布局保存失败，已重新加载: ${errorMessage(err)}`, 'error');
+        await loadCanvasSnapshot().catch(() => {});
+      } finally {
+        canvasSaveInFlight = false;
+      }
+    }
+
+    function canvasCenterPosition(offset = 0) {
+      const surface = document.getElementById('canvas-cards').getBoundingClientRect();
+      const viewportState = canvasViewport();
+      return {
+        x: (surface.width / 2 - viewportState.x) / viewportState.zoom - 120 + offset,
+        y: (surface.height / 2 - viewportState.y) / viewportState.zoom - 70 + offset
+      };
+    }
+
+    async function addCanvasNote() {
+      if (!canvasReady) return showToast('请先使用 OIDC 登录以启用持久化画板', 'error');
+      const position = canvasCenterPosition(canvasNodes.size % 5 * 24);
+      try {
+        setCanvasSaveState('保存中…');
+        const node = await canvasFetch(`/boards/${canvasBoard.id}/nodes`, {
+          method: 'POST',
+          body: { type: 'manual_note', ...position, width: 240, height: 150, zIndex: canvasNodes.size + 1, title: '', body: '' }
+        });
+        canvasNodes.set(node.id, node);
+        renderCanvas();
+        setCanvasSaveState('已保存', 'ok');
+        const element = document.querySelector(`.canvas-node[data-node-id="${CSS.escape(node.id)}"]`);
+        if (element) editCanvasNote(node, element);
+      } catch (err) {
+        reportApplicationError('canvas.create-note', err);
+        setCanvasSaveState('创建失败', 'error');
+        showToast(`创建卡片失败: ${errorMessage(err)}`, 'error');
+      }
+    }
+
+    async function importCurrentAnnotations() {
+      if (!canvasReady || !currentAttachment) return;
+      const imported = new Set([...canvasSources.values()].map(sourceRef => sourceRef.annotationKey).filter(Boolean));
+      const entries = [...currentAnnotationsMap.entries()].filter(([key]) => !imported.has(key));
+      if (!entries.length) return;
+      setCanvasSaveState('导入中…');
+      let created = 0;
+      try {
+        for (const [index, [annotationKey, item]] of entries.entries()) {
+          const annotation = item.data || {};
+          const position = getAnnotationPosition(annotation);
+          const pageLabel = getAnnotationPageLabel(annotation);
+          const point = canvasCenterPosition(index * 28);
+          const quote = cleanAnnotationText(annotation.annotationText);
+          const comment = cleanAnnotationText(annotation.annotationComment);
+          const bodyParts = [];
+          if (quote) bodyParts.push(`“${quote}”`);
+          if (comment) bodyParts.push(comment);
+          const body = bodyParts.join('\n\n') || '空白标注';
+          const node = await canvasFetch(`/boards/${canvasBoard.id}/nodes`, {
+            method: 'POST',
+            body: {
+              type: 'annotation', ...point, width: 270, height: 170,
+              zIndex: canvasNodes.size + index + 1,
+              title: `第 ${pageLabel} 页`,
+              body: body,
+              color: annotation.annotationColor || '#ffd400',
+              source: {
+                libraryType: currentDocumentLibrary?.libraryType || 'user',
+                libraryId: String(currentDocumentLibrary?.libraryId || config.userId),
+                itemKey: currentItem?.key || null, attachmentKey: currentAttachment.key,
+                annotationKey, annotationVersion: item.version || null,
+                pageLabel: pageLabel,
+                position, quoteSnapshot: quote || null
+              }
+            }
+          });
+          canvasNodes.set(node.id, node);
+          const sourceRef = { id: node.sourceRefId,
+            libraryType: currentDocumentLibrary?.libraryType || 'user',
+            libraryId: String(currentDocumentLibrary?.libraryId || config.userId),
+            itemKey: currentItem?.key || null, attachmentKey: currentAttachment.key,
+            annotationKey, annotationVersion: item.version || null,
+            pageLabel: pageLabel, position, quoteSnapshot: quote || null };
+          canvasSources.set(sourceRef.id, sourceRef);
+          created += 1;
+        }
+        renderCanvas();
+        setCanvasSaveState('已保存', 'ok');
+        showToast(`已将 ${created} 条标注加入持久化画板`, 'success');
+      } catch (err) {
+        reportApplicationError('canvas.import-annotations', err);
+        await loadCanvasSnapshot().catch(() => {});
+        showToast(`导入中断（已完成 ${created} 条）: ${errorMessage(err)}`, 'error');
+      }
+    }
+
+    function editCanvasNote(node, element) {
+      const bodyContainer = element.querySelector('.canvas-node-body');
+      bodyContainer.replaceChildren();
+
+      const titleInput = document.createElement('input');
+      titleInput.type = 'text';
+      titleInput.value = node.title || '';
+      titleInput.placeholder = '卡片标题';
+      titleInput.className = 'w-full mb-2 rounded border border-slate-700 bg-slate-900 px-2 py-1.5 text-xs text-slate-100 outline-none focus:border-indigo-500';
+
+      const bodyInput = document.createElement('textarea');
+      bodyInput.value = node.body || '';
+      bodyInput.placeholder = '输入卡片内容…';
+      bodyInput.className = 'w-full min-h-16 resize-none rounded border border-slate-700 bg-slate-900 px-2 py-1.5 text-[11px] leading-relaxed text-slate-200 outline-none focus:border-indigo-500';
+
+      const actions = document.createElement('div');
+      actions.className = 'mt-2 flex justify-end gap-1.5';
+      const cancel = document.createElement('button');
+      cancel.type = 'button';
+      cancel.className = 'rounded px-2 py-1 text-[10px] text-slate-400 hover:bg-slate-800 hover:text-slate-200';
+      cancel.textContent = '取消';
+      const save = document.createElement('button');
+      save.type = 'button';
+      save.className = 'rounded bg-indigo-600 px-2 py-1 text-[10px] text-white hover:bg-indigo-500';
+      save.textContent = '保存';
+      actions.append(cancel, save);
+      bodyContainer.append(titleInput, bodyInput, actions);
+
+      const submit = async () => {
+        if (save.disabled) return;
+        save.disabled = true;
+        setCanvasSaveState('保存中…');
+        try {
+          const updated = await canvasFetch(`/nodes/${node.id}`, {
+            method: 'PATCH', headers: { 'If-Match': `W/"${node.version}"` },
+            body: { title: titleInput.value.trim(), body: bodyInput.value }
+          });
+          canvasNodes.set(updated.id, updated);
+          renderCanvas();
+          setCanvasSaveState('已保存', 'ok');
+        } catch (err) {
+          reportApplicationError('canvas.edit-note', err);
+          showToast(`编辑卡片失败: ${errorMessage(err)}`, 'error');
+          await loadCanvasSnapshot().catch(() => {});
+        }
+      };
+      cancel.onclick = () => renderCanvas();
+      save.onclick = submit;
+      bodyInput.onkeydown = event => {
+        if (event.key === 'Escape') renderCanvas();
+        if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') submit();
+      };
+      requestAnimationFrame(() => titleInput.focus());
+    }
+
+    async function deleteCanvasNodes(nodes) {
+      if (canvasDeleteInFlight) return;
+      const targets = nodes.filter(node => canvasNodes.has(node.id));
+      if (!targets.length) return;
+      canvasDeleteInFlight = true;
+      const deleted = [];
+      const registerUndo = () => {
+        if (!deleted.length) return;
+        pushCanvasUndo({
+          label: deleted.length > 1 ? `删除 ${deleted.length} 张卡片` : '删除卡片',
+          undo: async () => {
+            for (const node of [...deleted].reverse()) {
+              await canvasFetch(`/nodes/${node.id}/restore`, {
+                method: 'PATCH', headers: { 'If-Match': `W/"${node.version + 1}"` }
+              });
+            }
+            await loadCanvasSnapshot();
+          }
+        });
+      };
+      try {
+        for (const node of targets) {
+          await canvasFetch(`/nodes/${node.id}`, {
+            method: 'DELETE', headers: { 'If-Match': `W/"${node.version}"` }
+          });
+          deleted.push(node);
+          canvasNodes.delete(node.id);
+          canvasSelectedNodeIds.delete(node.id);
+        }
+        for (const [edgeId, edge] of canvasEdges) {
+          if (deleted.some(node => edge.sourceNodeId === node.id || edge.targetNodeId === node.id)) canvasEdges.delete(edgeId);
+        }
+        renderCanvas();
+        updateCanvasAiToolbar();
+        setCanvasSaveState(`${deleted.length > 1 ? `已删除 ${deleted.length} 张卡片` : '已删除'} · Ctrl+Z 撤销`, 'ok');
+        registerUndo();
+      } catch (err) {
+        registerUndo();
+        reportApplicationError('canvas.delete-node', err);
+        showToast(`移除卡片失败: ${errorMessage(err)}`, 'error');
+        await loadCanvasSnapshot().catch(() => {});
+      } finally {
+        canvasDeleteInFlight = false;
+      }
+    }
+
+    async function deleteCanvasNode(node) {
+      await deleteCanvasNodes([node]);
+    }
+
+    async function handleCanvasConnectSelection(nodeId) {
+      const button = document.getElementById('btn-canvas-connect');
+      if (button.getAttribute('aria-pressed') !== 'true') return;
+      if (!canvasConnectSourceId) {
+        canvasConnectSourceId = nodeId;
+        renderCanvas();
+        setCanvasSaveState('请选择目标卡片');
+        return;
+      }
+      if (canvasConnectSourceId === nodeId) {
+        canvasConnectSourceId = null;
+        renderCanvas();
+        return;
+      }
+      const sourceNodeId = canvasConnectSourceId;
+      canvasConnectSourceId = null;
+      try {
+        const edge = await canvasFetch(`/boards/${canvasBoard.id}/edges`, {
+          method: 'POST', body: { sourceNodeId, targetNodeId: nodeId, relation: 'related', label: '' }
+        });
+        canvasEdges.set(edge.id, edge);
+        renderCanvas();
+        setCanvasSaveState('已连线 · Ctrl+Z 撤销', 'ok');
+        pushCanvasUndo({
+          label: '添加连线',
+          undo: async () => {
+            await canvasFetch(`/edges/${edge.id}`, {
+              method: 'DELETE', headers: { 'If-Match': `W/"${edge.version}"` }
+            });
+            canvasEdges.delete(edge.id);
+            renderCanvas();
+            setCanvasSaveState('已保存', 'ok');
+          }
+        });
+      } catch (err) {
+        reportApplicationError('canvas.connect', err);
+        showToast(`创建连线失败: ${errorMessage(err)}`, 'error');
+        renderCanvas();
+      }
+    }
+
+    function pushCanvasUndo(action) {
+      canvasUndoStack.push(action);
+      if (canvasUndoStack.length > 30) canvasUndoStack.shift();
+    }
+
+    async function undoLastCanvasAction() {
+      if (canvasUndoInFlight || !canvasUndoStack.length) return;
+      const action = canvasUndoStack.pop();
+      canvasUndoInFlight = true;
+      setCanvasSaveState('撤销中…');
+      try {
+        await action.undo();
+        setCanvasSaveState('已保存', 'ok');
+        showToast(`已撤销：${action.label}`, 'success');
+      } catch (err) {
+        reportApplicationError('canvas.undo', err);
+        canvasUndoStack.push(action);
+        setCanvasSaveState('撤销失败', 'error');
+        showToast(`撤销失败: ${errorMessage(err)}`, 'error');
+        await loadCanvasSnapshot().catch(() => {});
+      } finally {
+        canvasUndoInFlight = false;
+      }
+    }
+
+    async function jumpToSourceAnnotation(sourceRef) {
+      if (!sourceRef?.annotationKey) return;
+      const pIndex = getAnnotationPageIndex(sourceRef) || Number(sourceRef.position?.pageIndex || 0);
+
+      const sourceLibrary = normalizeLibraryContext(sourceRef);
+      const isCurrentDoc = currentAttachment && isSameLibrary(currentDocumentLibrary, sourceLibrary) && (
+        currentAttachment.key === sourceRef.attachmentKey ||
+        currentAnnotationsMap.has(sourceRef.annotationKey)
+      );
+
+      if (isCurrentDoc) {
+        if (!currentAnnotationsMap.has(sourceRef.annotationKey)) {
+          rememberDeletedAnnotation(sourceRef.annotationKey, sourceRef);
+          saveKnownDeletedAnnotations();
+          renderCanvas();
+          showToast('原批注已在文库中删除，画板已保留快照', 'info');
+          return;
+        }
+        await jumpToAnnotation(sourceRef.annotationKey, pIndex);
+        return;
+      }
+
+      const targetItemKey = sourceRef.itemKey || sourceRef.attachmentKey;
+      if (!targetItemKey) {
+        showToast('无法定位该标注所属的文献条目', 'error');
+        return;
+      }
+
+      showToast(`正在切换至文献 #${targetItemKey}...`, 'info');
+      try {
+        const canUsePersonalLibraryCache = sourceLibrary.libraryType === 'user'
+          && sourceLibrary.libraryId === String(config.userId || '');
+        let targetItem = canUsePersonalLibraryCache
+          ? allItems.find(i => i.key === targetItemKey || (sourceRef.itemKey && i.key === sourceRef.itemKey))
+          : null;
+        if (!targetItem) {
+          const itemUrl = getApiUrl(`${libraryApiPrefix(sourceRef)}/items/${encodeURIComponent(targetItemKey)}`);
+          const res = await fetch(itemUrl, { headers: getHeaders() });
+          if (!res.ok) throw new Error(`获取文献信息失败 (HTTP ${res.status})`);
+          targetItem = await res.json();
+        }
+
+        await openItem(targetItem, sourceRef);
+        if (!currentAnnotationsMap.has(sourceRef.annotationKey)) {
+          rememberDeletedAnnotation(sourceRef.annotationKey, sourceRef);
+          saveKnownDeletedAnnotations();
+          renderCanvas();
+          showToast('原批注已在文库中删除，画板已保留快照', 'info');
+        } else {
+          await jumpToAnnotation(sourceRef.annotationKey, pIndex);
+        }
+      } catch (err) {
+        reportApplicationError('canvas.jump-cross-doc', err);
+        showToast(`切换文献失败: ${errorMessage(err)}`, 'error');
+      }
+    }
+
+    async function jumpToAnnotation(annotationId, pageIndex) {
       if (mobileMedia.matches) setMobilePane('reader');
       const frame = document.getElementById('reader-frame');
       const readerWin = frame.contentWindow;
@@ -1251,35 +2922,394 @@
       }
 
       try {
-        if (readerWin._reader?.setSelectedAnnotations) {
-          readerWin._reader.setSelectedAnnotations([annotationId]);
-        } else if (readerWin._reader?.scrollToAnnotation) {
-          readerWin._reader.scrollToAnnotation(annotationId);
-        } else if (readerWin._reader?.navigate) {
-          readerWin._reader.navigate({ pageIndex, annotationID: annotationId });
+        const reader = readerWin._reader;
+        await waitForReaderPageReady(reader, pageIndex, documentController?.signal);
+        if (reader?.setSelectedAnnotations) {
+          await Promise.resolve(reader.setSelectedAnnotations([annotationId]));
+        } else if (reader?.scrollToAnnotation) {
+          await Promise.resolve(reader.scrollToAnnotation(annotationId));
+        } else if (reader?.navigate) {
+          await Promise.resolve(reader.navigate({ pageIndex, annotationID: annotationId }));
         } else {
           // Fallback: try trigger custom event inside iframe
           readerWin.postMessage({ action: 'scrollToAnnotation', annotationId, pageIndex }, window.location.origin);
         }
         showToast(`已跳转至第 ${pageIndex + 1} 页标注 #${annotationId}`, 'info');
-      } catch (e) {
-        console.warn('Jump error:', e);
+      } catch (err) {
+        if (err?.name === 'AbortError') return;
+        reportApplicationError('reader.jump-annotation', err);
+        showToast(`标注定位失败: ${errorMessage(err)}`, 'error');
       }
     }
 
-    // Filter Buttons
-    document.querySelectorAll('.card-filter').forEach(btn => {
-      btn.onclick = (e) => {
-        activeTypeFilter = btn.dataset.typeFilter;
-        document.querySelectorAll('.card-filter').forEach(b => {
-          b.className = 'card-filter hover:text-slate-300';
-        });
-        btn.className = 'card-filter font-medium text-indigo-300 hover:text-indigo-200';
-        renderAnnotationCards();
-      };
-    });
+    async function exportCurrentBoard() {
+      if (!canvasReady || !canvasBoard) return showToast('画板未就绪', 'error');
+      try {
+        const bundle = await canvasFetch(`/boards/${canvasBoard.id}/export`);
+        if (!bundle || typeof bundle !== 'object') throw new Error('导出画板数据为空');
+        const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${canvasBoard.name || 'canvas'}-${Date.now()}.altcanvas.json`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        showToast('画板导出成功', 'success');
+      } catch (err) {
+        reportApplicationError('canvas.export', err);
+        showToast(`导出画板失败: ${errorMessage(err)}`, 'error');
+      }
+    }
 
-    document.getElementById('btn-refresh-cards').onclick = renderAnnotationCards;
+    async function importBoardFile(file) {
+      if (!canvasReady || !canvasWorkspace) return showToast('请先登录以启用画板', 'error');
+      if (!file) return;
+      try {
+        clearTimeout(canvasLayoutTimer);
+        canvasLayoutTimer = null;
+        const text = await file.text();
+        const bundle = JSON.parse(text);
+        if (bundle.format !== 'altcanvas-board-export') {
+          throw new Error('不支持的文件格式（必须为 .altcanvas.json）');
+        }
+        setCanvasSaveState('导入中…');
+        const result = await canvasFetch(`/workspaces/${canvasWorkspace.id}/boards/import`, {
+          method: 'POST',
+          body: JSON.stringify({ bundle })
+        });
+        showToast(`画板「${result?.board?.name || '导入画板'}」导入成功`, 'success');
+        if (result?.board) {
+          canvasMutationRevision += 1;
+          canvasUndoStack.length = 0;
+          canvasSelectedNodeIds.clear();
+          applyCanvasSnapshot(result);
+          localStorage.setItem(`altcanvas.canvasBoard.${config.userId}`, result.board.id);
+          void checkSourcesFreshness();
+        } else {
+          await loadCanvasSnapshot();
+        }
+      } catch (err) {
+        reportApplicationError('canvas.import', err);
+        showToast(`导入画板失败: ${errorMessage(err)}`, 'error');
+      } finally {
+        const fileInput = document.getElementById('input-canvas-import-file');
+        if (fileInput) fileInput.value = '';
+      }
+    }
+
+    async function showProvenanceHistory() {
+      if (!canvasReady || !canvasBoard) return showToast('画板未就绪', 'error');
+      const modal = document.getElementById('provenance-modal');
+      const list = document.getElementById('provenance-list');
+      modal.classList.remove('hidden');
+      list.innerHTML = '<div class="text-center text-slate-500 py-4">正在读取操作溯源日志…</div>';
+
+      try {
+        const events = await canvasFetch(`/boards/${canvasBoard.id}/provenance?limit=50`);
+        if (!Array.isArray(events) || !events.length) {
+          list.innerHTML = '<div class="text-center text-slate-500 py-4">暂无历史操作记录</div>';
+          return;
+        }
+        const eventNames = {
+          'board.created': '创建画板',
+          'board.updated': '更新画板',
+          'board.deleted': '删除画板',
+          'board.imported': '导入画板',
+          'board.layout_updated': '保存布局',
+          'node.created': '创建卡片',
+          'node.updated': '编辑卡片',
+          'node.deleted': '删除卡片',
+          'node.restored': '撤销/恢复卡片',
+          'edge.created': '创建关系连线',
+          'edge.updated': '更新关系连线',
+          'edge.deleted': '删除关系连线',
+          'workspace.created': '创建工作区',
+          'workspace.updated': '更新工作区'
+        };
+        list.replaceChildren();
+        for (const ev of events) {
+          const item = document.createElement('div');
+          item.className = 'p-2 rounded bg-slate-950/70 border border-slate-800/80 flex items-start justify-between gap-2 text-xs';
+          const d = new Date(ev.createdAt);
+          const timeStr = `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}:${d.getSeconds().toString().padStart(2, '0')} (${d.getMonth() + 1}/${d.getDate()})`;
+          item.innerHTML = `
+            <div class="min-w-0 flex-1">
+              <div class="font-medium text-slate-200 text-[11px]">${escapeHTML(eventNames[ev.type] || ev.type)}</div>
+              <div class="text-[9px] text-slate-500 font-mono mt-0.5">${escapeHTML(timeStr)}</div>
+            </div>
+            <span class="text-[8px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 font-mono shrink-0">${escapeHTML(ev.type)}</span>
+          `;
+          list.appendChild(item);
+        }
+      } catch (err) {
+        reportApplicationError('canvas.provenance', err);
+        list.innerHTML = `<div class="text-center text-rose-400 py-4">读取历史记录失败: ${escapeHTML(err.message)}</div>`;
+      }
+    }
+
+    function renderCanvasSelectedState() {
+      const surface = document.getElementById('canvas-nodes');
+      if (!surface) return;
+      surface.querySelectorAll('.canvas-node').forEach(el => {
+        const id = el.dataset.nodeId;
+        el.classList.toggle('is-selected', canvasSelectedNodeIds.has(id));
+      });
+    }
+
+    function updateCanvasAiToolbar() {
+      const count = canvasSelectedNodeIds.size;
+      const btn = document.getElementById('btn-canvas-ai');
+      if (!btn) return;
+      btn.disabled = count === 0 || !canvasReady || !aiConfig.configured;
+      btn.innerHTML = count > 0 ? `<span>✨ AI 助手 (${count})</span>` : '<span>✨ AI 助手</span>';
+    }
+
+    function focusAiInputSources(aiNodeId) {
+      const sourceIds = [];
+      for (const edge of canvasEdges.values()) {
+        if (edge.targetNodeId === aiNodeId && canvasNodes.has(edge.sourceNodeId)) {
+          sourceIds.push(edge.sourceNodeId);
+        }
+      }
+      if (sourceIds.length) {
+        canvasSelectedNodeIds.clear();
+        for (const sid of sourceIds) canvasSelectedNodeIds.add(sid);
+        renderCanvasSelectedState();
+        updateCanvasAiToolbar();
+        showToast(`已高亮 ${sourceIds.length} 张关联输入卡片`, 'info');
+      } else {
+        showToast('未找到关联的输入卡片', 'info');
+      }
+    }
+
+    function openAiModal(defaultTask) {
+      if (!canvasReady || !canvasBoard) return showToast('画板未就绪', 'error');
+      if (!aiConfig.configured) return showToast('AI 尚未在服务器端配置', 'info');
+      if (canvasSelectedNodeIds.size === 0) return showToast('请先在画板上选择 1 张或多张卡片', 'info');
+
+      if (defaultTask) currentAiTask = defaultTask;
+      else if (canvasSelectedNodeIds.size >= 2 && currentAiTask === 'translate') {
+        currentAiTask = 'synthesize';
+      }
+
+      const modal = document.getElementById('ai-modal');
+      const chips = document.getElementById('ai-selected-chips');
+      const countSpan = document.getElementById('ai-selected-count');
+      const promptInput = document.getElementById('input-ai-prompt');
+      const modelTag = document.getElementById('ai-current-model-tag');
+      const loadingState = document.getElementById('ai-loading-state');
+      const submitBtn = document.getElementById('btn-submit-ai');
+
+      loadingState.classList.add('hidden');
+      submitBtn.disabled = false;
+      countSpan.textContent = String(canvasSelectedNodeIds.size);
+      modelTag.textContent = aiConfig.model || 'deepseek-chat';
+
+      chips.replaceChildren();
+      for (const id of canvasSelectedNodeIds) {
+        const node = canvasNodes.get(id);
+        if (!node) continue;
+        const sourceRef = node.sourceRefId ? canvasSources.get(node.sourceRefId) : null;
+        const chip = document.createElement('span');
+        chip.className = 'inline-flex items-center gap-1 px-2 py-0.5 rounded bg-purple-950/60 border border-purple-800 text-purple-300 text-[10px] font-medium truncate max-w-[200px]';
+        chip.title = node.title || node.body;
+        chip.textContent = `${sourceRef?.pageLabel ? `[p.${sourceRef.pageLabel}] ` : ''}${node.title || cleanAnnotationText(node.body).slice(0, 16) || '卡片'}`;
+        chips.appendChild(chip);
+      }
+
+      updateAiTaskTabs();
+      modal.classList.remove('hidden');
+    }
+
+    function updateAiTaskTabs() {
+      const promptInput = document.getElementById('input-ai-prompt');
+      const tabs = document.querySelectorAll('.ai-task-tab');
+      const placeholders = {
+        translate: '可选输入特殊专业名词翻译对照要求（直接生成将逐句严格忠实直译为中文）…',
+        synthesize: '可选输入重点关注的研究问题或综合维度…',
+        compare: '可选输入对比视角（如：实验设计、理论假设、适用边界等）…',
+        explain: '请输入您对这些卡片内容的具体疑问或需要深入阐释的概念…'
+      };
+
+      tabs.forEach(tab => {
+        const isCurrent = tab.dataset.task === currentAiTask;
+        tab.className = `ai-task-tab px-2.5 py-2 rounded text-xs font-medium text-left flex items-center gap-1.5 transition cursor-pointer ${
+          isCurrent
+            ? 'bg-purple-950/90 border border-purple-700 text-purple-200 shadow-sm shadow-purple-900/50'
+            : 'bg-slate-950 border border-slate-800 text-slate-400 hover:text-slate-200'
+        }`;
+      });
+
+      if (promptInput) {
+        promptInput.placeholder = placeholders[currentAiTask] || '请输入自定义提示或提问…';
+      }
+    }
+
+    async function executeAiGeneration() {
+      if (!canvasReady || !canvasBoard) return showToast('画板未就绪', 'error');
+      if (canvasSelectedNodeIds.size === 0) return showToast('请先选择至少一张卡片', 'error');
+
+      const modal = document.getElementById('ai-modal');
+      const loadingState = document.getElementById('ai-loading-state');
+      const submitBtn = document.getElementById('btn-submit-ai');
+      const promptInput = document.getElementById('input-ai-prompt');
+      const prompt = promptInput.value.trim();
+
+      loadingState.classList.remove('hidden');
+      submitBtn.disabled = true;
+
+      try {
+        const result = await canvasFetch(`/boards/${canvasBoard.id}/ai/generate`, {
+          method: 'POST',
+          body: {
+            task: currentAiTask,
+            prompt,
+            inputNodeIds: [...canvasSelectedNodeIds]
+          }
+        });
+
+        showToast(currentAiTask === 'translate' ? 'AI 忠实中文翻译已生成' : 'AI 综合分析卡片已生成', 'success');
+        modal.classList.add('hidden');
+        promptInput.value = '';
+
+        await loadCanvasSnapshot();
+
+        if (result?.node?.id) {
+          canvasSelectedNodeIds.clear();
+          canvasSelectedNodeIds.add(result.node.id);
+          renderCanvasSelectedState();
+          updateCanvasAiToolbar();
+        }
+      } catch (err) {
+        reportApplicationError('canvas.ai', err);
+        showToast(`AI 生成失败: ${errorMessage(err)}`, 'error');
+      } finally {
+        loadingState.classList.add('hidden');
+        submitBtn.disabled = false;
+      }
+    }
+
+    function setCanvasZoom(nextZoom, anchorX, anchorY) {
+      if (!canvasReady) return;
+      const surface = document.getElementById('canvas-cards');
+      const rect = surface.getBoundingClientRect();
+      const viewportState = canvasViewport();
+      const x = anchorX ?? rect.width / 2;
+      const y = anchorY ?? rect.height / 2;
+      const zoom = Math.min(8, Math.max(.1, nextZoom));
+      const worldX = (x - viewportState.x) / viewportState.zoom;
+      const worldY = (y - viewportState.y) / viewportState.zoom;
+      viewportState.x = x - worldX * zoom;
+      viewportState.y = y - worldY * zoom;
+      viewportState.zoom = zoom;
+      updateCanvasTransform();
+      scheduleCanvasLayoutSave();
+    }
+
+    (function bindCanvasInteractions() {
+      const surface = document.getElementById('canvas-cards');
+      let pan = null;
+      surface.addEventListener('pointerdown', event => {
+        if (!canvasReady || event.button !== 0 || event.target.closest('.canvas-node')) return;
+        event.preventDefault();
+        const viewportState = canvasViewport();
+        pan = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, originX: viewportState.x, originY: viewportState.y };
+        surface.setPointerCapture?.(event.pointerId);
+        surface.classList.add('is-panning');
+      });
+      surface.addEventListener('pointermove', event => {
+        if (!pan || pan.pointerId !== event.pointerId) return;
+        const viewportState = canvasViewport();
+        viewportState.x = pan.originX + event.clientX - pan.x;
+        viewportState.y = pan.originY + event.clientY - pan.y;
+        updateCanvasTransform();
+      });
+      const finishPan = event => {
+        if (!pan || (event.pointerId !== undefined && pan.pointerId !== event.pointerId)) return;
+        pan = null;
+        surface.classList.remove('is-panning');
+        scheduleCanvasLayoutSave();
+      };
+      surface.addEventListener('pointerup', finishPan);
+      surface.addEventListener('pointercancel', finishPan);
+      surface.addEventListener('click', event => {
+        if (event.target === surface || event.target.id === 'canvas-world' || event.target.id === 'canvas-edges') {
+          if (canvasSelectedNodeIds.size > 0) {
+            canvasSelectedNodeIds.clear();
+            renderCanvasSelectedState();
+            updateCanvasAiToolbar();
+          }
+        }
+      });
+      surface.addEventListener('wheel', event => {
+        if (!canvasReady) return;
+        event.preventDefault();
+        const rect = surface.getBoundingClientRect();
+        const factor = Math.exp(-event.deltaY * .0015);
+        setCanvasZoom(canvasViewport().zoom * factor, event.clientX - rect.left, event.clientY - rect.top);
+      }, { passive: false });
+      surface.addEventListener('keydown', event => {
+        if (event.target !== surface) return;
+        if (event.key === '+' || event.key === '=') {
+          event.preventDefault();
+          setCanvasZoom(canvasViewport().zoom * 1.2);
+        } else if (event.key === '-') {
+          event.preventDefault();
+          setCanvasZoom(canvasViewport().zoom / 1.2);
+        } else if (event.key === '0') {
+          event.preventDefault();
+          canvasBoard.viewport = { x: 0, y: 0, zoom: 1 };
+          updateCanvasTransform();
+          scheduleCanvasLayoutSave();
+        }
+      });
+
+      document.getElementById('btn-canvas-add-note').onclick = addCanvasNote;
+      document.getElementById('btn-canvas-import').onclick = importCurrentAnnotations;
+      document.getElementById('btn-canvas-export-json').onclick = exportCurrentBoard;
+      document.getElementById('input-canvas-import-file').onchange = event => {
+        const file = event.target.files?.[0];
+        if (file) importBoardFile(file);
+      };
+      document.getElementById('btn-canvas-history').onclick = showProvenanceHistory;
+      document.getElementById('btn-close-provenance').onclick = () => document.getElementById('provenance-modal').classList.add('hidden');
+      document.getElementById('btn-done-provenance').onclick = () => document.getElementById('provenance-modal').classList.add('hidden');
+      document.getElementById('btn-refresh-cards').onclick = () => loadCanvasSnapshot().catch(err => showToast(`刷新画板失败: ${errorMessage(err)}`, 'error'));
+      document.getElementById('btn-canvas-zoom-in').onclick = () => setCanvasZoom(canvasViewport().zoom * 1.2);
+      document.getElementById('btn-canvas-zoom-out').onclick = () => setCanvasZoom(canvasViewport().zoom / 1.2);
+      document.getElementById('btn-canvas-zoom-reset').onclick = () => {
+        if (!canvasReady) return;
+        canvasBoard.viewport = { x: 0, y: 0, zoom: 1 };
+        updateCanvasTransform();
+        scheduleCanvasLayoutSave();
+      };
+      document.getElementById('btn-canvas-connect').onclick = event => {
+        const pressed = event.currentTarget.getAttribute('aria-pressed') !== 'true';
+        event.currentTarget.setAttribute('aria-pressed', String(pressed));
+        event.currentTarget.classList.toggle('bg-indigo-600', pressed);
+        event.currentTarget.classList.toggle('bg-slate-800', !pressed);
+        canvasConnectSourceId = null;
+        renderCanvas();
+        setCanvasSaveState(pressed ? '请选择起点卡片' : '已保存', pressed ? 'muted' : 'ok');
+      };
+      document.getElementById('btn-canvas-ai').onclick = () => openAiModal();
+      document.getElementById('btn-close-ai').onclick = () => document.getElementById('ai-modal').classList.add('hidden');
+      document.getElementById('btn-cancel-ai').onclick = () => document.getElementById('ai-modal').classList.add('hidden');
+      document.getElementById('btn-submit-ai').onclick = executeAiGeneration;
+      document.getElementById('btn-open-ai-settings').onclick = () => {
+        document.getElementById('ai-modal').classList.add('hidden');
+        openSettingsModal();
+      };
+      document.querySelectorAll('.ai-task-tab').forEach(tab => {
+        tab.onclick = () => {
+          currentAiTask = tab.dataset.task;
+          updateAiTaskTabs();
+        };
+      });
+    })();
+
     document.getElementById('btn-refresh').onclick = loadCollectionsAndLibrary;
 
     document.querySelectorAll('[data-mobile-target]').forEach(button => {
@@ -1305,13 +3335,69 @@
       if (event.target === event.currentTarget) closeLoginModal();
     });
     document.addEventListener('keydown', event => {
+      const editing = event.target.closest?.('input, textarea, select, [contenteditable="true"]');
+      const canvasFocused = Boolean(event.target.closest?.('#canvas-cards'));
+      const modifier = event.ctrlKey || event.metaKey;
+
+      if (!editing && canvasFocused && ['Delete', 'Backspace'].includes(event.key)
+        && canvasSelectedNodeIds.size) {
+        event.preventDefault();
+        const selectedNodes = [...canvasSelectedNodeIds].map(id => canvasNodes.get(id)).filter(Boolean);
+        void deleteCanvasNodes(selectedNodes);
+        return;
+      }
+      if (!editing && canvasFocused && modifier && event.key.toLowerCase() === 'a') {
+        event.preventDefault();
+        canvasSelectedNodeIds = new Set(canvasNodes.keys());
+        renderCanvasSelectedState();
+        updateCanvasAiToolbar();
+        return;
+      }
+      if (!editing && canvasFocused && !modifier && !event.altKey) {
+        const key = event.key.toLowerCase();
+        if (key === 'n') {
+          event.preventDefault();
+          void addCanvasNote();
+          return;
+        }
+        if (key === 'c') {
+          event.preventDefault();
+          document.getElementById('btn-canvas-connect').click();
+          return;
+        }
+        if (key === 'h') {
+          event.preventDefault();
+          void showProvenanceHistory();
+          return;
+        }
+      }
+      if (!editing && (event.ctrlKey || event.metaKey) && !event.shiftKey
+        && event.key.toLowerCase() === 'z' && canvasUndoStack.length) {
+        event.preventDefault();
+        undoLastCanvasAction();
+        return;
+      }
       if (event.key === 'Escape') {
-        if (!document.getElementById('login-modal').classList.contains('hidden')) {
+        if (!document.getElementById('provenance-modal').classList.contains('hidden')) {
+          document.getElementById('provenance-modal').classList.add('hidden');
+          document.getElementById('btn-canvas-history').focus();
+        } else if (!document.getElementById('ai-modal').classList.contains('hidden')) {
+          document.getElementById('ai-modal').classList.add('hidden');
+          document.getElementById('btn-canvas-ai').focus();
+        } else if (!document.getElementById('login-modal').classList.contains('hidden')) {
           closeLoginModal();
           document.getElementById('btn-login').focus();
         } else if (!document.getElementById('settings-modal').classList.contains('hidden')) {
           closeSettingsModal();
           document.getElementById('btn-open-settings').focus();
+        } else if (!editing && canvasFocused) {
+          canvasSelectedNodeIds.clear();
+          const connectButton = document.getElementById('btn-canvas-connect');
+          if (connectButton.getAttribute('aria-pressed') === 'true') connectButton.click();
+          else {
+            renderCanvasSelectedState();
+            updateCanvasAiToolbar();
+          }
         }
       }
     });
@@ -1389,6 +3475,10 @@
       }
 
       await checkSession();
+      loadKnownDeletedAnnotations();
+      localStorage.removeItem('altcanvas.aiConfig');
+      await loadAiConfig();
+      await initCanvasWorkspace();
       if (config.userId) {
         loadCollectionsAndLibrary();
       }
