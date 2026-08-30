@@ -4,8 +4,17 @@ Self-hosted AI research workspace built on Zotero-compatible infrastructure.
 
 ## Current status
 
-The Zotero Desktop A → altero → Zotero Desktop B sync path has been verified.
-The next goal is to validate the web integration before building Canvas or AI.
+M0 is complete: Zotero desktop synchronization, Zotero-compatible API reads,
+PDF/Range loading, and annotation round-trips have been validated against a
+dedicated Altero test library.
+
+AltCanvas now includes a same-origin BFF with OAuth 2.0 Authorization Code +
+PKCE, OIDC discovery/JWKS/ID Token validation, encrypted server-side sessions,
+API/file proxies, a Zotero Reader workspace, and a persistent spatial Canvas.
+Canvas supports cross-document source cards, manual notes, node layout,
+viewport persistence, typed edges, and an experimental single-user AI workflow.
+Multi-user collaboration is deliberately deferred while the existing single-user
+workflow goes through security and interaction stabilization.
 
 ## Repository layout
 
@@ -14,19 +23,25 @@ The next goal is to validate the web integration before building Canvas or AI.
 - `docs/m0-validation.md` — integration checkpoints and test matrix
 - `docs/m1-api-adaptation.md` — Web Library endpoint, auth, CORS, and file contract
 - `docs/altero-auth-bff-design.md` — production login, OAuth/OIDC, BFF, token, and privacy design
+- `docs/canvas-design.md` — Canvas ownership boundary, schema, API, phases, and acceptance baseline
+- `docs/human-in-loop-debugging.md` — default human-operated, log-driven UI debugging workflow
 - `config/altero.web-library.example.json` — runtime-injected Web Library configuration
 - `scripts/probe-altero.mjs` — credential-free-in-repo API compatibility probe
 
 ## Development principle
 
 AltCanvas must use Zotero-compatible data for items, attachments, notes, and
-annotations. Canvas, workspace, and AI provenance data will live in a separate
-AltCanvas service and database. Do not modify the altero database schema.
+annotations. Canvas, workspace, and AI provenance data live in a separate
+AltCanvas service and database. Do not modify the altero database schema. The
+implementation and acceptance baseline is documented in
+`docs/canvas-design.md`.
 
 ## Next milestone
 
-Connect the Web Library and Reader to the verified altero node, then test web
-annotation round-trip.
+Complete production validation against an Altero node that implements the OIDC
+contract, then integrate the upstream Web Library. The current main workspace
+uses a purpose-built library navigator; `/web-library/` only exposes the built
+upstream assets and is not yet the primary UI.
 
 The first part of this work is documented in
 `docs/m1-api-adaptation.md`. It uses Web Library's existing
@@ -45,9 +60,64 @@ ALTERO_API='https://altero.example.com' ALTERO_API_KEY='...' ALTERO_USER_ID='...
 node scripts/dev-server.mjs
 ```
 
-The workspace is then available at `http://localhost:8088`. The API key is kept
-in `sessionStorage`, so it is cleared when the browser tab/session ends and is
-never placed in the PDF request URL.
+Run both unit and simulated end-to-end BFF tests with:
+
+```sh
+npm test
+```
+
+For UI debugging, run `npm run dev`; development-only server and browser logs
+are written to the ignored `.debug/` directory. See
+`docs/human-in-loop-debugging.md` for the standard human-in-the-loop workflow.
+
+The flow test covers OIDC discovery and signed ID Token validation, browser
+binding, refresh-token rotation, protected API access, PDF Range forwarding,
+token revocation, logout, and invalid-refresh failure closure.
+
+The workspace is then available at `http://localhost:8088`. Manual API-key mode
+is available only outside production and can be disabled with
+`ALLOW_DIRECT_AUTH=false`. BFF mode never exposes OAuth tokens to browser code.
+
+For local HTTP OAuth, explicitly set `ALLOW_INSECURE_OAUTH=true`. Private-network
+Altero nodes additionally require `ALLOW_PRIVATE_HOSTS=true`. Production keeps
+TLS verification enabled; use `NODE_EXTRA_CA_CERTS` for a private certificate
+authority instead of disabling verification.
+
+The optional AI workflow is configured only on the server with `AI_BASE_URL`,
+`AI_MODEL`, and `AI_API_KEY`; the browser never stores the provider key. Private
+or HTTP endpoints such as a local Ollama instance additionally require the
+explicit flags `ALLOW_PRIVATE_AI_HOSTS=true` and `ALLOW_INSECURE_AI=true`.
+
+## Production configuration
+
+Copy `.env.example` to `.env` and set at minimum:
+
+```text
+NODE_ENV=production
+PUBLIC_ORIGIN=https://canvas.example.com
+ALTERO_API=https://altero.example.com
+SESSION_SECRET=<at-least-32-random-characters>
+OAUTH_CLIENT_ID=altcanvas
+OAUTH_CLIENT_SECRET=<secret-if-confidential-client>
+```
+
+The Altero ID Token must contain a verified `zotero_user_id` claim. Optional
+group authorization comes from `zotero_groups` (an array of group IDs or
+objects with an `id`). `PUBLIC_ORIGIN` must exactly match the registered OAuth
+redirect origin. Set `TRUST_PROXY=true` only behind a trusted reverse proxy.
+
+Builds require compiled Reader and Web Library assets. CI now builds both
+submodules before constructing the runtime image:
+
+```sh
+npm run build:vendor
+docker compose build
+docker compose up -d
+```
+
+`docker-compose.all-in-one.yml` uses `altero.localhost:8000` as a shared
+browser/container hostname. Production deployments should put both services
+behind HTTPS and set their public origins explicitly.
 
 After adding or changing Tailwind utility classes, rebuild the checked-in CSS:
 

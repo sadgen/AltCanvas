@@ -1,6 +1,6 @@
 # AltCanvas × Altero 认证与 BFF 实施方案
 
-状态：建议方案，尚未实现  
+状态：BFF 客户端主体已实现，等待 Altero 端联调与生产验收
 适用范围：自建 AltCanvas 前端、自建 Altero 服务、Zotero 兼容 API 与 PDF Reader
 
 ## 1. 结论
@@ -337,6 +337,17 @@ auth_transactions
 - 密钥轮换、备份加密、恢复演练与访问审计应作为上线条件。
 
 ## 10. 当前 AltCanvas 的迁移步骤
+
+截至 2026-08-27 的仓库状态：
+
+| 阶段 | 状态 | 说明 |
+| --- | --- | --- |
+| A：BFF 骨架 | 基本完成 | 会话、认证路由、API/File allowlist 代理已实现；会话可使用 `SESSION_SECRET` 加密持久化 |
+| B：OAuth/OIDC | AltCanvas 侧完成，Altero 侧待联调 | 已实现 discovery、PKCE、JWKS、ID Token/nonce 校验、token refresh；Altero 必须提供本文定义的端点与 claims |
+| C：前端切换 | 基本完成 | 生产默认只走 Cookie/BFF；PDF.js 通过同源 `/files/*` 执行 Range 请求；手工 Key 仅保留在开发模式 |
+| D：上线验证 | 进行中 | 单元、模拟 OIDC/BFF 全流程、静态路由、CSRF、refresh/revoke、PDF Range 和容器构建检查已通过；真实节点的 code replay、大文件和停用用户测试仍待执行 |
+
+实现并不代表已经满足第 11 节的生产验收标准；真实 Altero 节点和生产反向代理环境仍需完成阶段 D。
 
 ### 阶段 A：BFF 骨架
 
