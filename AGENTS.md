@@ -1,5 +1,7 @@
 # AltCanvas Agent Instructions
 
+When starting a session, read `docs/handoff.md` first for the current state, pending work, and architecture notes.
+
 For UI bugs, follow `docs/human-in-loop-debugging.md` by default.
 
 - Use the loop: code → project logs → human UI operation → project logs → code.
