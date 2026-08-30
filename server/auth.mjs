@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import dns from 'dns/promises';
 import {
   generateRandomToken,
   storeAuthTransaction,
@@ -8,17 +9,43 @@ import {
   destroySession,
   setSessionCookie,
   clearSessionCookie,
-  getSessionIdFromRequest
+  getSessionIdFromRequest,
+  parseCookies
 } from './session.mjs';
-
-// Allow self-signed TLS certificates for self-hosted Altero instances unless explicitly configured
-if (process.env.NODE_TLS_REJECT_UNAUTHORIZED === undefined) {
-  process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
-}
+import {
+  clientAuthenticationHeaders,
+  extractZoteroIdentity,
+  fetchWithTimeout,
+  getOidcConfiguration,
+  verifyIdToken
+} from './oidc.mjs';
+import { isPrivateNetworkHost } from './security.mjs';
 
 const DEFAULT_ALTERO_API = (process.env.ALTERO_API || 'http://localhost:8000').replace(/\/$/, '');
 const OAUTH_CLIENT_ID = process.env.OAUTH_CLIENT_ID || 'altcanvas';
 const DEFAULT_SCOPES = 'openid profile library.read library.write annotations.read annotations.write files.read';
+const OAUTH_BINDING_COOKIE = 'altcanvas_oauth_binding';
+
+function tokenHash(value) {
+  return crypto.createHash('sha256').update(value).digest('hex');
+}
+
+function isSecureRequest(req) {
+  return process.env.PUBLIC_ORIGIN?.startsWith('https://') || req.socket?.encrypted
+    || (process.env.TRUST_PROXY === 'true' && req.headers['x-forwarded-proto'] === 'https');
+}
+
+function oauthBindingCookie(value, req, maxAge) {
+  const parts = [
+    `${OAUTH_BINDING_COOKIE}=${encodeURIComponent(value)}`,
+    'Path=/auth/callback',
+    'HttpOnly',
+    'SameSite=Lax',
+    `Max-Age=${maxAge}`
+  ];
+  if (isSecureRequest(req)) parts.push('Secure');
+  return parts.join('; ');
+}
 
 /**
  * Format fetch/network error including cause details
@@ -60,33 +87,8 @@ export function generateCodeChallenge(verifier) {
  * Check if a hostname/IP is private/internal (SSRF protection)
  */
 export function isPrivateHost(hostname) {
-  if (!hostname) return true;
   if (process.env.ALLOW_PRIVATE_HOSTS === 'true') return false;
-
-  // Remove IPv6 square brackets and normalize
-  const h = hostname.replace(/^\[|\]$/g, '').toLowerCase();
-
-  // Localhost and all-zeros
-  if (['localhost', '127.0.0.1', '::1', '::', '0.0.0.0'].includes(h)) return true;
-  if (h.endsWith('.local') || h.endsWith('.internal') || h.endsWith('.lan')) return true;
-
-  // IPv6 Link-Local (fe80::/10), Unique Local Address (fc00::/7, fd00::/8), and IPv4-mapped (::ffff:)
-  if (h.startsWith('fe80:') || h.startsWith('fc') || h.startsWith('fd') || h.startsWith('::ffff:')) {
-    return true;
-  }
-
-  // IPv4 private ranges
-  const ipMatch = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
-  if (ipMatch) {
-    const [, a, b] = ipMatch.map(Number);
-    if (a === 10) return true; // 10.0.0.0/8
-    if (a === 127) return true; // 127.0.0.0/8
-    if (a === 169 && b === 254) return true; // 169.254.0.0/16 Link-Local
-    if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12
-    if (a === 192 && b === 168) return true; // 192.168.0.0/16
-    if (a === 0) return true; // 0.0.0.0/8
-  }
-  return false;
+  return isPrivateNetworkHost(hostname);
 }
 
 /**
@@ -111,6 +113,17 @@ export function sanitizeAlteroUrl(raw) {
   }
 }
 
+async function assertSafeAlteroResolution(alteroApi) {
+  if (process.env.ALLOW_PRIVATE_HOSTS === 'true') return;
+  const { hostname } = new URL(alteroApi);
+  if (isPrivateHost(hostname)) throw new Error('Altero 节点不能指向本机或私有网络');
+  if (/[:]/.test(hostname) || /^\d+(?:\.\d+){3}$/.test(hostname)) return;
+  const addresses = await dns.lookup(hostname, { all: true, verbatim: true });
+  if (!addresses.length || addresses.some(({ address }) => isPrivateHost(address))) {
+    throw new Error('Altero 节点解析到了不允许的网络地址');
+  }
+}
+
 /**
  * Sanitize and validate relative return_to path
  */
@@ -127,16 +140,51 @@ function sanitizeReturnTo(returnTo) {
  */
 export async function handleLogin(req, res, url, selfOrigin) {
   const returnTo = sanitizeReturnTo(url.searchParams.get('return_to'));
-  const alteroApi = sanitizeAlteroUrl(url.searchParams.get('altero_api') || url.searchParams.get('server'));
+  const requestedAlteroApi = url.searchParams.get('altero_api') || url.searchParams.get('server');
+  const alteroApi = sanitizeAlteroUrl(requestedAlteroApi);
+  const configuredAlteroApi = sanitizeAlteroUrl(DEFAULT_ALTERO_API);
+  if (requestedAlteroApi && alteroApi !== configuredAlteroApi && process.env.ALLOW_DYNAMIC_ALTERO !== 'true') {
+    res.writeHead(403, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store'
+    });
+    res.end(JSON.stringify({
+      error: 'dynamic_altero_disabled',
+      message: '此部署未启用用户自选 Altero 节点'
+    }));
+    return;
+  }
   const state = generateRandomToken(24);
   const nonce = generateRandomToken(24);
   const codeVerifier = generateRandomToken(32);
   const codeChallenge = generateCodeChallenge(codeVerifier);
+  const binding = generateRandomToken(24);
 
-  storeAuthTransaction({ state, nonce, codeVerifier, returnTo, alteroApi });
+  let oidc;
+  try {
+    await assertSafeAlteroResolution(alteroApi);
+    oidc = await getOidcConfiguration(alteroApi);
+  } catch (err) {
+    res.writeHead(502, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store'
+    });
+    res.end(JSON.stringify({ error: 'oidc_discovery_failed', message: formatFetchError(err) }));
+    return;
+  }
+
+  storeAuthTransaction({
+    state,
+    nonce,
+    codeVerifier,
+    returnTo,
+    alteroApi,
+    issuer: oidc.issuer,
+    bindingHash: tokenHash(binding)
+  });
 
   const redirectUri = `${selfOrigin}/auth/callback`;
-  const authUrl = new URL(`${alteroApi}/oauth/authorize`);
+  const authUrl = new URL(oidc.authorizationEndpoint);
   authUrl.searchParams.set('response_type', 'code');
   authUrl.searchParams.set('client_id', OAUTH_CLIENT_ID);
   authUrl.searchParams.set('redirect_uri', redirectUri);
@@ -148,7 +196,8 @@ export async function handleLogin(req, res, url, selfOrigin) {
 
   res.writeHead(302, {
     'Location': authUrl.toString(),
-    'Cache-Control': 'no-store'
+    'Cache-Control': 'no-store',
+    'Set-Cookie': oauthBindingCookie(binding, req, 600)
   });
   res.end();
 }
@@ -190,16 +239,33 @@ export async function handleCallback(req, res, url, selfOrigin) {
     res.end();
     return;
   }
+  const binding = parseCookies(req)[OAUTH_BINDING_COOKIE];
+  const actualBindingHash = binding ? tokenHash(binding) : '';
+  const expectedBinding = Buffer.from(tx.bindingHash || '', 'hex');
+  const actualBinding = Buffer.from(actualBindingHash, 'hex');
+  if (!expectedBinding.length || expectedBinding.length !== actualBinding.length
+      || !crypto.timingSafeEqual(expectedBinding, actualBinding)) {
+    res.writeHead(302, {
+      'Location': `/?auth_error=${encodeURIComponent('授权浏览器绑定无效，请重新发起登录')}`,
+      'Cache-Control': 'no-store',
+      'Set-Cookie': oauthBindingCookie('', req, 0)
+    });
+    res.end();
+    return;
+  }
 
   const redirectUri = `${selfOrigin}/auth/callback`;
   const alteroApi = tx.alteroApi || DEFAULT_ALTERO_API;
 
   try {
-    const tokenRes = await fetch(`${alteroApi}/oauth/token`, {
+    const oidc = await getOidcConfiguration(alteroApi);
+    if (oidc.issuer !== tx.issuer) throw new Error('OIDC issuer 在登录过程中发生变化');
+    const tokenRes = await fetchWithTimeout(oidc.tokenEndpoint, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
-        'Accept': 'application/json'
+        'Accept': 'application/json',
+        ...clientAuthenticationHeaders()
       },
       body: new URLSearchParams({
         grant_type: 'authorization_code',
@@ -222,21 +288,53 @@ export async function handleCallback(req, res, url, selfOrigin) {
     }
 
     const tokenData = await tokenRes.json();
+    if (!tokenData.access_token || typeof tokenData.access_token !== 'string') {
+      throw new Error('令牌响应缺少 access_token');
+    }
+    if (tokenData.token_type && String(tokenData.token_type).toLowerCase() !== 'bearer') {
+      throw new Error('令牌响应使用了不支持的 token_type');
+    }
+    let claims;
+    if (tokenData.id_token) {
+      claims = await verifyIdToken(tokenData.id_token, oidc, tx.nonce);
+    } else if (oidc.userinfoEndpoint) {
+      const userinfoRes = await fetchWithTimeout(oidc.userinfoEndpoint, {
+        headers: {
+          'Authorization': `Bearer ${tokenData.access_token}`,
+          'Accept': 'application/json'
+        }
+      });
+      if (!userinfoRes.ok) {
+        throw new Error(`获取用户信息失败 (HTTP ${userinfoRes.status})`);
+      }
+      claims = await userinfoRes.json();
+    } else {
+      throw new Error('Altero 未返回 ID Token 或 UserInfo 端点');
+    }
+    const identity = extractZoteroIdentity(claims);
     const now = Date.now();
-    const expiresAt = tokenData.expires_in ? now + tokenData.expires_in * 1000 : now + 3600 * 1000;
+    const expiresIn = Number(tokenData.expires_in);
+    const expiresAt = now + (Number.isFinite(expiresIn) && expiresIn > 0 ? Math.min(expiresIn, 86400) : 3600) * 1000;
 
     const session = createSession({
-      userId: String(tokenData.user_id || tokenData.userId || '1'),
-      username: tokenData.username || tokenData.preferred_username || 'Researcher',
-      displayName: tokenData.display_name || tokenData.displayName || tokenData.username || 'Researcher',
+      userId: identity.userId,
+      subject: identity.subject,
+      username: identity.username,
+      displayName: identity.displayName,
       accessToken: tokenData.access_token,
       refreshToken: tokenData.refresh_token,
       expiresAt,
       scopes: tokenData.scope ? tokenData.scope.split(' ') : DEFAULT_SCOPES.split(' '),
-      alteroApi
+      groupIds: identity.groupIds,
+      alteroApi,
+      issuer: oidc.issuer
     });
 
     setSessionCookie(res, session.id, req);
+    res.setHeader('Set-Cookie', [
+      ...(Array.isArray(res.getHeader('Set-Cookie')) ? res.getHeader('Set-Cookie') : [res.getHeader('Set-Cookie')]),
+      oauthBindingCookie('', req, 0)
+    ]);
 
     res.writeHead(303, {
       'Location': tx.returnTo || '/',
@@ -263,10 +361,12 @@ export async function handleSession(req, res) {
 
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+  const allowDirectMode = process.env.NODE_ENV !== 'production' && process.env.ALLOW_DIRECT_AUTH !== 'false';
+  const allowDynamicAltero = process.env.ALLOW_DYNAMIC_ALTERO === 'true';
 
   if (!session) {
     res.writeHead(200);
-    res.end(JSON.stringify({ authenticated: false }));
+    res.end(JSON.stringify({ authenticated: false, allowDirectMode, allowDynamicAltero, defaultAlteroApi: DEFAULT_ALTERO_API }));
     return;
   }
 
@@ -279,7 +379,10 @@ export async function handleSession(req, res) {
       displayName: session.displayName
     },
     alteroApi: session.alteroApi,
-    scopes: session.scopes
+    scopes: session.scopes,
+    allowDirectMode,
+    allowDynamicAltero,
+    defaultAlteroApi: DEFAULT_ALTERO_API
   }));
 }
 
@@ -293,14 +396,20 @@ export async function handleLogout(req, res) {
   if (session && session.refreshToken) {
     const alteroApi = session.alteroApi || DEFAULT_ALTERO_API;
     // Notify Altero to revoke token in background
-    fetch(`${alteroApi}/oauth/revoke`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        client_id: OAUTH_CLIENT_ID,
-        token: session.refreshToken,
-        token_type_hint: 'refresh_token'
-      }).toString()
+    getOidcConfiguration(alteroApi).then(oidc => {
+      if (!oidc.revocationEndpoint) return;
+      return fetchWithTimeout(oidc.revocationEndpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          ...clientAuthenticationHeaders()
+        },
+        body: new URLSearchParams({
+          client_id: OAUTH_CLIENT_ID,
+          token: session.refreshToken,
+          token_type_hint: 'refresh_token'
+        }).toString()
+      });
     }).catch(err => console.warn('Token revocation notice failed:', err.message));
   }
 
