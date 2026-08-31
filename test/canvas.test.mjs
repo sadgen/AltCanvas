@@ -154,8 +154,8 @@ try {
             evidenceQuote: '第一页研究问题和方法。', evidencePage: 1 }],
           concepts: [{ title: '核心概念', body: '定义核心概念及其意义。', pageStart: 1, pageEnd: 2,
             evidenceQuote: '模型改写而非逐字复制的主要发现', evidencePage: 2 }],
-          claims: [{ title: '主要发现', body: '主要发现及其证据和限制。', pageStart: 2, pageEnd: 2,
-            evidenceQuote: '第二页主要发现和限制。', evidencePage: 2 }],
+          claims: [{ title: '无关论点', body: '量子纠错码与蛋白质结构预测的交叉评述。', pageStart: 2, pageEnd: 2,
+            evidenceQuote: '本句为杜撰示例并不存在于论文原文之中', evidencePage: 2 }],
           relations: [{ from: 'section-0', to: 'claim-0', relation: 'supports', label: '支撑' }]
         });
       }
@@ -454,11 +454,17 @@ try {
   const mappedSnapshot = store.snapshot(canvasActorKey('https://issuer.example', 'api-subject'), apiBoard.id);
   const mappedSources = new Map(mappedSnapshot.sources.map(item => [item.id, item]));
   assert.ok(documentMapResponse.payload.data.nodes.every(node => mappedSources.get(node.sourceRefId)?.attachmentKey === 'PDF1'));
-  assert.ok(documentMapResponse.payload.data.nodes.every(node => mappedSources.get(node.sourceRefId)?.quoteSnapshot),
-    'every document-map card must retain a server-verified verbatim PDF quote');
+  const verifiableNodes = documentMapResponse.payload.data.nodes.filter(node => !node.title.startsWith('论点 · '));
+  assert.ok(verifiableNodes.every(node => mappedSources.get(node.sourceRefId)?.quoteSnapshot),
+    'matchable document-map cards must retain a server-verified verbatim PDF quote');
   const conceptNode = documentMapResponse.payload.data.nodes.find(node => node.title.startsWith('概念 · '));
   assert.equal(mappedSources.get(conceptNode.sourceRefId).quoteSnapshot, '第二页主要发现和限制。',
     'a paraphrased model citation must be repaired to an exact sentence from the PDF');
+  const degradedClaimNode = documentMapResponse.payload.data.nodes.find(node => node.title.startsWith('论点 · '));
+  assert.equal(mappedSources.get(degradedClaimNode.sourceRefId).quoteSnapshot, null,
+    'an unmatchable model citation must degrade to a quote-less card instead of failing the generation');
+  assert.equal(mappedSources.get(degradedClaimNode.sourceRefId).pageLabel, '2',
+    'a degraded card must keep its page-range start as the locating page');
   assert.ok(documentMapResponse.payload.data.nodes.some(node => node.title === '全文概览 · 测试论文理解图'));
   assert.ok(documentMapResponse.payload.data.nodes.some(node => node.title.startsWith('章节 · ')));
   assert.ok(documentMapResponse.payload.data.nodes.some(node => node.title.startsWith('概念 · ')));

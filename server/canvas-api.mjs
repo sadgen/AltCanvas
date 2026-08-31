@@ -98,12 +98,21 @@ function pageSentences(page) {
   });
 }
 
-function verifiedEvidence(item, pages, pageStart, pageEnd, name, context) {
+// Build the searchable corpus once per document-map request: exact matching
+// needs normalized page text, similarity fallback needs per-sentence shingles.
+function buildEvidenceIndex(pages) {
+  return {
+    normalizedPages: pages.map(page => ({ pageNumber: page.pageNumber, normalized: searchableText(page.text) })),
+    sentences: pages.flatMap(pageSentences).map(sentence => ({ ...sentence, shingles: textShingles(sentence.text) }))
+  };
+}
+
+function verifiedEvidence(item, evidenceIndex, pageStart, pageEnd, name, context) {
   const quote = String(item?.evidenceQuote || item?.quote || '').trim().slice(0, 1200);
   const needle = searchableText(quote);
   const requestedPage = Number.isInteger(item?.evidencePage) ? item.evidencePage : null;
   if (needle.length >= 8) {
-    const exactPages = pages.filter(page => searchableText(page.text).includes(needle));
+    const exactPages = evidenceIndex.normalizedPages.filter(page => page.normalized.includes(needle));
     const matchedPage = exactPages.find(page => page.pageNumber === requestedPage)
       || exactPages.find(page => page.pageNumber >= pageStart && page.pageNumber <= pageEnd)
       || exactPages[0];
@@ -112,34 +121,36 @@ function verifiedEvidence(item, pages, pageStart, pageEnd, name, context) {
 
   const target = textShingles(`${context}\n${quote}`);
   let best = null;
-  for (const candidate of pages.flatMap(pageSentences)) {
-    const candidateShingles = textShingles(candidate.text);
+  for (const candidate of evidenceIndex.sentences) {
     let intersection = 0;
-    for (const value of candidateShingles) if (target.has(value)) intersection++;
-    const similarity = candidateShingles.size && target.size
-      ? (2 * intersection) / (candidateShingles.size + target.size) : 0;
+    for (const value of candidate.shingles) if (target.has(value)) intersection++;
+    const similarity = candidate.shingles.size && target.size
+      ? (2 * intersection) / (candidate.shingles.size + target.size) : 0;
     const inRange = candidate.pageNumber >= pageStart && candidate.pageNumber <= pageEnd;
     const score = similarity + (inRange ? 0.05 : 0) + (candidate.pageNumber === requestedPage ? 0.03 : 0);
     if (!best || score > best.score) best = { ...candidate, score, similarity };
   }
-  if (!best || best.similarity <= 0) throw new Error(`${name} 无法从 PDF 正文中匹配可靠的原文证据`);
+  // A hallucinated quote must not sink the whole graph: keep the card without
+  // evidence instead of failing the generation the user already waited for.
+  if (!best || best.similarity <= 0) return { evidenceQuote: null, evidencePage: null };
   return { evidenceQuote: best.text, evidencePage: best.pageNumber };
 }
 
-function normalizeDocumentGraph(raw, pages, pageCount, fallbackTitle) {
+function normalizeDocumentGraph(raw, evidenceIndex, pageCount, fallbackTitle) {
   const page = value => Math.min(pageCount, Math.max(1, Number.isInteger(value) ? value : 1));
   const items = (value, kind, max) => (Array.isArray(value) ? value : []).slice(0, max).map((item, index) => {
     const pageStart = page(item?.pageStart);
     const pageEnd = Math.max(pageStart, page(item?.pageEnd ?? pageStart));
     const title = string(item?.title || `${kind} ${index + 1}`, `${kind}.title`, { min: 1, max: 300 });
     const body = string(item?.body || item?.summary || item?.explanation || item?.claim || '', `${kind}.body`, { min: 1, max: 20_000 });
-    const evidence = verifiedEvidence(item, pages, pageStart, pageEnd, `${kind}-${index}`, `${title}\n${body}`);
+    const evidence = verifiedEvidence(item, evidenceIndex, pageStart, pageEnd, `${kind}-${index}`, `${title}\n${body}`);
     return {
       id: `${kind}-${index}`,
       title, body,
-      pageStart: Math.min(pageStart, evidence.evidencePage),
-      pageEnd: Math.max(pageEnd, evidence.evidencePage),
-      ...evidence
+      pageStart,
+      pageEnd,
+      evidenceQuote: evidence.evidenceQuote,
+      evidencePage: evidence.evidencePage ?? pageStart
     };
   });
   const sections = items(raw?.sections, 'section', 12);
@@ -156,11 +167,12 @@ function normalizeDocumentGraph(raw, pages, pageCount, fallbackTitle) {
   if (!sections.length && !concepts.length && !claims.length) throw new Error('AI 返回的理解画板没有有效内容节点');
   const overview = string(raw?.overview || '', 'graph.overview', { min: 1, max: 30_000 });
   const graphTitle = string(raw?.title || fallbackTitle || 'PDF 全文理解', 'graph.title', { min: 1, max: 300 });
-  const overviewEvidence = verifiedEvidence(raw, pages, 1, pageCount, 'overview', `${graphTitle}\n${overview}`);
+  const overviewEvidence = verifiedEvidence(raw, evidenceIndex, 1, pageCount, 'overview', `${graphTitle}\n${overview}`);
   return {
     title: graphTitle,
     overview,
-    ...overviewEvidence,
+    evidenceQuote: overviewEvidence.evidenceQuote,
+    evidencePage: overviewEvidence.evidencePage ?? 1,
     sections, concepts, claims, relations
   };
 }
@@ -561,7 +573,7 @@ export function createCanvasHandler(store, {
             ],
             temperature: 0.25
           }, privateConfig);
-          const graph = normalizeDocumentGraph(parseAiJson(synthesis), pages, body.pages.length, title);
+          const graph = normalizeDocumentGraph(parseAiJson(synthesis), buildEvidenceIndex(pages), body.pages.length, title);
           const result = store.createAiDocumentMap(actor.actorKey, boardId, {
             model: publicConfig.model,
             promptVersion: 'altcanvas-document-map-v1',
