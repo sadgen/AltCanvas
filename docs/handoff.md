@@ -215,3 +215,8 @@
 - 批量转换按卡片顺序执行并缓存 getPageData；无法定位的引用记失败不创建空批注。
 - 待人工复验：单卡转换、批量转换、转换后批注在 PDF/文库中真实存在、刷新后"已转
   批注 ✓"状态保留、批注删除后卡片来源状态正常感知。
+
+## 2026-08-30 会话四（ZCode：修复面板分割线拖拽粘连）
+
+- 根因：分割线拖拽使用 `pointerdown` 启动，但监听的是 `window` 的 `mousemove/mouseup` 且未调用 `setPointerCapture`。当指针滑入 Reader iframe（或窗口外）松开鼠标时，`mouseup` 事件被 iframe 截获而无法通知到顶层 window，导致松开鼠标后分割线依然跟随指针移动。
+- 修复：升级为标准 Pointer Capture 机制（`divider.setPointerCapture(pointerId)` + `pointermove/pointerup/pointercancel/blur` 清理），主键约束（`e.button === 0`），并在结束时释放 capture 与事件监听。

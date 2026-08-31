@@ -4032,9 +4032,13 @@
       });
 
       function makeDraggable(divider, paneId, which) {
+        if (!divider) return;
+        let activePointerId = null;
         let startX = 0, startW = 0;
+
         const onMove = (e) => {
-          const x = e.touches ? e.touches[0].clientX : e.clientX;
+          if (activePointerId === null || (e.pointerId !== undefined && e.pointerId !== activePointerId)) return;
+          const x = e.clientX;
           const delta = which === 'library' ? x - startX : startX - x;
           apply(which, startW + delta);
           if (which === 'library') {
@@ -4042,27 +4046,42 @@
             if (annotationsWidth) apply('annotations', annotationsWidth);
           }
         };
-        const onUp = () => {
+
+        const onUp = (e) => {
+          if (activePointerId === null) return;
+          if (e && e.pointerId !== undefined && e.pointerId !== activePointerId) return;
+          activePointerId = null;
           document.body.classList.remove('pane-resizing');
           divider.classList.remove('dragging');
-          window.removeEventListener('mousemove', onMove);
-          window.removeEventListener('mouseup', onUp);
-          window.removeEventListener('touchmove', onMove);
-          window.removeEventListener('touchend', onUp);
+          try {
+            if (e?.pointerId !== undefined && divider.hasPointerCapture(e.pointerId)) {
+              divider.releasePointerCapture(e.pointerId);
+            }
+          } catch {}
+          window.removeEventListener('pointermove', onMove);
+          window.removeEventListener('pointerup', onUp);
+          window.removeEventListener('pointercancel', onUp);
+          window.removeEventListener('blur', onUp);
         };
+
         divider.addEventListener('pointerdown', (e) => {
-          if (window.matchMedia('(max-width: 820px)').matches) return;
+          if (e.button !== 0 || window.matchMedia('(max-width: 820px)').matches) return;
           e.preventDefault();
+          e.stopPropagation();
           const pane = document.getElementById(paneId);
           if (!pane) return;
+          activePointerId = e.pointerId;
           startX = e.clientX;
           startW = pane.getBoundingClientRect().width;
           document.body.classList.add('pane-resizing');
           divider.classList.add('dragging');
-          window.addEventListener('mousemove', onMove);
-          window.addEventListener('mouseup', onUp);
-          window.addEventListener('touchmove', onMove, { passive: true });
-          window.addEventListener('touchend', onUp);
+          try {
+            divider.setPointerCapture(e.pointerId);
+          } catch {}
+          window.addEventListener('pointermove', onMove);
+          window.addEventListener('pointerup', onUp);
+          window.addEventListener('pointercancel', onUp);
+          window.addEventListener('blur', onUp);
         });
       }
 
