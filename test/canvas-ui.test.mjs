@@ -14,9 +14,13 @@ for (const id of [
   'btn-canvas-add-note', 'btn-canvas-import', 'btn-canvas-connect', 'btn-canvas-ai',
   'btn-canvas-export-json', 'lbl-canvas-import-json', 'input-canvas-import-file',
   'btn-canvas-history', 'provenance-modal', 'provenance-list',
+  'btn-canvas-clear',
+  'btn-canvas-ai-translate', 'btn-canvas-ai-synthesize',
+  'btn-canvas-ai-document', 'input-ai-auto-translate',
   'ai-modal', 'ai-panel', 'ai-selected-chips', 'input-ai-prompt', 'btn-submit-ai',
   'btn-close-ai', 'btn-cancel-ai', 'btn-open-ai-settings',
   'ai-provider-status', 'ai-provider-name', 'ai-provider-model', 'btn-test-ai-conn',
+  'input-ai-base-url', 'input-ai-model', 'input-ai-key', 'btn-clear-ai-config',
   'btn-canvas-zoom-out', 'btn-canvas-zoom-reset', 'btn-canvas-zoom-in', 'canvas-save-state'
 ]) {
   assert.equal((html.match(new RegExp(`id=["']${id}["']`, 'g')) || []).length, 1, `${id} must exist exactly once`);
@@ -30,6 +34,10 @@ assert.match(html, /async function saveCanvasLayout\(\)/);
 assert.match(html, /async function handleCanvasConnectSelection\(/);
 assert.match(html, /async function undoLastCanvasAction\(/);
 assert.match(html, /async function deleteCanvasNodes\(nodes\)/);
+assert.match(html, /async function clearCanvas\(\)/,
+  'the toolbar must support clearing the board through the existing undoable bulk-delete path');
+assert.match(html, /btn-canvas-clear[^\n]*Ctrl\+Z 撤销/,
+  'clearing a board must advertise that the action is undoable without a confirmation modal');
 assert.match(html, /\['Delete', 'Backspace'\]\.includes\(event\.key\)/,
   'Delete and Backspace must remove selected Canvas cards');
 assert.match(html, /modifier && event\.key\.toLowerCase\(\) === 'a'/,
@@ -50,8 +58,43 @@ assert.match(html, /async function checkSourcesFreshness\(\)/);
 assert.match(html, /function renderCanvasSelectedState\(\)/);
 assert.match(html, /function updateCanvasAiToolbar\(\)/);
 assert.match(html, /function openAiModal\(/);
-assert.match(html, /async function executeAiGeneration\(\)/);
+assert.match(html, /async function executeAiGeneration\(\{ task = currentAiTask, prompt = null, quick = false \} = \{\}\)/);
+assert.match(html, /async function autoTranslatePdfAnnotation\(annotation\)/,
+  'new PDF highlights must support translation back into the same Reader annotation');
+assert.match(html, /_annotationManager\?\.updateAnnotations\(\[\{/,
+  'inline translation must update the existing PDF annotation comment');
+assert.match(html, /async function extractCurrentPdfPages\(\)/);
+assert.match(html, /async function generateCurrentPdfUnderstandingCanvas\(\)/);
+assert.match(html, /sourceRef\.quoteSnapshot \|\| sourceRef\.position\?\.textQuote/,
+  'document-map source navigation must use the persisted verbatim quote');
+assert.match(html, /_primaryView\?\.find/,
+  'clicking an AI citation must ask Reader to highlight the exact quoted text');
+assert.match(html, /async function locatePdfEvidence\(pageIndex, quote\)/,
+  'exact evidence navigation must derive PDF rectangles from the real character layer');
+assert.match(html, /ALT-AI-EVIDENCE-HIGHLIGHT/,
+  'exact evidence navigation must render a stable session-only Reader highlight');
+assert.match(html, /readOnly: true,[\s\S]*isExternal: true/,
+  'the evidence highlight must not become a writable Altero annotation');
+assert.match(html, /AI 卡片原文证据（临时定位，不写回文库）/);
+assert.match(html, /原文 p\.\$\{escapeHTML\(displayPageLabel \|\| '1'\)\} ↗/,
+  'AI cards must expose an explicit exact-source action rather than only a page jump');
+assert.match(html, /\/boards\/\$\{canvasBoard\.id\}\/ai\/document-map/,
+  'the current PDF must be able to create a full understanding canvas');
+assert.match(html, /正文会发送给当前 AI 服务/,
+  'whole-document analysis must disclose that PDF text leaves AltCanvas');
+assert.match(html, /executeAiGeneration\(\{ task: 'translate', prompt: '', quick: true \}\)/,
+  'selected cards must support one-click translation without opening the AI modal');
+assert.match(html, /executeAiGeneration\(\{ task: 'synthesize', prompt: '', quick: true \}\)/,
+  'selected cards must support one-click synthesis without opening the AI modal');
+assert.doesNotMatch(html, /showToast\(currentAiTask === 'translate'/,
+  'successful AI generation must use inline Canvas state instead of a redundant toast');
 assert.match(html, /async function loadAiConfig\(\)/);
+assert.match(html, /async function saveAiConfig\(/);
+assert.match(html, /async function clearAiConfig\(/);
+assert.match(html, /canvasFetch\('\/ai\/config', \{ method: 'POST'/,
+  'users must be able to save a personal AI provider through the BFF');
+assert.match(html, /canvasFetch\('\/ai\/config', \{ method: 'DELETE'/,
+  'users must be able to clear their personal AI provider');
 assert.match(html, /function focusAiInputSources\(/);
 assert.match(html, /忠实中译/);
 assert.match(html, /综合总结/);
@@ -69,6 +112,12 @@ assert.match(html, /\/workspaces\/\$\{canvasWorkspace\.id\}\/boards\/import/);
 assert.match(html, /\/nodes\/\$\{node\.id\}\/restore/);
 assert.match(html, /async function restoreCanvasAnnotationToPdf\(/,
   'restore button must be wired to the annotation restore handler');
+assert.match(html, /err\.status !== 412/,
+  'source restore must recover from a concurrent card edit without duplicating the PDF annotation');
+assert.match(html, /node\.type === 'ai_output' \|\| node\.type === 'annotation'/,
+  'PDF-derived annotation cards must be editable');
+assert.match(html, /button, input, textarea, select, \[contenteditable="true"\]/,
+  'Canvas card selection must not steal focus from its editing controls');
 assert.match(html, /Ctrl\+Z 撤销/);
 assert.match(html, /已连线 · Ctrl\+Z 撤销/);
 assert.doesNotMatch(html, /showToast\('已从画板移除/);
@@ -90,6 +139,12 @@ assert.doesNotMatch(html, /prompt\('卡片标题/);
 assert.doesNotMatch(html, /prompt\('卡片内容/);
 assert.doesNotMatch(html, /localStorage\.setItem\('altcanvas\.aiConfig'/,
   'AI provider keys must not be persisted in browser storage');
+assert.doesNotMatch(html, /(?:localStorage|sessionStorage)\.setItem\([^\n]*input-ai-key/,
+  'a personal AI key must never be stored in browser storage');
+assert.match(html, /不会自动发送整篇 PDF/,
+  'AI UI must disclose the exact selected-card data boundary');
+assert.match(html, /局域网 HTTP 会明文传输卡片内容与凭据/,
+  'AI settings must warn about plaintext private-network transport');
 assert.doesNotMatch(html, /modelConfig:\s*aiConfig/,
   'the browser must not choose an arbitrary AI endpoint per request');
 assert.match(html, /function isSameLibrary\(/,
@@ -110,6 +165,12 @@ assert.match(html, /JSON\.stringify\(\{ deleted: true \}\)/,
   'annotation deletion must retain the recoverable Altero trash fallback');
 assert.match(html, /If-Unmodified-Since-Version/);
 assert.match(html, /body\[data-mobile-pane="annotations"\] #annotations-pane/);
+assert.match(html, /ANN_ABSOLUTE_MAX = 1600, READER_MIN = 288/,
+  'desktop Canvas width must use the viewport while retaining a usable Reader minimum');
+assert.match(html, /window\.innerWidth - libraryWidth - READER_MIN - DIVIDERS_WIDTH/,
+  'the right-pane maximum must be computed from available viewport width');
+assert.doesNotMatch(html, /ANN_MAX = 700/,
+  'the Canvas must not retain the old fixed 700px width ceiling');
 assert.doesNotMatch(html, /研究标注白板 \(Cards\)/);
 assert.match(devServer, /style-src-attr 'unsafe-inline'/, 'CSP must permit dynamic Canvas geometry styles');
 assert.match(devServer, /script-src 'self'/, 'script CSP must remain restricted');

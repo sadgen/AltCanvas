@@ -77,3 +77,96 @@
 - UI 验收按 `docs/human-in-loop-debugging.md`：agent 管开发服务与日志，人做 UI
   操作；给最短复验步骤，以"完成 / 已复现 / 看日志"作为查日志的交接信号。
 - 完成验收后更新 `docs/canvas-design.md` 审计账本，并在本文件追加会话记录。
+
+## 2026-08-30 会话（Codex 读取 handoff 后接续）
+
+### 已完成
+
+- 复核 06:25 UTC 后的日志：没有新增浏览器运行时、Reader、Fetch 或 Canvas 错误。
+- 审计 `restoreCanvasAnnotationToPdf`，补上 PDF 批注已经创建后 source PATCH 因并发
+  卡片编辑返回 412 的安全重载/重试；只在来源仍为旧 source ref 时重试，避免覆盖
+  已由其他操作完成的重绑。
+- 重绑后清理前端旧 source 缓存、标记新来源 intact，并补齐历史面板的
+  `node.source_relinked` 中文名称。
+- 增加来源重绑 API 的成功、陈旧版本 412、group library 越权 403、快照保留测试，
+  以及 PDF 来源卡片可编辑和恢复并发分支的 UI 结构断言。
+- `npm test` 六套全过；`git diff --check` 通过。
+
+### 当前状态与下一步
+
+- 待人工最小复验：编辑 PDF 来源卡片后刷新确认持久化；删除其 PDF 原批注，再点 ↺
+  恢复并确认“原注已删”消失、PDF 中出现新批注。
+- C5 仍被配置阻塞：`AI_BASE_URL`、`AI_MODEL`、`AI_API_KEY` 当前均未设置。
+- 随后执行 C2 窄窗口/手机实机验收。C4 继续延期。
+
+### 编辑焦点缺陷
+
+- 人工复验发现 PDF 来源卡片进入编辑后必须按住输入框才能持续输入。日志无异常；根因是
+  卡片容器的冒泡 click 处理在 input/textarea 获得焦点后再次调用 `element.focus()`。
+- 卡片选择处理现已豁免 button、input、textarea、select 和 contenteditable，表单控件
+  不再被父卡片夺走焦点，并增加 UI 结构回归断言。待刷新页面后实机复验。
+
+### 用户个人 AI 配置
+
+- 设置面板新增兼容接口地址、模型名称、API Key、“保存并测试”和“清除个人配置”。
+- 初版 `POST/DELETE /canvas/ai/config` 将个人配置写入服务端登录会话；Key 不进入
+  浏览器 storage、不在 GET/POST 响应中返回。该存储方式随后已被下方“真正持久化”
+  方案取代。
+- 用户端点仍经过 HTTPS、私网/DNS、账号密码 URL 和 query 清理等 SSRF 边界；本地
+  Ollama 必须由管理员显式允许私网及 HTTP，用户不能自行放宽安全策略。
+- AI 测试和生成均优先使用当前用户的个人配置，清除后回退 `.env` 管理员默认。
+- 开发服务已重启，健康探测返回 200；六套自动化测试全过。待真实模型实机验收。
+
+### AI 连接测试首轮诊断
+
+- 日志显示首次保存先因服务重启后的旧登录会话失效返回 401；重新登录后，用户填写的
+  HTTP 端点被默认安全策略拒绝，但校验异常被通用 Canvas handler 错误映射成 500，
+  前端只显示“Canvas request failed”。
+- AI 地址格式、HTTPS、私网/DNS 等配置校验现统一使用 `TypeError`，由 API 映射为
+  400 并向设置界面返回脱敏后的具体原因。HTTP 本地模型仍必须由管理员通过
+  `ALLOW_INSECURE_AI`，私网地址同时通过 `ALLOW_PRIVATE_AI_HOSTS` 显式放行。
+
+### AI 高频流程减弹窗
+
+- 真实模型翻译已由用户确认成功，最新日志未见 AI 请求异常。
+- 画板工具栏新增“中译”和“总结”一键操作：使用当前选择直接生成，不打开 AI
+  模态框；“更多 AI”保留对比、问答和自定义指令入口。
+- 成功生成、保存个人 AI 配置及清除配置不再弹 Toast，改用画板状态文字和新生成
+  卡片反馈；错误仍保留显式提示。AI 请求增加前端 in-flight 锁，防止连续点击重复生成。
+
+### AI 配置改为真正持久化
+
+- 用户指出登录会话并不等同于个人设置：缺少 `SESSION_SECRET` 时重启即丢失，即便
+  会话可恢复，退出登录也会删除配置。个人 AI 配置因此从 session 迁移到 Canvas DB。
+- 新增 schema v2 `ai_settings`，以 Canvas `owner_key` 隔离；Base URL/Model 持久化，
+  API Key 使用 AES-256-GCM 加密。加密主密钥首次启动时自动生成到数据库同目录的
+  `ai-settings.key`（0600），该目录已被 Git 忽略；也可由管理员提供
+  `AI_SETTINGS_SECRET` 或 `AI_SETTINGS_KEY_FILE`。
+- GET/POST/DELETE 配置、连接测试和生成全部改为读取 owner 级设置；无个人设置时
+  仍回退 `.env`。增加明文不落库、owner 隔离和数据库重开后恢复测试。
+
+### AI 隐私加固
+
+- 上游非 2xx 响应不再把任意 `error.message` 返回浏览器或写入调试日志，只保留
+  HTTP 状态及满足严格字符白名单的短错误码；新增恶意错误正文不泄露回归测试。
+- Canvas 数据目录启动时强制 0700，SQLite/WAL/SHM 与 `ai-settings.key` 强制 0600。
+- 设置面板提示局域网 HTTP 会明文传输内容与凭据；AI 面板明确披露只发送当前选中
+  卡片的标题、正文、引用快照与自定义指令，不自动发送整篇 PDF。
+- `.env.example` 增加可选 `AI_SETTINGS_SECRET`，便于将加密主密钥与数据备份分离。
+
+### C5 改为阅读驱动（待实机验收）
+
+- C5 的主验收已从“选中卡片后生成另一张卡片”调整为两条文档工作流；原卡片 AI
+  保留为次级工具，详见 `docs/canvas-design.md` 的 C5 章节。
+- 新 PDF 高亮保存成功后可自动调用 `/canvas/ai/translate`，把译文写回同一 Reader
+  标注 comment，并由既有 Altero PATCH 链路持久化；设置中可关闭，已有 comment 不覆盖，
+  成功不弹 Toast。
+- 画板工具栏新增“理解全文”：客户端用 PDF.js `getPageData` 逐页提取文本，调用
+  `/canvas/boards/:id/ai/document-map`。服务端按页段并发生成阅读笔记，再合成为概览、
+  章节、概念、论点/证据和关系；所有 node/source/edge 在一个 SQLite 事务内写入。
+- 全文节点携带文献、附件和页码范围 source ref，可从卡片跳回 PDF；provenance 只记录
+  模型、文档 key、页数和结构计数，不记录 PDF 正文或模型响应。
+- 默认安全上限为请求体 768 KiB、可提取正文 600,000 字符、每块约 30,000 字符；
+  超限会明确拒绝，不以“全文”名义静默截断。对应环境变量已写入 `.env.example`。
+- 自动化已补充接口、事务化理解图、来源引用及 UI 结构断言；仍需真实模型和 Reader
+  实机验证“高亮 → comment 中译 → 刷新保留”与“理解全文 → 多节点画板 → 页码跳转”。

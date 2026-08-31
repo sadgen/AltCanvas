@@ -26,6 +26,51 @@ function id() {
   return crypto.randomUUID();
 }
 
+function loadOrCreateAiSettingsKey(dbPath) {
+  const configuredSecret = String(process.env.AI_SETTINGS_SECRET || '').trim();
+  if (configuredSecret) return crypto.createHash('sha256').update(configuredSecret).digest();
+  const keyPath = path.resolve(process.env.AI_SETTINGS_KEY_FILE || path.join(path.dirname(dbPath), 'ai-settings.key'));
+  const readKey = () => {
+    const key = Buffer.from(fs.readFileSync(keyPath, 'utf8').trim(), 'base64');
+    if (key.length !== 32) throw new Error('AI settings encryption key is invalid');
+    return key;
+  };
+  if (fs.existsSync(keyPath)) return readKey();
+  const key = crypto.randomBytes(32);
+  try {
+    fs.writeFileSync(keyPath, key.toString('base64'), { mode: 0o600, flag: 'wx' });
+    return key;
+  } catch (err) {
+    if (err.code === 'EEXIST') return readKey();
+    throw err;
+  }
+}
+
+function encryptAiSecret(key, value) {
+  if (!value) return null;
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const encrypted = Buffer.concat([cipher.update(String(value), 'utf8'), cipher.final()]);
+  return JSON.stringify({
+    version: 1,
+    iv: iv.toString('base64'),
+    tag: cipher.getAuthTag().toString('base64'),
+    data: encrypted.toString('base64')
+  });
+}
+
+function decryptAiSecret(key, value) {
+  if (!value) return '';
+  const payload = JSON.parse(value);
+  if (payload.version !== 1) throw new Error('unsupported AI settings encryption version');
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(payload.iv, 'base64'));
+  decipher.setAuthTag(Buffer.from(payload.tag, 'base64'));
+  return Buffer.concat([
+    decipher.update(Buffer.from(payload.data, 'base64')),
+    decipher.final()
+  ]).toString('utf8');
+}
+
 function parseJson(value) {
   if (value === null || value === undefined) return null;
   try {
@@ -135,12 +180,20 @@ export class CanvasStore {
   constructor(dbPath = process.env.CANVAS_DB_PATH
     || path.join(process.env.DATA_DIR || './data', 'altcanvas-canvas.sqlite')) {
     this.dbPath = path.resolve(dbPath);
-    fs.mkdirSync(path.dirname(this.dbPath), { recursive: true, mode: 0o700 });
+    const dataDirectory = path.dirname(this.dbPath);
+    fs.mkdirSync(dataDirectory, { recursive: true, mode: 0o700 });
+    fs.chmodSync(dataDirectory, 0o700);
+    if (!fs.existsSync(this.dbPath)) fs.closeSync(fs.openSync(this.dbPath, 'a', 0o600));
+    fs.chmodSync(this.dbPath, 0o600);
+    this.aiSettingsKey = loadOrCreateAiSettingsKey(this.dbPath);
     this.db = new DatabaseSync(this.dbPath);
     this.db.exec('PRAGMA foreign_keys = ON');
     this.db.exec('PRAGMA journal_mode = WAL');
     this.db.exec('PRAGMA busy_timeout = 5000');
     this.migrate();
+    for (const filePath of [this.dbPath, `${this.dbPath}-wal`, `${this.dbPath}-shm`]) {
+      if (fs.existsSync(filePath)) fs.chmodSync(filePath, 0o600);
+    }
   }
 
   migrate() {
@@ -246,7 +299,22 @@ export class CanvasStore {
         this.db.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(1, nowIso());
       });
     }
-    if (current > 1) throw new Error(`Canvas database schema ${current} is newer than this server supports`);
+    if (current < 2) {
+      this.transaction(() => {
+        this.db.exec(`
+          CREATE TABLE ai_settings (
+            owner_key TEXT PRIMARY KEY,
+            base_url TEXT NOT NULL,
+            model TEXT NOT NULL,
+            api_key_encrypted TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          ) STRICT;
+        `);
+        this.db.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(2, nowIso());
+      });
+    }
+    if (current > 2) throw new Error(`Canvas database schema ${current} is newer than this server supports`);
   }
 
   transaction(callback) {
@@ -271,6 +339,35 @@ export class CanvasStore {
         (id, workspace_id, board_id, node_id, actor_key, event_type, payload_json, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `).run(id(), workspaceId, boardId, nodeId, actorKey, type, JSON.stringify(payload), nowIso());
+  }
+
+  getAiSettings(actorKey) {
+    const row = this.db.prepare('SELECT * FROM ai_settings WHERE owner_key = ?').get(actorKey);
+    if (!row) return null;
+    return {
+      baseUrl: row.base_url,
+      model: row.model,
+      apiKey: decryptAiSecret(this.aiSettingsKey, row.api_key_encrypted),
+      updatedAt: row.updated_at
+    };
+  }
+
+  saveAiSettings(actorKey, { baseUrl, model, apiKey }) {
+    const timestamp = nowIso();
+    this.db.prepare(`
+      INSERT INTO ai_settings(owner_key, base_url, model, api_key_encrypted, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(owner_key) DO UPDATE SET
+        base_url = excluded.base_url,
+        model = excluded.model,
+        api_key_encrypted = excluded.api_key_encrypted,
+        updated_at = excluded.updated_at
+    `).run(actorKey, baseUrl, model, encryptAiSecret(this.aiSettingsKey, apiKey), timestamp, timestamp);
+    return this.getAiSettings(actorKey);
+  }
+
+  clearAiSettings(actorKey) {
+    return this.db.prepare('DELETE FROM ai_settings WHERE owner_key = ?').run(actorKey).changes > 0;
   }
 
   listWorkspaces(actorKey) {
@@ -829,6 +926,118 @@ export class CanvasStore {
     return {
       node: this.getNode(actorKey, nodeId),
       edges: createdEdges.map(eid => this.getEdge(actorKey, eid))
+    };
+  }
+
+  createAiDocumentMap(actorKey, boardId, { model, promptVersion, document, graph }) {
+    const board = this.requireBoard(actorKey, boardId);
+    const timestamp = nowIso();
+    const nodeIds = new Map();
+    const createdNodeIds = [];
+    const createdEdgeIds = [];
+    const nodes = [
+      { key: 'overview', kind: 'overview', title: `全文概览 · ${graph.title || document.title || 'PDF 全文理解'}`, body: graph.overview,
+        pageStart: 1, pageEnd: document.pageCount, evidenceQuote: graph.evidenceQuote, evidencePage: graph.evidencePage },
+      ...graph.sections.map((item, index) => ({ ...item, title: `章节 · ${item.title}`, key: `section-${index}`, kind: 'section' })),
+      ...graph.concepts.map((item, index) => ({ ...item, title: `概念 · ${item.title}`, key: `concept-${index}`, kind: 'concept' })),
+      ...graph.claims.map((item, index) => ({ ...item, title: `论点 · ${item.title}`, key: `claim-${index}`, kind: 'claim' }))
+    ];
+    const columns = 3;
+    const sectionRows = Math.max(1, Math.ceil(graph.sections.length / columns));
+    const conceptRows = Math.max(1, Math.ceil(graph.concepts.length / columns));
+    const laneStarts = {
+      section: 380,
+      concept: 380 + sectionRows * 300 + 80,
+      claim: 380 + sectionRows * 300 + 80 + conceptRows * 300 + 80
+    };
+
+    this.transaction(() => {
+      for (let index = 0; index < nodes.length; index++) {
+        const item = nodes[index];
+        const nodeId = id();
+        const sourceRefId = this.createSourceRef(actorKey, {
+          libraryType: document.libraryType,
+          libraryId: document.libraryId,
+          itemKey: document.itemKey,
+          attachmentKey: document.attachmentKey,
+          annotationKey: null,
+          annotationVersion: null,
+          pageLabel: String(item.evidencePage),
+          position: {
+            pageIndex: Math.max(0, item.evidencePage - 1),
+            pageStart: item.pageStart,
+            pageEnd: item.pageEnd,
+            textQuote: item.evidenceQuote
+          },
+          quoteSnapshot: item.evidenceQuote
+        });
+        const laneIndex = item.kind === 'overview' ? 0 : nodes.slice(0, index).filter(candidate => candidate.kind === item.kind).length;
+        const x = item.kind === 'overview' ? 380 : 40 + (laneIndex % columns) * 360;
+        const y = item.kind === 'overview' ? 30 : laneStarts[item.kind] + Math.floor(laneIndex / columns) * 300;
+        const width = item.kind === 'overview' ? 420 : 320;
+        const height = item.kind === 'overview' ? 280 : 240;
+        const colors = { overview: '#7c3aed', section: '#2563eb', concept: '#0891b2', claim: '#d97706' };
+        this.db.prepare(`
+          INSERT INTO nodes
+            (id, board_id, node_type, x, y, width, height, z_index, title, body, color, source_ref_id, created_at, updated_at)
+          VALUES (?, ?, 'ai_output', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(nodeId, boardId, x, y, width, height, index + 1, item.title || item.kind, item.body, colors[item.kind], sourceRefId, timestamp, timestamp);
+        nodeIds.set(item.key, nodeId);
+        createdNodeIds.push(nodeId);
+      }
+
+      const edgeInputs = [];
+      for (const section of nodes.filter(item => item.kind === 'section')) {
+        edgeInputs.push({ from: 'overview', to: section.key, relation: 'related', label: '章节脉络' });
+      }
+      const sections = nodes.filter(item => item.kind === 'section');
+      for (const item of nodes.filter(candidate => ['concept', 'claim'].includes(candidate.kind))) {
+        const nearest = sections.reduce((best, section) => {
+          const overlaps = Math.max(0, Math.min(item.pageEnd, section.pageEnd) - Math.max(item.pageStart, section.pageStart) + 1);
+          const distance = overlaps ? -overlaps : Math.min(Math.abs(item.pageStart - section.pageEnd), Math.abs(section.pageStart - item.pageEnd));
+          return !best || distance < best.distance ? { section, distance } : best;
+        }, null)?.section;
+        edgeInputs.push({
+          from: nearest?.key || 'overview', to: item.key,
+          relation: item.kind === 'claim' ? 'supports' : 'related',
+          label: item.kind === 'claim' ? '论点与证据' : '核心概念'
+        });
+      }
+      edgeInputs.push(...graph.relations);
+      const seenEdges = new Set();
+      for (const edge of edgeInputs) {
+        const sourceNodeId = nodeIds.get(edge.from);
+        const targetNodeId = nodeIds.get(edge.to);
+        const signature = `${sourceNodeId}:${targetNodeId}:${edge.relation}`;
+        if (!sourceNodeId || !targetNodeId || sourceNodeId === targetNodeId || seenEdges.has(signature)) continue;
+        seenEdges.add(signature);
+        const edgeId = id();
+        this.db.prepare(`
+          INSERT INTO edges
+            (id, board_id, source_node_id, target_node_id, relation, label, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(edgeId, boardId, sourceNodeId, targetNodeId,
+          EDGE_RELATIONS.has(edge.relation) ? edge.relation : 'related', edge.label || '', timestamp, timestamp);
+        createdEdgeIds.push(edgeId);
+      }
+
+      this.recordEvent({
+        workspaceId: board.workspaceId,
+        boardId,
+        nodeId: nodeIds.get('overview'),
+        actorKey,
+        type: 'ai.document_mapped',
+        payload: {
+          model: model || 'custom', promptVersion: promptVersion || 'unknown',
+          itemKey: document.itemKey || null, attachmentKey: document.attachmentKey || null,
+          pageCount: document.pageCount, nodeCount: createdNodeIds.length, edgeCount: createdEdgeIds.length
+        }
+      });
+    });
+
+    return {
+      nodes: createdNodeIds.map(nodeId => this.getNode(actorKey, nodeId)),
+      edges: createdEdgeIds.map(edgeId => this.getEdge(actorKey, edgeId))
     };
   }
 }

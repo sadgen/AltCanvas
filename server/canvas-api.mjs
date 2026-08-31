@@ -1,8 +1,11 @@
 import { CanvasConflictError, CanvasNotFoundError, CanvasStore, canvasEdgeRelations, canvasNodeTypes, canvasActorKey } from './canvas-store.mjs';
 import { getSession, getSessionIdFromRequest } from './session.mjs';
-import { getAiPublicConfig, requestAiCompletion } from './ai-provider.mjs';
+import { getAiPublicConfig, requestAiCompletion, validateAiEndpoint } from './ai-provider.mjs';
 
 const MAX_BODY_BYTES = Number(process.env.MAX_CANVAS_BODY_BYTES || 512 * 1024);
+const MAX_DOCUMENT_BODY_BYTES = Number(process.env.MAX_AI_DOCUMENT_BODY_BYTES || 768 * 1024);
+const MAX_DOCUMENT_TEXT_CHARS = Number(process.env.MAX_AI_DOCUMENT_TEXT_CHARS || 600_000);
+const AI_DOCUMENT_CHUNK_CHARS = Number(process.env.AI_DOCUMENT_CHUNK_CHARS || 30_000);
 const KEY_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const AI_TASKS = new Set(['translate', 'synthesize', 'compare', 'explain']);
 const AI_PROMPT_VERSION = 'altcanvas-ai-v1';
@@ -35,13 +38,13 @@ function versionFromIfMatch(req) {
   return match ? Number(match[1]) : null;
 }
 
-async function readJson(req) {
+async function readJson(req, maxBytes = MAX_BODY_BYTES) {
   let size = 0;
   const chunks = [];
   for await (const chunk of req) {
     const buffer = Buffer.from(chunk);
     size += buffer.length;
-    if (size > MAX_BODY_BYTES) {
+    if (size > maxBytes) {
       const err = new Error('request body too large');
       err.status = 413;
       throw err;
@@ -58,6 +61,136 @@ async function readJson(req) {
     err.status = 400;
     throw err;
   }
+}
+
+function parseAiJson(text) {
+  const raw = String(text || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+  const start = raw.indexOf('{');
+  const end = raw.lastIndexOf('}');
+  if (start < 0 || end <= start) throw new Error('AI 未返回可识别的画板结构');
+  try { return JSON.parse(raw.slice(start, end + 1)); }
+  catch { throw new Error('AI 返回的画板结构不是有效 JSON'); }
+}
+
+function searchableText(value) {
+  return String(value || '').normalize('NFKC').replace(/[\s\u00ad]+/g, '').toLocaleLowerCase();
+}
+
+function textShingles(value) {
+  const normalized = searchableText(value);
+  const values = new Set();
+  for (let index = 0; index < normalized.length - 1; index++) values.add(normalized.slice(index, index + 2));
+  return values;
+}
+
+function pageSentences(page) {
+  const pieces = String(page.text || '').match(/[^。！？.!?\n]+[。！？.!?]?/g) || [];
+  return pieces.flatMap(piece => {
+    const text = piece.trim();
+    if (text.length < 8) return [];
+    if (text.length <= 420) return [{ pageNumber: page.pageNumber, text }];
+    const chunks = [];
+    for (let offset = 0; offset < text.length; offset += 320) {
+      const chunk = text.slice(offset, offset + 360).trim();
+      if (chunk.length >= 8) chunks.push({ pageNumber: page.pageNumber, text: chunk });
+    }
+    return chunks;
+  });
+}
+
+function verifiedEvidence(item, pages, pageStart, pageEnd, name, context) {
+  const quote = String(item?.evidenceQuote || item?.quote || '').trim().slice(0, 1200);
+  const needle = searchableText(quote);
+  const requestedPage = Number.isInteger(item?.evidencePage) ? item.evidencePage : null;
+  if (needle.length >= 8) {
+    const exactPages = pages.filter(page => searchableText(page.text).includes(needle));
+    const matchedPage = exactPages.find(page => page.pageNumber === requestedPage)
+      || exactPages.find(page => page.pageNumber >= pageStart && page.pageNumber <= pageEnd)
+      || exactPages[0];
+    if (matchedPage) return { evidenceQuote: quote, evidencePage: matchedPage.pageNumber };
+  }
+
+  const target = textShingles(`${context}\n${quote}`);
+  let best = null;
+  for (const candidate of pages.flatMap(pageSentences)) {
+    const candidateShingles = textShingles(candidate.text);
+    let intersection = 0;
+    for (const value of candidateShingles) if (target.has(value)) intersection++;
+    const similarity = candidateShingles.size && target.size
+      ? (2 * intersection) / (candidateShingles.size + target.size) : 0;
+    const inRange = candidate.pageNumber >= pageStart && candidate.pageNumber <= pageEnd;
+    const score = similarity + (inRange ? 0.05 : 0) + (candidate.pageNumber === requestedPage ? 0.03 : 0);
+    if (!best || score > best.score) best = { ...candidate, score, similarity };
+  }
+  if (!best || best.similarity <= 0) throw new Error(`${name} 无法从 PDF 正文中匹配可靠的原文证据`);
+  return { evidenceQuote: best.text, evidencePage: best.pageNumber };
+}
+
+function normalizeDocumentGraph(raw, pages, pageCount, fallbackTitle) {
+  const page = value => Math.min(pageCount, Math.max(1, Number.isInteger(value) ? value : 1));
+  const items = (value, kind, max) => (Array.isArray(value) ? value : []).slice(0, max).map((item, index) => {
+    const pageStart = page(item?.pageStart);
+    const pageEnd = Math.max(pageStart, page(item?.pageEnd ?? pageStart));
+    const title = string(item?.title || `${kind} ${index + 1}`, `${kind}.title`, { min: 1, max: 300 });
+    const body = string(item?.body || item?.summary || item?.explanation || item?.claim || '', `${kind}.body`, { min: 1, max: 20_000 });
+    const evidence = verifiedEvidence(item, pages, pageStart, pageEnd, `${kind}-${index}`, `${title}\n${body}`);
+    return {
+      id: `${kind}-${index}`,
+      title, body,
+      pageStart: Math.min(pageStart, evidence.evidencePage),
+      pageEnd: Math.max(pageEnd, evidence.evidencePage),
+      ...evidence
+    };
+  });
+  const sections = items(raw?.sections, 'section', 12);
+  const concepts = items(raw?.concepts, 'concept', 12);
+  const claims = items(raw?.claims, 'claim', 12);
+  const validIds = new Set(['overview', ...sections.map(x => x.id), ...concepts.map(x => x.id), ...claims.map(x => x.id)]);
+  const relations = (Array.isArray(raw?.relations) ? raw.relations : []).slice(0, 60).flatMap(item => {
+    const from = String(item?.from || '');
+    const to = String(item?.to || '');
+    if (!validIds.has(from) || !validIds.has(to) || from === to) return [];
+    const relation = canvasEdgeRelations.has(item?.relation) ? item.relation : 'related';
+    return [{ from, to, relation, label: string(item?.label || '', 'relation.label', { max: 120 }) }];
+  });
+  if (!sections.length && !concepts.length && !claims.length) throw new Error('AI 返回的理解画板没有有效内容节点');
+  const overview = string(raw?.overview || '', 'graph.overview', { min: 1, max: 30_000 });
+  const graphTitle = string(raw?.title || fallbackTitle || 'PDF 全文理解', 'graph.title', { min: 1, max: 300 });
+  const overviewEvidence = verifiedEvidence(raw, pages, 1, pageCount, 'overview', `${graphTitle}\n${overview}`);
+  return {
+    title: graphTitle,
+    overview,
+    ...overviewEvidence,
+    sections, concepts, claims, relations
+  };
+}
+
+function documentChunks(pages) {
+  const chunks = [];
+  let current = '';
+  for (const page of pages) {
+    const block = `\n\n--- 第 ${page.pageNumber} 页 ---\n${page.text}`;
+    if (current && current.length + block.length > AI_DOCUMENT_CHUNK_CHARS) {
+      chunks.push(current.trim());
+      current = '';
+    }
+    current += block;
+  }
+  if (current.trim()) chunks.push(current.trim());
+  return chunks;
+}
+
+async function mapWithConcurrency(items, limit, mapper) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  async function worker() {
+    while (cursor < items.length) {
+      const index = cursor++;
+      results[index] = await mapper(items[index], index);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
 }
 
 function string(value, name, { min = 0, max, optional = false, nullable = false } = {}) {
@@ -237,7 +370,8 @@ function normalizedImportBundle(bundle, session) {
 }
 
 function actorFromRequest(req) {
-  const session = getSession(getSessionIdFromRequest(req));
+  const sessionId = getSessionIdFromRequest(req);
+  const session = getSession(sessionId);
   if (!session) return null;
   const actorKey = canvasActorKey(session.issuer, session.subject);
   return actorKey ? { actorKey, session } : null;
@@ -246,6 +380,7 @@ function actorFromRequest(req) {
 export function createCanvasHandler(store, {
   aiCompletion = requestAiCompletion,
   aiPublicConfig = getAiPublicConfig,
+  aiEndpointValidator = validateAiEndpoint,
 } = {}) {
   return async function handleCanvasApi(req, res, url) {
     const actor = actorFromRequest(req);
@@ -272,11 +407,44 @@ export function createCanvasHandler(store, {
       }
 
       if (pathname === '/canvas/ai/config' && method === 'GET') {
-        json(res, 200, { data: aiPublicConfig() });
+        const personal = store.getAiSettings(actor.actorKey);
+        json(res, 200, { data: {
+          ...aiPublicConfig(personal),
+          baseUrl: personal?.baseUrl || '',
+          userConfigured: Boolean(personal),
+          hasApiKey: Boolean(personal?.apiKey)
+        } });
+        return;
+      }
+      if (pathname === '/canvas/ai/config' && method === 'POST') {
+        const body = await readJson(req);
+        const baseUrl = string(body.baseUrl, 'baseUrl', { min: 1, max: 2048 }).trim();
+        const model = string(body.model, 'model', { min: 1, max: 200 }).trim();
+        const validatedEndpoint = await aiEndpointValidator(baseUrl, {
+          allowPrivate: process.env.ALLOW_PRIVATE_AI_HOSTS === 'true',
+          allowInsecure: process.env.ALLOW_INSECURE_AI === 'true'
+        });
+        const previous = store.getAiSettings(actor.actorKey) || {};
+        const apiKey = body.apiKey === undefined
+          ? String(previous.apiKey || '')
+          : string(body.apiKey, 'apiKey', { max: 4096 });
+        const personal = { baseUrl: validatedEndpoint, model, apiKey };
+        store.saveAiSettings(actor.actorKey, personal);
+        json(res, 200, { data: {
+          ...aiPublicConfig(personal), baseUrl: validatedEndpoint, userConfigured: true, hasApiKey: Boolean(apiKey)
+        } });
+        return;
+      }
+      if (pathname === '/canvas/ai/config' && method === 'DELETE') {
+        store.clearAiSettings(actor.actorKey);
+        json(res, 200, { data: {
+          ...aiPublicConfig(), baseUrl: '', userConfigured: false, hasApiKey: false
+        } });
         return;
       }
       if (pathname === '/canvas/ai/test' && method === 'POST') {
-        const publicConfig = aiPublicConfig();
+        const privateConfig = store.getAiSettings(actor.actorKey);
+        const publicConfig = aiPublicConfig(privateConfig);
         if (!publicConfig.configured) {
           error(res, 503, 'ai_not_configured', 'AI 模型尚未在服务器端配置');
           return;
@@ -286,10 +454,123 @@ export function createCanvasHandler(store, {
             messages: [{ role: 'user', content: 'Reply with OK.' }],
             temperature: 0,
             maxTokens: 5,
-          });
+          }, privateConfig);
           json(res, 200, { data: { ok: true, ...publicConfig } });
         } catch (aiError) {
           error(res, 502, 'ai_gateway_error', aiError.message);
+        }
+        return;
+      }
+
+      if (pathname === '/canvas/ai/translate' && method === 'POST') {
+        const body = await readJson(req);
+        const textToTranslate = string(body.text, 'text', { min: 1, max: 20_000 });
+        const privateConfig = store.getAiSettings(actor.actorKey);
+        const publicConfig = aiPublicConfig(privateConfig);
+        if (!publicConfig.configured) {
+          error(res, 503, 'ai_not_configured', 'AI 模型尚未配置');
+          return;
+        }
+        try {
+          const translation = await aiCompletion({
+            messages: [
+              { role: 'system', content: '你是严谨的学术翻译助手。将用户提供的原文完整、忠实地翻译为简体中文；保留术语、数字和逻辑，不概括、不评论，只输出译文。' },
+              { role: 'user', content: textToTranslate }
+            ],
+            temperature: 0.1
+          }, privateConfig);
+          json(res, 200, { data: { translation: String(translation).trim() } });
+        } catch (aiError) {
+          error(res, aiError?.name === 'AbortError' ? 504 : 502, 'ai_gateway_error', aiError.message);
+        }
+        return;
+      }
+
+      match = /^\/canvas\/boards\/([0-9a-f-]+)\/ai\/document-map$/.exec(pathname);
+      if (match && method === 'POST') {
+        const boardId = match[1];
+        const body = await readJson(req, MAX_DOCUMENT_BODY_BYTES);
+        store.requireBoard(actor.actorKey, boardId);
+        const documentSource = source(body.document, actor.session);
+        if (!documentSource?.attachmentKey || !documentSource?.itemKey) {
+          throw new TypeError('document itemKey and attachmentKey are required');
+        }
+        const title = string(body.title || 'PDF 全文理解', 'title', { min: 1, max: 500 });
+        if (!Array.isArray(body.pages) || body.pages.length < 1 || body.pages.length > 500) {
+          throw new TypeError('pages must contain between 1 and 500 PDF pages');
+        }
+        let textChars = 0;
+        const pages = body.pages.map((item, index) => {
+          if (!item || typeof item !== 'object' || Array.isArray(item)) throw new TypeError('page is invalid');
+          const pageNumber = number(item.pageNumber, 'page.pageNumber', { min: 1, max: 5000, integer: true });
+          const pageText = string(item.text || '', 'page.text', { max: 80_000 });
+          textChars += pageText.length;
+          return { pageNumber, text: pageText, index };
+        }).filter(item => item.text);
+        if (!pages.length) throw new TypeError('PDF 没有可提取的文本');
+        if (textChars > MAX_DOCUMENT_TEXT_CHARS) {
+          const limitError = new Error(`PDF 可提取文本超过当前全文分析上限（${MAX_DOCUMENT_TEXT_CHARS} 字符）`);
+          limitError.status = 413;
+          throw limitError;
+        }
+
+        const privateConfig = store.getAiSettings(actor.actorKey);
+        const publicConfig = aiPublicConfig(privateConfig);
+        if (!publicConfig.configured) {
+          error(res, 503, 'ai_not_configured', 'AI 模型尚未配置');
+          return;
+        }
+
+        try {
+          const chunks = documentChunks(pages);
+          const chunkSummaries = await mapWithConcurrency(chunks, 3, (chunk, index) => aiCompletion({
+            messages: [
+              { role: 'system', content: [
+                '你是学术论文阅读助手。完整阅读所给页段并做结构化中间笔记。',
+                '保留章节结构、关键概念定义、主要论点、方法、数据/证据、结论、限制，以及准确页码。',
+                '每项重要发现都附带一段来自所给正文的逐字原文短引用（不要改写）及其页码，供后续核验。',
+                '不要写泛泛评价，不要遗漏相互矛盾或限定性的内容。这是内部合成材料。'
+              ].join('\n') },
+              { role: 'user', content: `文档《${title}》第 ${index + 1}/${chunks.length} 个页段：\n\n${chunk}` }
+            ],
+            temperature: 0.2
+          }, privateConfig));
+
+          const synthesis = await aiCompletion({
+            messages: [
+              { role: 'system', content: [
+                '你要把一篇 PDF 的逐段阅读笔记组织成帮助读者快速理解全文的空间画板。',
+                '只输出一个 JSON 对象，不要 Markdown 代码围栏。内容必须使用简体中文。',
+                'JSON schema:',
+                '{"title":"...","overview":"完整全文概览","evidenceQuote":"逐字原文","evidencePage":1,',
+                '"sections":[{"title":"...","body":"章节作用和内容","pageStart":1,"pageEnd":3,"evidenceQuote":"逐字原文","evidencePage":2}],',
+                '"concepts":[{"title":"...","body":"定义、意义与上下文","pageStart":2,"pageEnd":2,"evidenceQuote":"逐字原文","evidencePage":2}],',
+                '"claims":[{"title":"...","body":"论点及证据/方法/限制","pageStart":4,"pageEnd":6,"evidenceQuote":"逐字原文","evidencePage":5}],',
+                '"relations":[{"from":"section-0","to":"concept-0","relation":"supports","label":"使用"}]}',
+                '节点 ID 必须严格使用数组下标形成 section-N、concept-N、claim-N，或 overview。',
+                'relation 只能是 related/supports/contradicts/causes/cites/custom。',
+                '生成 3–10 个 sections、3–10 个 concepts、3–10 个 claims；页码必须来自笔记。',
+                'overview 必须按“研究问题 / 方法 / 核心发现 / 贡献 / 限制”五项组织，能独立帮助读者理解全文。',
+                '每个 section.body 必须说明本节作用、关键内容及其在全文论证中的位置。',
+                '每个 concept.body 必须给出文中定义、作用和使用语境，不能只写名词解释。',
+                '每个 claim.body 必须同时写清论点、对应证据或方法、适用条件/限制。',
+                '每张卡片只覆盖其 pageStart–pageEnd 页内有依据的内容；不要把全文页码填给局部卡片。',
+                '每个 evidenceQuote 必须逐字复制自对应 evidencePage 的原文，不得翻译、改写或自行补全。'
+              ].join('\n') },
+              { role: 'user', content: `文档标题：${title}\n总页数：${body.pages.length}\n\n${chunkSummaries.map((summary, index) => `【页段 ${index + 1}】\n${summary}`).join('\n\n')}` }
+            ],
+            temperature: 0.25
+          }, privateConfig);
+          const graph = normalizeDocumentGraph(parseAiJson(synthesis), pages, body.pages.length, title);
+          const result = store.createAiDocumentMap(actor.actorKey, boardId, {
+            model: publicConfig.model,
+            promptVersion: 'altcanvas-document-map-v1',
+            document: { ...documentSource, title, pageCount: body.pages.length },
+            graph
+          });
+          json(res, 201, { data: result });
+        } catch (aiError) {
+          error(res, aiError?.name === 'AbortError' ? 504 : 502, 'ai_gateway_error', aiError.message);
         }
         return;
       }
@@ -389,7 +670,8 @@ export function createCanvasHandler(store, {
         const inputNodes = snapshot.nodes.filter(n => inputNodeIds.includes(n.id));
 
         if (inputNodes.length !== inputNodeIds.length) throw new TypeError('one or more input nodes are invalid');
-        const publicConfig = aiPublicConfig();
+        const privateConfig = store.getAiSettings(actor.actorKey);
+        const publicConfig = aiPublicConfig(privateConfig);
         if (!publicConfig.configured) {
           error(res, 503, 'ai_not_configured', 'AI 模型尚未在服务器端配置');
           return;
@@ -455,7 +737,7 @@ export function createCanvasHandler(store, {
               { role: 'user', content: userMessage }
             ],
             temperature: task === 'translate' ? 0.1 : 0.4,
-          });
+          }, privateConfig);
         } catch (fetchErr) {
           error(res, fetchErr?.name === 'AbortError' ? 504 : 502, 'ai_gateway_error', `连接 AI 端点失败: ${fetchErr.message}`);
           return;

@@ -4,36 +4,46 @@ import { isPrivateNetworkHost } from './security.mjs';
 const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_RESPONSE_BYTES = 512 * 1024;
 
-function configuredValues() {
-  const baseUrl = String(process.env.AI_BASE_URL || '').trim();
-  const model = String(process.env.AI_MODEL || '').trim();
+function configuredValues(override = null) {
+  const baseUrl = String(override?.baseUrl ?? process.env.AI_BASE_URL ?? '').trim();
+  const model = String(override?.model ?? process.env.AI_MODEL ?? '').trim();
   return {
     baseUrl,
     model,
-    apiKey: String(process.env.AI_API_KEY || ''),
+    apiKey: String(override?.apiKey ?? process.env.AI_API_KEY ?? ''),
     allowPrivate: process.env.ALLOW_PRIVATE_AI_HOSTS === 'true',
     allowInsecure: process.env.ALLOW_INSECURE_AI === 'true',
   };
 }
 
 export async function validateAiEndpoint(raw, { allowPrivate = false, allowInsecure = false } = {}) {
-  if (!raw) throw new Error('服务器尚未配置 AI_BASE_URL');
-  const endpoint = new URL(raw);
+  if (!raw) throw new TypeError('服务器尚未配置 AI_BASE_URL');
+  let endpoint;
+  try {
+    endpoint = new URL(raw);
+  } catch {
+    throw new TypeError('AI_BASE_URL 不是有效的网址');
+  }
   if (!['http:', 'https:'].includes(endpoint.protocol) || endpoint.username || endpoint.password) {
-    throw new Error('AI_BASE_URL 必须是无账号密码的 HTTP(S) 地址');
+    throw new TypeError('AI_BASE_URL 必须是无账号密码的 HTTP(S) 地址');
   }
   if (endpoint.protocol !== 'https:' && !allowInsecure) {
-    throw new Error('AI_BASE_URL 必须使用 HTTPS；本机模型需显式启用 ALLOW_INSECURE_AI');
+    throw new TypeError('AI_BASE_URL 必须使用 HTTPS；本机模型需显式启用 ALLOW_INSECURE_AI');
   }
   endpoint.search = '';
   endpoint.hash = '';
 
   if (!allowPrivate) {
-    if (isPrivateNetworkHost(endpoint.hostname)) throw new Error('AI 端点不能指向本机或私有网络');
+    if (isPrivateNetworkHost(endpoint.hostname)) throw new TypeError('AI 端点不能指向本机或私有网络');
     if (!endpoint.hostname.includes(':') && !/^\d+(?:\.\d+){3}$/.test(endpoint.hostname)) {
-      const addresses = await dns.lookup(endpoint.hostname, { all: true, verbatim: true });
+      let addresses;
+      try {
+        addresses = await dns.lookup(endpoint.hostname, { all: true, verbatim: true });
+      } catch {
+        throw new TypeError('AI 端点域名无法解析');
+      }
       if (!addresses.length || addresses.some(({ address }) => isPrivateNetworkHost(address))) {
-        throw new Error('AI 端点解析到了不允许的网络地址');
+        throw new TypeError('AI 端点解析到了不允许的网络地址');
       }
     }
   }
@@ -42,8 +52,8 @@ export async function validateAiEndpoint(raw, { allowPrivate = false, allowInsec
   return normalized.endsWith('/chat/completions') ? normalized : `${normalized}/chat/completions`;
 }
 
-export function getAiPublicConfig() {
-  const { baseUrl, model } = configuredValues();
+export function getAiPublicConfig(override = null) {
+  const { baseUrl, model } = configuredValues(override);
   let provider = '';
   try { provider = baseUrl ? new URL(baseUrl).host : ''; } catch { /* reported on use */ }
   return { configured: Boolean(baseUrl && model), provider, model };
@@ -65,8 +75,8 @@ async function readLimitedText(response) {
   return Buffer.concat(chunks).toString('utf8');
 }
 
-export async function requestAiCompletion({ messages, temperature = 0.4, maxTokens }) {
-  const config = configuredValues();
+export async function requestAiCompletion({ messages, temperature = 0.4, maxTokens }, override = null) {
+  const config = configuredValues(override);
   if (!config.model) throw new Error('服务器尚未配置 AI_MODEL');
   const targetUrl = await validateAiEndpoint(config.baseUrl, config);
   const controller = new AbortController();
@@ -93,9 +103,13 @@ export async function requestAiCompletion({ messages, temperature = 0.4, maxToke
     }
     const text = await readLimitedText(response);
     if (!response.ok) {
-      let detail = '';
-      try { detail = JSON.parse(text)?.error?.message || ''; } catch { /* non-JSON response */ }
-      throw new Error(`AI 模型端点返回 HTTP ${response.status}${detail ? `: ${detail.slice(0, 240)}` : ''}`);
+      let upstreamCode = '';
+      try {
+        const upstreamError = JSON.parse(text)?.error;
+        const candidate = String(upstreamError?.code || upstreamError?.type || '');
+        if (/^[A-Za-z0-9_.-]{1,64}$/.test(candidate)) upstreamCode = candidate;
+      } catch { /* non-JSON response */ }
+      throw new Error(`AI 模型端点返回 HTTP ${response.status}${upstreamCode ? ` (${upstreamCode})` : ''}`);
     }
     let payload;
     try { payload = JSON.parse(text); } catch { throw new Error('AI 模型返回了无效 JSON'); }

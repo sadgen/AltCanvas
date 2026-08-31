@@ -68,6 +68,7 @@
     /* Draggable pane dividers (desktop only) */
     .pane-divider { display: none; }
     @media (min-width: 821px) {
+      #reader-pane { min-width: 18rem; }
       .pane-divider {
         display: block;
         flex: 0 0 6px;
@@ -262,16 +263,18 @@
       <div class="canvas-toolbar px-2 py-2 border-b border-slate-800/80 bg-slate-950/70 flex items-center gap-1.5 text-[11px] overflow-x-auto whitespace-nowrap">
         <button id="btn-canvas-add-note" type="button" title="新建手写卡片 (N)" class="px-2 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white">+ 手写卡片</button>
         <button id="btn-canvas-import" type="button" class="px-2 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 disabled:opacity-40 disabled:cursor-not-allowed">加入当前标注</button>
+        <button id="btn-canvas-ai-document" type="button" class="px-2 py-1.5 rounded bg-purple-700 hover:bg-purple-600 text-white disabled:opacity-40 disabled:cursor-not-allowed" disabled title="提取当前 PDF 全文并生成可编辑的理解画板；正文会发送给当前 AI 服务">🧠 理解全文</button>
         <button id="btn-canvas-connect" type="button" aria-pressed="false" title="切换连线模式 (C)" class="px-2 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200">连线</button>
-        <button id="btn-canvas-ai" type="button" class="px-2 py-1.5 rounded bg-purple-900/80 hover:bg-purple-800 text-purple-200 border border-purple-700/50 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1" disabled title="选中卡片后点击启动 AI 翻译/综合/问答">
-          <span>✨ AI 助手</span>
-        </button>
+        <button id="btn-canvas-ai-translate" type="button" class="px-2 py-1.5 rounded bg-purple-700 hover:bg-purple-600 text-white disabled:opacity-40 disabled:cursor-not-allowed" disabled title="将选中卡片一键忠实翻译为中文">🌐 中译</button>
+        <button id="btn-canvas-ai-synthesize" type="button" class="px-2 py-1.5 rounded bg-purple-900/80 hover:bg-purple-800 text-purple-200 border border-purple-700/50 disabled:opacity-40 disabled:cursor-not-allowed" disabled title="一键综合总结选中卡片">✨ 总结</button>
+        <button id="btn-canvas-ai" type="button" class="px-2 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-purple-200 disabled:opacity-40 disabled:cursor-not-allowed" disabled title="观点对比、针对问答或补充自定义指令">更多 AI</button>
         <span class="w-px h-5 bg-slate-800"></span>
         <button id="btn-canvas-export-json" type="button" title="导出画板 JSON" class="px-2 py-1.5 rounded hover:bg-slate-800 text-slate-300">导出</button>
         <label id="lbl-canvas-import-json" title="导入画板 JSON" class="px-2 py-1.5 rounded hover:bg-slate-800 text-slate-300 cursor-pointer">
           导入<input id="input-canvas-import-file" type="file" accept=".json,.altcanvas.json" class="hidden">
         </label>
         <button id="btn-canvas-history" type="button" title="查看操作溯源历史 (H)" class="px-2 py-1.5 rounded hover:bg-slate-800 text-slate-300">历史</button>
+        <button id="btn-canvas-clear" type="button" title="清空全部卡片和连线；可按 Ctrl+Z 撤销" class="px-2 py-1.5 rounded hover:bg-rose-950 text-rose-400 disabled:opacity-40 disabled:cursor-not-allowed" disabled>清空画板</button>
         <span class="w-px h-5 bg-slate-800"></span>
         <button id="btn-canvas-zoom-out" type="button" aria-label="缩小画板" class="px-2 py-1.5 rounded hover:bg-slate-800 text-slate-300">−</button>
         <button id="btn-canvas-zoom-reset" type="button" class="px-2 py-1.5 rounded hover:bg-slate-800 text-slate-400 font-mono">100%</button>
@@ -378,9 +381,29 @@
           <div id="ai-provider-status" class="rounded border border-slate-800 bg-slate-950 p-2.5 text-[11px] text-slate-400">
             <div>供应商：<span id="ai-provider-name" class="font-mono text-slate-300">未配置</span></div>
             <div class="mt-1">模型：<span id="ai-provider-model" class="font-mono text-purple-300">未配置</span></div>
-            <div class="mt-1.5 text-[10px] text-slate-500">端点和 API Key 仅由服务器环境变量配置，不会保存到浏览器。</div>
+            <div class="mt-1.5 text-[10px] text-slate-500">个人配置按用户加密保存在服务端；退出登录或重启后仍可使用。API Key 不会返回或保存到浏览器。</div>
           </div>
-          <button id="btn-test-ai-conn" type="button" class="px-3 py-1 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-purple-300 rounded text-xs transition border border-slate-700">测试服务端 AI 连接</button>
+          <div>
+            <label for="input-ai-base-url" class="block text-slate-400 mb-1">兼容接口地址</label>
+            <input id="input-ai-base-url" type="url" inputmode="url" autocomplete="url" placeholder="https://api.deepseek.com/v1" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:outline-none focus:border-purple-500 font-mono">
+            <div class="mt-1 text-[10px] text-amber-500/80">HTTP 仅建议用于 127.0.0.1/localhost；局域网 HTTP 会明文传输卡片内容与凭据。</div>
+          </div>
+          <div>
+            <label for="input-ai-model" class="block text-slate-400 mb-1">模型名称</label>
+            <input id="input-ai-model" type="text" autocomplete="off" spellcheck="false" placeholder="deepseek-chat" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:outline-none focus:border-purple-500 font-mono">
+          </div>
+          <div>
+            <label for="input-ai-key" class="block text-slate-400 mb-1">API Key</label>
+            <input id="input-ai-key" type="password" autocomplete="new-password" spellcheck="false" placeholder="输入新 Key；留空则保留已保存的 Key" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:outline-none focus:border-purple-500 font-mono">
+          </div>
+          <div class="flex flex-wrap gap-2">
+            <button id="btn-test-ai-conn" type="button" class="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-purple-300 rounded text-xs transition border border-slate-700">保存并测试 AI 连接</button>
+            <button id="btn-clear-ai-config" type="button" class="px-3 py-1 bg-slate-900 hover:bg-slate-800 text-slate-400 rounded text-xs transition border border-slate-800 hidden">清除个人配置</button>
+          </div>
+          <label class="flex items-start gap-2 rounded border border-purple-900/50 bg-purple-950/20 p-2.5 text-[11px] text-slate-300 cursor-pointer">
+            <input id="input-ai-auto-translate" type="checkbox" class="mt-0.5 accent-purple-600">
+            <span><span class="font-medium text-purple-300">划线后自动中译</span><br><span class="text-[10px] text-slate-500">新高亮的原文会发送给当前 AI 服务，译文直接写入同一 PDF 标注的笔记。</span></span>
+          </label>
         </div>
 
         <!-- Connection Test Output -->
@@ -431,6 +454,7 @@
         <div>
           <label class="block text-slate-400 mb-1.5 font-medium">已选卡片上下文 (<span id="ai-selected-count">0</span> 张)</label>
           <div id="ai-selected-chips" class="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto p-2 bg-slate-950 border border-slate-800 rounded custom-scrollbar"></div>
+          <div class="mt-1.5 text-[10px] leading-relaxed text-amber-500/80">生成时会把所选卡片的标题、正文、引用快照及下方自定义指令发送到已配置的 AI 端点；不会自动发送整篇 PDF。</div>
         </div>
 
         <div>
@@ -681,6 +705,17 @@
     let canvasSelectedNodeIds = new Set();
     let currentAiTask = 'translate';
     let aiConfig = { configured: false, provider: '', model: '' };
+    let aiDocumentGenerationInFlight = false;
+    const aiAnnotationTranslationsInFlight = new Set();
+
+    function autoTranslateHighlightsEnabled() {
+      return localStorage.getItem('altcanvas.ai.autoTranslateHighlights') !== 'false';
+    }
+
+    function setAutoTranslateHighlightsEnabled(enabled) {
+      localStorage.setItem('altcanvas.ai.autoTranslateHighlights', enabled ? 'true' : 'false');
+    }
+    let aiGenerationInFlight = false;
     let canvasLayoutTimer = null;
     let canvasSaveInFlight = false;
     let canvasMutationRevision = 0;
@@ -1087,10 +1122,16 @@
       document.getElementById('btn-test-conn').classList.toggle('hidden', config.mode === 'bff');
       document.getElementById('ai-provider-name').textContent = aiConfig.provider || '未配置';
       document.getElementById('ai-provider-model').textContent = aiConfig.model || '未配置';
-      document.getElementById('btn-test-ai-conn').disabled = !aiConfig.configured;
+      document.getElementById('input-ai-base-url').value = aiConfig.baseUrl || '';
+      document.getElementById('input-ai-model').value = aiConfig.userConfigured ? (aiConfig.model || '') : '';
+      document.getElementById('input-ai-key').value = '';
+      document.getElementById('input-ai-key').placeholder = aiConfig.hasApiKey
+        ? '已保存 Key；留空保持不变' : '输入 API Key（本地无鉴权模型可留空）';
+      document.getElementById('input-ai-auto-translate').checked = autoTranslateHighlightsEnabled();
+      document.getElementById('btn-clear-ai-config').classList.toggle('hidden', !aiConfig.userConfigured);
       document.getElementById('test-output').classList.add('hidden');
       document.getElementById('settings-modal').classList.remove('hidden');
-      requestAnimationFrame(() => document.getElementById(config.mode === 'bff' ? 'btn-test-ai-conn' : (config.apiKey ? 'input-api' : 'input-key')).focus());
+      requestAnimationFrame(() => document.getElementById(config.mode === 'bff' ? 'input-ai-base-url' : (config.apiKey ? 'input-api' : 'input-key')).focus());
     }
 
     function closeSettingsModal() {
@@ -1129,6 +1170,52 @@
       } catch (err) {
         setTestOutput([[`✕ AI 端点连接失败: ${errorMessage(err)}`, 'text-rose-400 font-medium']], false);
         return false;
+      }
+    }
+
+    async function saveAiConfig({ testAfterSave = false } = {}) {
+      const baseUrl = document.getElementById('input-ai-base-url').value.trim();
+      const model = document.getElementById('input-ai-model').value.trim();
+      const apiKey = document.getElementById('input-ai-key').value;
+      if (!baseUrl || !model) {
+        showToast('请填写 AI 接口地址和模型名称', 'error');
+        return false;
+      }
+      try {
+        const body = { baseUrl, model };
+        if (apiKey) body.apiKey = apiKey;
+        aiConfig = await canvasFetch('/ai/config', { method: 'POST', body });
+        document.getElementById('input-ai-key').value = '';
+        document.getElementById('input-ai-key').placeholder = aiConfig.hasApiKey
+          ? '已保存 Key；留空保持不变' : '输入 API Key（本地无鉴权模型可留空）';
+        document.getElementById('ai-provider-name').textContent = aiConfig.provider || '未配置';
+        document.getElementById('ai-provider-model').textContent = aiConfig.model || '未配置';
+        document.getElementById('btn-clear-ai-config').classList.toggle('hidden', !aiConfig.userConfigured);
+        updateCanvasAiToolbar();
+        if (testAfterSave) return testAiConnection();
+        setCanvasSaveState('AI 配置已持久保存', 'ok');
+        return true;
+      } catch (err) {
+        reportApplicationError('ai.config-save', err);
+        showToast(`保存 AI 配置失败: ${errorMessage(err)}`, 'error');
+        return false;
+      }
+    }
+
+    async function clearAiConfig() {
+      try {
+        aiConfig = await canvasFetch('/ai/config', { method: 'DELETE' });
+        document.getElementById('input-ai-base-url').value = '';
+        document.getElementById('input-ai-model').value = '';
+        document.getElementById('input-ai-key').value = '';
+        document.getElementById('btn-clear-ai-config').classList.add('hidden');
+        document.getElementById('ai-provider-name').textContent = aiConfig.provider || '未配置';
+        document.getElementById('ai-provider-model').textContent = aiConfig.model || '未配置';
+        updateCanvasAiToolbar();
+        setCanvasSaveState(aiConfig.configured ? '已恢复默认 AI 配置' : '个人 AI 配置已清除', 'ok');
+      } catch (err) {
+        reportApplicationError('ai.config-clear', err);
+        showToast(`清除 AI 配置失败: ${errorMessage(err)}`, 'error');
       }
     }
 
@@ -1175,7 +1262,12 @@
       const input = document.getElementById('input-key');
       input.type = input.type === 'password' ? 'text' : 'password';
     };
-    document.getElementById('btn-test-ai-conn').onclick = testAiConnection;
+    document.getElementById('btn-test-ai-conn').onclick = () => saveAiConfig({ testAfterSave: true });
+    document.getElementById('btn-clear-ai-config').onclick = clearAiConfig;
+    document.getElementById('input-ai-auto-translate').onchange = event => {
+      setAutoTranslateHighlightsEnabled(event.currentTarget.checked);
+      setCanvasSaveState(event.currentTarget.checked ? '自动划线中译已开启' : '自动划线中译已关闭', 'ok');
+    };
 
     document.getElementById('btn-test-conn').onclick = () => {
       const api = document.getElementById('input-api').value.trim();
@@ -1186,7 +1278,7 @@
 
     document.getElementById('btn-save-settings').onclick = async () => {
       if (config.mode === 'bff') {
-        closeSettingsModal();
+        if (await saveAiConfig()) closeSettingsModal();
         return;
       }
       const api = document.getElementById('input-api').value.trim();
@@ -1356,6 +1448,8 @@
       documentController = new AbortController();
       const { signal } = documentController;
       currentItem = item;
+      currentReaderInstance = null;
+      updateCanvasAiToolbar();
       currentDocumentLibrary = normalizeLibraryContext(libraryContext);
       const documentLibraryPrefix = libraryApiPrefix(currentDocumentLibrary);
       renderItems(); // Update active selection state
@@ -1568,7 +1662,7 @@
 
       if (requestId !== openRequestId) return;
       document.getElementById('reader-loading').classList.add('hidden');
-      showToast('文档加载完毕', 'success');
+      updateCanvasAiToolbar();
       scheduleAcxMobileToolbar();
     }
 
@@ -1585,9 +1679,34 @@
     }
 
     // --- Annotation Sync (Save / Update / Delete) ---
+    async function autoTranslatePdfAnnotation(annotation) {
+      if (!autoTranslateHighlightsEnabled() || !aiConfig.configured) return;
+      if (!['highlight', 'underline'].includes(annotation?.type || 'highlight')) return;
+      const originalText = cleanAnnotationText(annotation?.text);
+      if (!originalText || cleanAnnotationText(annotation?.comment) || aiAnnotationTranslationsInFlight.has(annotation.id)) return;
+      const attachmentKey = currentAttachment?.key;
+      if (!attachmentKey) return;
+
+      aiAnnotationTranslationsInFlight.add(annotation.id);
+      setCanvasSaveState('正在翻译新划线…');
+      try {
+        const result = await canvasFetch('/ai/translate', { method: 'POST', body: { text: originalText } });
+        if (!result?.translation || currentAttachment?.key !== attachmentKey || !currentReaderInstance) return;
+        currentReaderInstance._primaryView?._annotationManager?.updateAnnotations([{
+          id: annotation.id,
+          comment: `AI 中译\n${result.translation}`
+        }]);
+        setCanvasSaveState('划线译文已写入 PDF 标注', 'ok');
+      } catch (err) {
+        reportApplicationError('reader.ai-translate', err);
+        setCanvasSaveState(`划线翻译失败：${errorMessage(err)}`, 'error');
+      } finally {
+        aiAnnotationTranslationsInFlight.delete(annotation.id);
+      }
+    }
+
     async function handleSaveAnnotations(savedAnns) {
       if (!currentAttachment) return;
-      console.log('📝 onSaveAnnotations triggered:', savedAnns);
 
       const toCreate = [];
       const toUpdate = [];
@@ -1615,7 +1734,7 @@
         if (existing) {
           toUpdate.push({ key: serverId, clientId: ann.id, version: existing.version, data: zoteroAnnData });
         } else {
-          toCreate.push({ id: ann.id, data: zoteroAnnData });
+          toCreate.push({ id: ann.id, annotation: ann, data: zoteroAnnData });
         }
       }
 
@@ -1643,7 +1762,10 @@
               }
             }
           });
-          showToast(`已创建并同步 ${createdItems.length} 条新标注`, 'success');
+          for (let idx = 0; idx < createdItems.length; idx++) {
+            const annotation = toCreate[idx]?.annotation;
+            if (annotation) void autoTranslatePdfAnnotation(annotation);
+          }
         } catch (e) {
           showToast(`创建标注失败: ${e.message}`, 'error');
         }
@@ -2318,7 +2440,9 @@
         annotation: '文献标注', manual_note: '手写卡片', zotero_item: '文献',
         attachment: '附件', image: '图片', ai_output: 'AI 输出', group: '分组'
       };
-      const displayPageLabel = sourceRef ? getAnnotationPageLabel(sourceRef) : null;
+      const displayPageLabel = sourceRef
+        ? (sourceRef.annotationKey ? getAnnotationPageLabel(sourceRef) : (sourceRef.pageLabel || getAnnotationPageLabel(sourceRef)))
+        : null;
       const cleanBody = cleanAnnotationText(node.body) || '空白卡片';
       const showTitle = node.type === 'manual_note' || node.type === 'ai_output'
         ? Boolean(node.title)
@@ -2368,9 +2492,12 @@
       }
 
       const isEditable = node.type === 'manual_note' || node.type === 'ai_output' || node.type === 'annotation';
+      const sourceQuoteHtml = node.type === 'ai_output' && sourceRef?.quoteSnapshot
+        ? `<button type="button" class="canvas-node-jump-page block w-full mt-2 p-2 rounded border border-indigo-900/70 bg-indigo-950/30 text-left text-[10px] leading-relaxed text-indigo-200 hover:border-indigo-700" title="在 PDF 中定位并高亮这段逐字原文">“${escapeHTML(sourceRef.quoteSnapshot)}”</button>`
+        : '';
       let footerHtml = '';
       if (node.type === 'ai_output') {
-        footerHtml = `<div class="mt-2 pt-1.5 border-t border-purple-900/50 text-[9px] text-purple-400 font-mono flex items-center justify-between"><span>✨ AI 智能生成</span><button type="button" class="canvas-node-focus-sources text-purple-300 hover:text-purple-200 underline cursor-pointer" title="在画板上高亮关联的输入卡片">溯源输入</button></div>`;
+        footerHtml = `<div class="mt-2 pt-1.5 border-t border-purple-900/50 text-[9px] text-purple-400 font-mono flex items-center justify-between gap-2"><span>✨ AI 智能生成</span><span class="flex gap-2">${sourceRef?.attachmentKey ? `<button type="button" class="canvas-node-jump-page text-indigo-300 hover:text-indigo-200 underline cursor-pointer" title="在 PDF 中定位并高亮逐字引用">原文 p.${escapeHTML(displayPageLabel || '1')} ↗</button>` : ''}<button type="button" class="canvas-node-focus-sources text-purple-300 hover:text-purple-200 underline cursor-pointer" title="在画板上高亮关联的输入卡片">溯源输入</button></span></div>`;
       } else if (sourceRef?.annotationKey) {
         footerHtml = `<div class="mt-2 pt-1.5 border-t border-slate-800 text-[9px] text-slate-500 font-mono flex items-center justify-between"><span>#${escapeHTML(sourceRef.annotationKey)}</span>${sourceRef.itemKey ? `<span class="text-slate-600">Doc #${escapeHTML(sourceRef.itemKey)}</span>` : ''}</div>`;
       }
@@ -2390,7 +2517,7 @@
             <button type="button" class="canvas-node-delete text-rose-400/80 hover:text-rose-300" title="从画板移除">×</button>
           </div>
         </div>
-        <div class="canvas-node-body custom-scrollbar flex-1 p-2.5 text-[11px] leading-relaxed">${showTitle && node.type !== 'ai_output' ? `<div class="font-semibold text-slate-200 mb-1.5">${escapeHTML(node.title)}</div>` : ''}<div class="canvas-node-text ${node.type === 'annotation' ? 'font-serif text-slate-300' : 'text-slate-300'}">${escapeHTML(cleanBody)}</div>${footerHtml}</div>
+        <div class="canvas-node-body custom-scrollbar flex-1 p-2.5 text-[11px] leading-relaxed">${showTitle && node.type !== 'ai_output' ? `<div class="font-semibold text-slate-200 mb-1.5">${escapeHTML(node.title)}</div>` : ''}<div class="canvas-node-text ${node.type === 'annotation' ? 'font-serif text-slate-300' : 'text-slate-300'}">${escapeHTML(cleanBody)}</div>${sourceQuoteHtml}${footerHtml}</div>
         <div class="canvas-resize-handle" role="button" aria-label="调整卡片大小" tabindex="0"></div>
       `;
 
@@ -2413,13 +2540,19 @@
         event.stopPropagation();
         jumpToSourceAnnotation(sourceRef);
       });
+      element.querySelectorAll('.canvas-node-jump-page').forEach(button => button.addEventListener('click', event => {
+        event.stopPropagation();
+        jumpToDocumentSource(sourceRef);
+      }));
       element.querySelector('.canvas-node-focus-sources')?.addEventListener('click', event => {
         event.stopPropagation();
         focusAiInputSources(node.id);
       });
       element.querySelector('.canvas-resize-handle').addEventListener('pointerdown', event => beginCanvasNodeResize(event, node, element));
       element.addEventListener('click', event => {
-        if (element.dataset.suppressClick === 'true' || event.target.closest('button') || event.target.closest('.canvas-resize-handle')) return;
+        if (element.dataset.suppressClick === 'true'
+          || event.target.closest('button, input, textarea, select, [contenteditable="true"]')
+          || event.target.closest('.canvas-resize-handle')) return;
         if (document.getElementById('btn-canvas-connect').getAttribute('aria-pressed') === 'true') {
           handleCanvasConnectSelection(node.id);
           return;
@@ -2781,11 +2914,18 @@
         await loadCanvasSnapshot().catch(() => {});
       } finally {
         canvasDeleteInFlight = false;
+        updateCanvasAiToolbar();
       }
     }
 
     async function deleteCanvasNode(node) {
       await deleteCanvasNodes([node]);
+    }
+
+    async function clearCanvas() {
+      const nodes = [...canvasNodes.values()];
+      if (!nodes.length || canvasDeleteInFlight) return;
+      await deleteCanvasNodes(nodes);
     }
 
     // Rebuild a PDF annotation from the card's snapshot after the original was
@@ -2832,28 +2972,43 @@
         if (!serverKey) throw new Error('批注保存超时，未能重新绑定卡片');
 
         const saved = currentAnnotationsMap.get(serverKey);
-        const resource = await canvasFetch(`/nodes/${node.id}/source`, {
+        const nextSource = {
+          libraryType: sourceRef.libraryType || 'user',
+          libraryId: sourceRef.libraryId,
+          itemKey: sourceRef.itemKey || null,
+          attachmentKey: sourceRef.attachmentKey,
+          annotationKey: serverKey,
+          annotationVersion: saved?.version ?? null,
+          pageLabel,
+          position,
+          quoteSnapshot: sourceRef.quoteSnapshot ?? null
+        };
+        const rebind = currentNode => canvasFetch(`/nodes/${currentNode.id}/source`, {
           method: 'PATCH',
-          headers: { 'If-Match': `W/"${node.version}"` },
-          body: {
-            source: {
-              libraryType: sourceRef.libraryType || 'user',
-              libraryId: sourceRef.libraryId,
-              itemKey: sourceRef.itemKey || null,
-              attachmentKey: sourceRef.attachmentKey,
-              annotationKey: serverKey,
-              annotationVersion: saved?.version ?? null,
-              pageLabel,
-              position,
-              quoteSnapshot: sourceRef.quoteSnapshot ?? null
-            }
-          }
+          headers: { 'If-Match': `W/"${currentNode.version}"` },
+          body: { source: nextSource }
         });
+        let resource;
+        try {
+          resource = await rebind(node);
+        } catch (err) {
+          if (err.status !== 412) throw err;
+          await loadCanvasSnapshot();
+          const latestNode = canvasNodes.get(node.id);
+          if (!latestNode || latestNode.sourceRefId !== node.sourceRefId) {
+            throw new Error('卡片来源已被其他操作修改，未覆盖新的来源');
+          }
+          resource = await rebind(latestNode);
+        }
         if (resource?.node) canvasNodes.set(resource.node.id, resource.node);
         if (resource?.source && resource.node?.sourceRefId) {
           canvasSources.set(resource.node.sourceRefId, resource.source);
         }
+        if (![...canvasNodes.values()].some(candidate => candidate.sourceRefId === sourceRef.id)) {
+          canvasSources.delete(sourceRef.id);
+        }
         forgetDeletedAnnotation(sourceRef);
+        if (resource?.source) sourceFreshnessMap.set(sourceIdentity(resource.source), 'intact');
         renderCanvas();
         setCanvasSaveState('已保存', 'ok');
         showToast('已用新批注恢复到 PDF 并重新绑定卡片', 'success');
@@ -2989,6 +3144,46 @@
       }
     }
 
+    async function jumpToDocumentSource(sourceRef) {
+      if (!sourceRef?.attachmentKey) return;
+      const pageIndex = getAnnotationPageIndex(sourceRef);
+      try {
+        const sourceLibrary = normalizeLibraryContext(sourceRef);
+        const isCurrentDocument = currentAttachment && isSameLibrary(currentDocumentLibrary, sourceLibrary)
+          && currentAttachment.key === sourceRef.attachmentKey;
+        if (!isCurrentDocument) {
+          const targetItemKey = sourceRef.itemKey || sourceRef.attachmentKey;
+          let targetItem = sourceLibrary.libraryType === 'user' && sourceLibrary.libraryId === String(config.userId || '')
+            ? allItems.find(item => item.key === targetItemKey) : null;
+          if (!targetItem) {
+            const response = await fetch(getApiUrl(`${libraryApiPrefix(sourceRef)}/items/${encodeURIComponent(targetItemKey)}`), { headers: getHeaders() });
+            if (!response.ok) throw new Error(`获取文献失败 (HTTP ${response.status})`);
+            targetItem = await response.json();
+          }
+          await openItem(targetItem, sourceRef);
+        }
+        if (mobileMedia.matches) setMobilePane('reader');
+        const reader = document.getElementById('reader-frame').contentWindow?._reader || currentReaderInstance;
+        await waitForReaderPageReady(reader, pageIndex, documentController?.signal);
+        await Promise.resolve(reader.navigate({ pageIndex }));
+        const evidenceQuery = cleanAnnotationText(sourceRef.quoteSnapshot || sourceRef.position?.textQuote || '').slice(0, 240);
+        const highlighted = evidenceQuery ? await showPdfEvidenceHighlight(sourceRef, pageIndex) : false;
+        if (!highlighted && evidenceQuery && currentReaderInstance?._primaryView?.find) {
+          currentReaderInstance._primaryView.find({
+            query: evidenceQuery,
+            highlightAll: true,
+            caseSensitive: false,
+            entireWord: false,
+            index: null
+          });
+        }
+      } catch (err) {
+        if (err?.name === 'AbortError') return;
+        reportApplicationError('reader.jump-document-page', err);
+        showToast(`PDF 页码定位失败: ${errorMessage(err)}`, 'error');
+      }
+    }
+
     async function jumpToAnnotation(annotationId, pageIndex) {
       if (mobileMedia.matches) setMobilePane('reader');
       const frame = document.getElementById('reader-frame');
@@ -3098,6 +3293,7 @@
           'board.layout_updated': '保存布局',
           'node.created': '创建卡片',
           'node.updated': '编辑卡片',
+          'node.source_relinked': '恢复/重新绑定来源',
           'node.deleted': '删除卡片',
           'node.restored': '撤销/恢复卡片',
           'edge.created': '创建关系连线',
@@ -3140,8 +3336,168 @@
       const count = canvasSelectedNodeIds.size;
       const btn = document.getElementById('btn-canvas-ai');
       if (!btn) return;
-      btn.disabled = count === 0 || !canvasReady || !aiConfig.configured;
-      btn.innerHTML = count > 0 ? `<span>✨ AI 助手 (${count})</span>` : '<span>✨ AI 助手</span>';
+      const disabled = count === 0 || !canvasReady || !aiConfig.configured || aiGenerationInFlight;
+      btn.disabled = disabled;
+      document.getElementById('btn-canvas-ai-translate').disabled = disabled;
+      document.getElementById('btn-canvas-ai-synthesize').disabled = disabled;
+      document.getElementById('btn-canvas-ai-document').disabled = !currentAttachment || !currentReaderInstance
+        || !canvasReady || !aiConfig.configured || aiDocumentGenerationInFlight;
+      document.getElementById('btn-canvas-clear').disabled = !canvasReady || canvasDeleteInFlight || canvasNodes.size === 0;
+      btn.textContent = count > 0 ? `更多 AI (${count})` : '更多 AI';
+    }
+
+    function pdfPageText(pageData) {
+      const chars = Array.isArray(pageData?.chars) ? pageData.chars : [];
+      let text = '';
+      for (const char of chars) {
+        text += char?.u || '';
+        if (char?.paragraphBreakAfter) text += '\n\n';
+        else if (char?.lineBreakAfter) text += '\n';
+        else if (char?.spaceAfter) text += ' ';
+      }
+      return text.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+    }
+
+    function compactEvidenceText(value) {
+      return String(value || '').normalize('NFKC').replace(/[\s\u00ad]+/g, '').toLocaleLowerCase();
+    }
+
+    function evidenceRectsFromChars(chars, start, end) {
+      const normalizeRect = rect => {
+        const [x1, y1, x2, y2] = rect;
+        return [Math.min(x1, x2), Math.min(y1, y2), Math.max(x1, x2), Math.max(y1, y2)];
+      };
+      const rects = [];
+      let lineStart = start;
+      for (let index = start; index <= end; index++) {
+        const char = chars[index];
+        if (!char || (!char.lineBreakAfter && index !== end)) continue;
+        const first = chars[lineStart];
+        if (!first?.rect || !char.rect) continue;
+        const firstRect = normalizeRect(first.rect);
+        const lastRect = normalizeRect(char.rect);
+        const inlineRect = normalizeRect(first.inlineRect || first.rect);
+        const vertical = first.rotation === 90 || first.rotation === 270;
+        rects.push(vertical
+          ? [inlineRect[0], firstRect[1], inlineRect[2], lastRect[3]]
+          : [firstRect[0], inlineRect[1], lastRect[2], inlineRect[3]]);
+        lineStart = index + 1;
+      }
+      return rects;
+    }
+
+    async function locatePdfEvidence(pageIndex, quote) {
+      const pdfDocument = currentReaderInstance?._primaryView?._iframeWindow?.PDFViewerApplication?.pdfDocument;
+      if (!pdfDocument?.getPageData) return null;
+      const pageData = await pdfDocument.getPageData({ pageIndex });
+      const chars = Array.isArray(pageData?.chars) ? pageData.chars : [];
+      let haystack = '';
+      const charIndexes = [];
+      chars.forEach((char, charIndex) => {
+        for (const value of String(char?.u || '').normalize('NFKC').toLocaleLowerCase()) {
+          if (/[\s\u00ad]/.test(value)) continue;
+          haystack += value;
+          charIndexes.push(charIndex);
+        }
+      });
+      const needle = compactEvidenceText(quote);
+      const matchIndex = needle ? haystack.indexOf(needle) : -1;
+      if (matchIndex < 0) return null;
+      const start = charIndexes[matchIndex];
+      const end = charIndexes[matchIndex + needle.length - 1];
+      const rects = evidenceRectsFromChars(chars, start, end);
+      return rects.length ? { pageIndex, rects } : null;
+    }
+
+    async function showPdfEvidenceHighlight(sourceRef, pageIndex) {
+      const quote = cleanAnnotationText(sourceRef?.quoteSnapshot || sourceRef?.position?.textQuote || '');
+      if (!quote || !currentReaderInstance) return false;
+      const position = await locatePdfEvidence(pageIndex, quote);
+      if (!position) return false;
+      const annotationId = 'ALT-AI-EVIDENCE-HIGHLIGHT';
+      const timestamp = new Date().toISOString();
+      currentReaderInstance.setAnnotations([{
+        id: annotationId,
+        type: 'highlight',
+        color: '#a28ae5',
+        pageIndex,
+        pageLabel: String(pageIndex + 1),
+        sortIndex: `${String(pageIndex).padStart(5, '0')}|000000|00000`,
+        position,
+        text: quote,
+        comment: 'AI 卡片原文证据（临时定位，不写回文库）',
+        tags: [],
+        dateCreated: timestamp,
+        dateModified: timestamp,
+        readOnly: true,
+        isExternal: true
+      }]);
+      currentReaderInstance._primaryView?.navigate({ position });
+      currentReaderInstance.setSelectedAnnotations?.([annotationId]);
+      return true;
+    }
+
+    async function extractCurrentPdfPages() {
+      const pdfDocument = currentReaderInstance?._primaryView?._iframeWindow?.PDFViewerApplication?.pdfDocument;
+      const pdfApplication = currentReaderInstance?._primaryView?._iframeWindow?.PDFViewerApplication;
+      const pageCount = Number(pdfDocument?.numPages || pdfDocument?.pdfInfo?.numPages
+        || pdfApplication?.pagesCount || pdfApplication?.pdfViewer?.pagesCount || 0);
+      if (!pdfDocument?.getPageData || !pageCount) throw new Error('当前 PDF 尚未完成文本层初始化');
+      const pages = [];
+      for (let pageIndex = 0; pageIndex < pageCount; pageIndex++) {
+        setCanvasSaveState(`提取 PDF 文本 ${pageIndex + 1}/${pageCount}…`);
+        const text = pdfPageText(await pdfDocument.getPageData({ pageIndex }));
+        pages.push({ pageNumber: pageIndex + 1, text });
+        await new Promise(resolve => setTimeout(resolve));
+      }
+      if (!pages.some(page => page.text)) throw new Error('该 PDF 没有可提取文本，可能是未 OCR 的扫描件');
+      return pages;
+    }
+
+    async function generateCurrentPdfUnderstandingCanvas() {
+      if (!currentAttachment || !currentItem || !currentReaderInstance || !canvasBoard) {
+        return showToast('请先打开一篇 PDF', 'error');
+      }
+      if (!aiConfig.configured) return showToast('请先在设置中配置 AI', 'error');
+      if (aiDocumentGenerationInFlight) return;
+      aiDocumentGenerationInFlight = true;
+      updateCanvasAiToolbar();
+      try {
+        const attachmentKey = currentAttachment.key;
+        const pages = await extractCurrentPdfPages();
+        if (currentAttachment?.key !== attachmentKey) throw new Error('分析期间打开的 PDF 已发生变化');
+        const title = currentItem.data?.title || currentAttachment.data?.title || currentAttachment.data?.filename || 'PDF 全文理解';
+        setCanvasSaveState(`AI 正在分块理解 ${pages.length} 页全文…`);
+        const library = normalizeLibraryContext(currentDocumentLibrary);
+        const result = await canvasFetch(`/boards/${canvasBoard.id}/ai/document-map`, {
+          method: 'POST',
+          body: {
+            title,
+            document: {
+              ...library,
+              itemKey: currentItem.data?.parentItem || currentItem.key,
+              attachmentKey
+            },
+            pages
+          }
+        });
+        await loadCanvasSnapshot();
+        if (canvasBoard) {
+          canvasBoard.viewport = { x: 20, y: 20, zoom: .75 };
+          updateCanvasTransform();
+          scheduleCanvasLayoutSave();
+        }
+        canvasSelectedNodeIds = new Set((result?.nodes || []).map(node => node.id));
+        renderCanvasSelectedState();
+        setCanvasSaveState(`全文理解画板已生成（${result?.nodes?.length || 0} 张卡片）`, 'ok');
+      } catch (err) {
+        reportApplicationError('canvas.ai-document', err);
+        setCanvasSaveState(`全文理解失败：${errorMessage(err)}`, 'error');
+        showToast(`全文理解失败: ${errorMessage(err)}`, 'error');
+      } finally {
+        aiDocumentGenerationInFlight = false;
+        updateCanvasAiToolbar();
+      }
     }
 
     function focusAiInputSources(aiNodeId) {
@@ -3225,30 +3581,34 @@
       }
     }
 
-    async function executeAiGeneration() {
+    async function executeAiGeneration({ task = currentAiTask, prompt = null, quick = false } = {}) {
       if (!canvasReady || !canvasBoard) return showToast('画板未就绪', 'error');
       if (canvasSelectedNodeIds.size === 0) return showToast('请先选择至少一张卡片', 'error');
+      if (aiGenerationInFlight) return;
 
       const modal = document.getElementById('ai-modal');
       const loadingState = document.getElementById('ai-loading-state');
       const submitBtn = document.getElementById('btn-submit-ai');
       const promptInput = document.getElementById('input-ai-prompt');
-      const prompt = promptInput.value.trim();
+      const customPrompt = prompt === null ? promptInput.value.trim() : prompt;
+      const inputNodeIds = [...canvasSelectedNodeIds];
 
-      loadingState.classList.remove('hidden');
+      aiGenerationInFlight = true;
+      if (!quick) loadingState.classList.remove('hidden');
       submitBtn.disabled = true;
+      updateCanvasAiToolbar();
+      setCanvasSaveState(task === 'translate' ? 'AI 翻译中…' : 'AI 生成中…');
 
       try {
         const result = await canvasFetch(`/boards/${canvasBoard.id}/ai/generate`, {
           method: 'POST',
           body: {
-            task: currentAiTask,
-            prompt,
-            inputNodeIds: [...canvasSelectedNodeIds]
+            task,
+            prompt: customPrompt,
+            inputNodeIds
           }
         });
 
-        showToast(currentAiTask === 'translate' ? 'AI 忠实中文翻译已生成' : 'AI 综合分析卡片已生成', 'success');
         modal.classList.add('hidden');
         promptInput.value = '';
 
@@ -3260,12 +3620,16 @@
           renderCanvasSelectedState();
           updateCanvasAiToolbar();
         }
+        setCanvasSaveState(task === 'translate' ? 'AI 中译已生成' : 'AI 卡片已生成', 'ok');
       } catch (err) {
         reportApplicationError('canvas.ai', err);
+        setCanvasSaveState('AI 生成失败', 'error');
         showToast(`AI 生成失败: ${errorMessage(err)}`, 'error');
       } finally {
+        aiGenerationInFlight = false;
         loadingState.classList.add('hidden');
         submitBtn.disabled = false;
+        updateCanvasAiToolbar();
       }
     }
 
@@ -3373,9 +3737,13 @@
         setCanvasSaveState(pressed ? '请选择起点卡片' : '已保存', pressed ? 'muted' : 'ok');
       };
       document.getElementById('btn-canvas-ai').onclick = () => openAiModal();
+      document.getElementById('btn-canvas-ai-document').onclick = generateCurrentPdfUnderstandingCanvas;
+      document.getElementById('btn-canvas-clear').onclick = clearCanvas;
+      document.getElementById('btn-canvas-ai-translate').onclick = () => executeAiGeneration({ task: 'translate', prompt: '', quick: true });
+      document.getElementById('btn-canvas-ai-synthesize').onclick = () => executeAiGeneration({ task: 'synthesize', prompt: '', quick: true });
       document.getElementById('btn-close-ai').onclick = () => document.getElementById('ai-modal').classList.add('hidden');
       document.getElementById('btn-cancel-ai').onclick = () => document.getElementById('ai-modal').classList.add('hidden');
-      document.getElementById('btn-submit-ai').onclick = executeAiGeneration;
+      document.getElementById('btn-submit-ai').onclick = () => executeAiGeneration();
       document.getElementById('btn-open-ai-settings').onclick = () => {
         document.getElementById('ai-modal').classList.add('hidden');
         openSettingsModal();
@@ -3483,15 +3851,22 @@
     // --- Draggable Pane Dividers (desktop) ---
     (function initPaneDividers() {
       const LIB_MIN = 200, LIB_MAX = 560;
-      const ANN_MIN = 240, ANN_MAX = 700;
+      const ANN_MIN = 240, ANN_ABSOLUTE_MAX = 1600, READER_MIN = 288, DIVIDERS_WIDTH = 12;
       const store = {
         library: parseFloat(localStorage.getItem('altcanvas.libW')) || null,
         annotations: parseFloat(localStorage.getItem('altcanvas.annW')) || null
       };
 
       function apply(which, px) {
+        const libraryWidth = which === 'annotations'
+          ? (document.getElementById('library-pane')?.getBoundingClientRect().width || 320)
+          : 0;
+        const annotationsMax = Math.max(
+          ANN_MIN,
+          Math.min(ANN_ABSOLUTE_MAX, window.innerWidth - libraryWidth - READER_MIN - DIVIDERS_WIDTH)
+        );
         const clamped = Math.min(
-          which === 'library' ? LIB_MAX : ANN_MAX,
+          which === 'library' ? LIB_MAX : annotationsMax,
           Math.max(which === 'library' ? LIB_MIN : ANN_MIN, px)
         );
         document.documentElement.style.setProperty(
@@ -3505,6 +3880,10 @@
       // Restore saved widths on load
       if (store.library) apply('library', store.library);
       if (store.annotations) apply('annotations', store.annotations);
+      window.addEventListener('resize', () => {
+        const current = document.getElementById('annotations-pane')?.getBoundingClientRect().width;
+        if (current && !window.matchMedia('(max-width: 820px)').matches) apply('annotations', current);
+      });
 
       function makeDraggable(divider, paneId, which) {
         let startX = 0, startW = 0;
@@ -3512,6 +3891,10 @@
           const x = e.touches ? e.touches[0].clientX : e.clientX;
           const delta = which === 'library' ? x - startX : startX - x;
           apply(which, startW + delta);
+          if (which === 'library') {
+            const annotationsWidth = document.getElementById('annotations-pane')?.getBoundingClientRect().width;
+            if (annotationsWidth) apply('annotations', annotationsWidth);
+          }
         };
         const onUp = () => {
           document.body.classList.remove('pane-resizing');

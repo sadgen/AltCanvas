@@ -83,10 +83,16 @@ Altero nodes additionally require `ALLOW_PRIVATE_HOSTS=true`. Production keeps
 TLS verification enabled; use `NODE_EXTRA_CA_CERTS` for a private certificate
 authority instead of disabling verification.
 
-The optional AI workflow is configured only on the server with `AI_BASE_URL`,
-`AI_MODEL`, and `AI_API_KEY`; the browser never stores the provider key. Private
-or HTTP endpoints such as a local Ollama instance additionally require the
-explicit flags `ALLOW_PRIVATE_AI_HOSTS=true` and `ALLOW_INSECURE_AI=true`.
+The optional AI workflow can use administrator defaults from `AI_BASE_URL`,
+`AI_MODEL`, and `AI_API_KEY`, or a signed-in user's personal OpenAI-compatible
+provider entered in Settings. Personal secrets are encrypted at rest in the
+per-user Canvas data store and are never returned to or persisted by the browser. Private or HTTP
+endpoints such as a local Ollama instance additionally require the administrator
+flags `ALLOW_PRIVATE_AI_HOSTS=true` and `ALLOW_INSECURE_AI=true`.
+For stronger separation between encrypted AI settings and data backups, set a
+high-entropy `AI_SETTINGS_SECRET` outside the data directory. AI requests send
+only explicitly selected Canvas card content and source quote snapshots; a
+plain-HTTP private-network endpoint exposes that traffic to the local network.
 
 ## Production configuration
 
