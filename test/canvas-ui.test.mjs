@@ -69,7 +69,7 @@ assert.match(html, /sourceRef\.quoteSnapshot \|\| sourceRef\.position\?\.textQuo
   'document-map source navigation must use the persisted verbatim quote');
 assert.match(html, /_primaryView\?\.find/,
   'clicking an AI citation must ask Reader to highlight the exact quoted text');
-assert.match(html, /async function locatePdfEvidence\(pageIndex, quote\)/,
+assert.match(html, /async function locatePdfEvidence\(pageIndex, quote, pageDataCache = null\)/,
   'exact evidence navigation must derive PDF rectangles from the real character layer');
 assert.match(html, /ALT-AI-EVIDENCE-HIGHLIGHT/,
   'exact evidence navigation must render a stable session-only Reader highlight');
@@ -112,6 +112,13 @@ assert.match(html, /\/workspaces\/\$\{canvasWorkspace\.id\}\/boards\/import/);
 assert.match(html, /\/nodes\/\$\{node\.id\}\/restore/);
 assert.match(html, /async function restoreCanvasAnnotationToPdf\(/,
   'restore button must be wired to the annotation restore handler');
+assert.match(html, /id="btn-canvas-evidence-annotate"/);
+assert.match(html, /async function convertAllEvidenceToAnnotations\(/,
+  'evidence-to-annotation batch conversion must be implemented');
+assert.match(html, /async function convertOneEvidence\(/);
+assert.match(html, /canvas-node-annotate/);
+assert.match(html, /已转批注 ✓/);
+assert.match(html, /await waitForAnnotationServerKey\(annotation\.id\)/);
 assert.match(html, /err\.status !== 412/,
   'source restore must recover from a concurrent card edit without duplicating the PDF annotation');
 assert.match(html, /node\.type === 'ai_output' \|\| node\.type === 'annotation'/,

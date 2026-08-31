@@ -264,6 +264,7 @@
         <button id="btn-canvas-add-note" type="button" title="新建手写卡片 (N)" class="px-2 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white">+ 手写卡片</button>
         <button id="btn-canvas-import" type="button" class="px-2 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 disabled:opacity-40 disabled:cursor-not-allowed">加入当前标注</button>
         <button id="btn-canvas-ai-document" type="button" class="px-2 py-1.5 rounded bg-purple-700 hover:bg-purple-600 text-white disabled:opacity-40 disabled:cursor-not-allowed" disabled title="提取当前 PDF 全文并生成可编辑的理解画板；正文会发送给当前 AI 服务">🧠 理解全文</button>
+        <button id="btn-canvas-evidence-annotate" type="button" class="px-2 py-1.5 rounded bg-emerald-700 hover:bg-emerald-600 text-white disabled:opacity-40 disabled:cursor-not-allowed" disabled title="把当前画板所有未转换的 AI 证据引用批量转为正式 PDF 批注">🔖 证据转批注</button>
         <button id="btn-canvas-connect" type="button" aria-pressed="false" title="切换连线模式 (C)" class="px-2 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200">连线</button>
         <button id="btn-canvas-ai-translate" type="button" class="px-2 py-1.5 rounded bg-purple-700 hover:bg-purple-600 text-white disabled:opacity-40 disabled:cursor-not-allowed" disabled title="将选中卡片一键忠实翻译为中文">🌐 中译</button>
         <button id="btn-canvas-ai-synthesize" type="button" class="px-2 py-1.5 rounded bg-purple-900/80 hover:bg-purple-800 text-purple-200 border border-purple-700/50 disabled:opacity-40 disabled:cursor-not-allowed" disabled title="一键综合总结选中卡片">✨ 总结</button>
@@ -2497,7 +2498,7 @@
         : '';
       let footerHtml = '';
       if (node.type === 'ai_output') {
-        footerHtml = `<div class="mt-2 pt-1.5 border-t border-purple-900/50 text-[9px] text-purple-400 font-mono flex items-center justify-between gap-2"><span>✨ AI 智能生成</span><span class="flex gap-2">${sourceRef?.attachmentKey ? `<button type="button" class="canvas-node-jump-page text-indigo-300 hover:text-indigo-200 underline cursor-pointer" title="在 PDF 中定位并高亮逐字引用">原文 p.${escapeHTML(displayPageLabel || '1')} ↗</button>` : ''}<button type="button" class="canvas-node-focus-sources text-purple-300 hover:text-purple-200 underline cursor-pointer" title="在画板上高亮关联的输入卡片">溯源输入</button></span></div>`;
+        footerHtml = `<div class="mt-2 pt-1.5 border-t border-purple-900/50 text-[9px] text-purple-400 font-mono flex items-center justify-between gap-2"><span>✨ AI 智能生成</span><span class="flex gap-2">${sourceRef?.annotationKey ? '<span class="text-emerald-400" title="证据已转为正式 PDF 批注">已转批注 ✓</span>' : (evidenceConvertibleSource(sourceRef) ? '<button type="button" class="canvas-node-annotate text-emerald-400 hover:text-emerald-300 underline cursor-pointer" title="把这条证据转成正式 PDF 批注并关联到本卡片">转批注</button>' : '')}${sourceRef?.attachmentKey ? `<button type="button" class="canvas-node-jump-page text-indigo-300 hover:text-indigo-200 underline cursor-pointer" title="在 PDF 中定位并高亮逐字引用">原文 p.${escapeHTML(displayPageLabel || '1')} ↗</button>` : ''}<button type="button" class="canvas-node-focus-sources text-purple-300 hover:text-purple-200 underline cursor-pointer" title="在画板上高亮关联的输入卡片">溯源输入</button></span></div>`;
       } else if (sourceRef?.annotationKey) {
         footerHtml = `<div class="mt-2 pt-1.5 border-t border-slate-800 text-[9px] text-slate-500 font-mono flex items-center justify-between"><span>#${escapeHTML(sourceRef.annotationKey)}</span>${sourceRef.itemKey ? `<span class="text-slate-600">Doc #${escapeHTML(sourceRef.itemKey)}</span>` : ''}</div>`;
       }
@@ -2544,6 +2545,10 @@
         event.stopPropagation();
         jumpToDocumentSource(sourceRef);
       }));
+      element.querySelector('.canvas-node-annotate')?.addEventListener('click', event => {
+        event.stopPropagation();
+        convertEvidenceToAnnotation(node, sourceRef);
+      });
       element.querySelector('.canvas-node-focus-sources')?.addEventListener('click', event => {
         event.stopPropagation();
         focusAiInputSources(node.id);
@@ -2928,6 +2933,141 @@
       await deleteCanvasNodes(nodes);
     }
 
+    // Reader-created annotations reach Altero through the debounced save
+    // pipeline; wait for handleSaveAnnotations to register the server key.
+    async function waitForAnnotationServerKey(clientId, timeoutMs = 15000) {
+      const deadline = Date.now() + timeoutMs;
+      let serverKey = clientAnnotationIdMap.get(clientId);
+      while (!serverKey && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 150));
+        serverKey = clientAnnotationIdMap.get(clientId);
+      }
+      return serverKey || null;
+    }
+
+    // Convert an AI card's verbatim evidence quote into a formal PDF highlight
+    // annotation (persisted via the reader save pipeline), then relink the
+    // card's source to the new annotation key (provenance: node.source_relinked).
+    const canvasEvidenceConvertInFlight = new Set();
+    let canvasEvidenceBatchInFlight = false;
+
+    function evidenceConvertibleSource(sourceRef) {
+      return Boolean(sourceRef?.attachmentKey && sourceRef?.quoteSnapshot && !sourceRef?.annotationKey);
+    }
+
+    async function convertOneEvidence(node, sourceRef, pageDataCache) {
+      const pageIndex = getAnnotationPageIndex(sourceRef);
+      const quote = cleanAnnotationText(sourceRef.quoteSnapshot);
+      const position = await locatePdfEvidence(pageIndex, quote, pageDataCache);
+      if (!position) throw new Error('无法在 PDF 文本层定位该引用');
+      const annotation = currentReaderInstance._annotationManager?.addAnnotation({
+        type: 'highlight',
+        color: node.color || '#a28ae5',
+        position,
+        sortIndex: `${String(pageIndex).padStart(5, '0')}|000000|00000`,
+        text: quote,
+        pageLabel: sourceRef.pageLabel || String(pageIndex + 1),
+        comment: `AltCanvas 全文理解证据 · ${node.title || ''}`
+      });
+      if (!annotation) throw new Error('阅读器当前为只读状态，无法创建批注');
+      const serverKey = await waitForAnnotationServerKey(annotation.id);
+      if (!serverKey) throw new Error('批注保存超时，未能关联卡片');
+      const saved = currentAnnotationsMap.get(serverKey);
+      const nextSource = {
+        libraryType: sourceRef.libraryType || 'user',
+        libraryId: sourceRef.libraryId,
+        itemKey: sourceRef.itemKey || null,
+        attachmentKey: sourceRef.attachmentKey,
+        annotationKey: serverKey,
+        annotationVersion: saved?.version ?? null,
+        pageLabel: sourceRef.pageLabel || String(pageIndex + 1),
+        position: { ...sourceRef.position, ...position },
+        quoteSnapshot: sourceRef.quoteSnapshot ?? null
+      };
+      const rebind = currentNode => canvasFetch(`/nodes/${currentNode.id}/source`, {
+        method: 'PATCH',
+        headers: { 'If-Match': `W/"${currentNode.version}"` },
+        body: { source: nextSource }
+      });
+      let resource;
+      try {
+        resource = await rebind(node);
+      } catch (err) {
+        if (err.status !== 412) throw err;
+        await loadCanvasSnapshot();
+        const latestNode = canvasNodes.get(node.id);
+        if (!latestNode || latestNode.sourceRefId !== node.sourceRefId) {
+          throw new Error('卡片来源已被其他操作修改，未覆盖新的来源');
+        }
+        resource = await rebind(latestNode);
+      }
+      if (resource?.node) canvasNodes.set(resource.node.id, resource.node);
+      if (resource?.source && resource.node?.sourceRefId) {
+        canvasSources.set(resource.node.sourceRefId, resource.source);
+      }
+      return serverKey;
+    }
+
+    async function convertEvidenceToAnnotation(node, sourceRef) {
+      if (canvasEvidenceConvertInFlight.has(node.id)) return;
+      if (!evidenceConvertibleSource(sourceRef)) return;
+      if (!currentAttachment || !currentReaderInstance || !isSameLibrary(currentDocumentLibrary, sourceRef)
+        || currentAttachment.key !== sourceRef.attachmentKey) {
+        showToast('请先打开该卡片所在的 PDF，再转换证据', 'info');
+        return;
+      }
+      canvasEvidenceConvertInFlight.add(node.id);
+      setCanvasSaveState('正在转换证据为批注…');
+      try {
+        await convertOneEvidence(node, sourceRef, null);
+        renderCanvas();
+        setCanvasSaveState('证据已转为正式批注', 'ok');
+        showToast('证据已转为正式 PDF 批注并关联卡片', 'success');
+      } catch (err) {
+        reportApplicationError('canvas.evidence-convert', err);
+        setCanvasSaveState('证据转换失败', 'error');
+        showToast(`证据转换失败: ${errorMessage(err)}`, 'error');
+      } finally {
+        canvasEvidenceConvertInFlight.delete(node.id);
+      }
+    }
+
+    async function convertAllEvidenceToAnnotations() {
+      if (canvasEvidenceBatchInFlight) return;
+      if (!currentReaderInstance) return showToast('请先打开 PDF 再批量转换', 'info');
+      const cards = [...canvasNodes.values()].filter(node => {
+        const sourceRef = node.sourceRefId ? canvasSources.get(node.sourceRefId) : null;
+        return node.type === 'ai_output' && evidenceConvertibleSource(sourceRef);
+      });
+      if (!cards.length) return showToast('画板中没有可转换的证据卡片', 'info');
+      canvasEvidenceBatchInFlight = true;
+      updateCanvasAiToolbar();
+      const pageDataCache = new Map();
+      let converted = 0;
+      const failed = [];
+      try {
+        for (const [index, node] of cards.entries()) {
+          setCanvasSaveState(`转换证据 ${index + 1}/${cards.length}…`);
+          const sourceRef = canvasSources.get(node.sourceRefId);
+          try {
+            await convertOneEvidence(node, sourceRef, pageDataCache);
+            converted += 1;
+          } catch (err) {
+            reportApplicationError('canvas.evidence-convert-batch', err);
+            failed.push(node.title || node.id);
+          }
+        }
+        renderCanvas();
+        setCanvasSaveState(`已转换 ${converted}/${cards.length} 张证据卡片`, converted === cards.length ? 'ok' : 'error');
+        showToast(failed.length
+          ? `已转换 ${converted} 条，${failed.length} 条失败（${failed[0]}）`
+          : `已将 ${converted} 条证据转为正式批注`, failed.length ? 'error' : 'success');
+      } finally {
+        canvasEvidenceBatchInFlight = false;
+        updateCanvasAiToolbar();
+      }
+    }
+
     // Rebuild a PDF annotation from the card's snapshot after the original was
     // deleted in the library, then relink the card to the freshly created item
     // via the canvas source PATCH endpoint (provenance: node.source_relinked).
@@ -2963,12 +3103,7 @@
         });
         if (!annotation) throw new Error('阅读器当前为只读状态，无法创建批注');
 
-        const deadline = Date.now() + 15000;
-        let serverKey = clientAnnotationIdMap.get(annotation.id);
-        while (!serverKey && Date.now() < deadline) {
-          await new Promise(resolve => setTimeout(resolve, 150));
-          serverKey = clientAnnotationIdMap.get(annotation.id);
-        }
+        const serverKey = await waitForAnnotationServerKey(annotation.id);
         if (!serverKey) throw new Error('批注保存超时，未能重新绑定卡片');
 
         const saved = currentAnnotationsMap.get(serverKey);
@@ -3343,6 +3478,12 @@
       document.getElementById('btn-canvas-ai-document').disabled = !currentAttachment || !currentReaderInstance
         || !canvasReady || !aiConfig.configured || aiDocumentGenerationInFlight;
       document.getElementById('btn-canvas-clear').disabled = !canvasReady || canvasDeleteInFlight || canvasNodes.size === 0;
+      const evidenceCount = [...canvasNodes.values()].filter(node => {
+        const sourceRef = node.sourceRefId ? canvasSources.get(node.sourceRefId) : null;
+        return node.type === 'ai_output' && evidenceConvertibleSource(sourceRef);
+      }).length;
+      document.getElementById('btn-canvas-evidence-annotate').disabled = evidenceCount === 0 || !canvasReady
+        || canvasEvidenceBatchInFlight;
       btn.textContent = count > 0 ? `更多 AI (${count})` : '更多 AI';
     }
 
@@ -3386,10 +3527,14 @@
       return rects;
     }
 
-    async function locatePdfEvidence(pageIndex, quote) {
+    async function locatePdfEvidence(pageIndex, quote, pageDataCache = null) {
       const pdfDocument = currentReaderInstance?._primaryView?._iframeWindow?.PDFViewerApplication?.pdfDocument;
       if (!pdfDocument?.getPageData) return null;
-      const pageData = await pdfDocument.getPageData({ pageIndex });
+      let pageData = pageDataCache?.get(pageIndex);
+      if (!pageData) {
+        pageData = await pdfDocument.getPageData({ pageIndex });
+        pageDataCache?.set(pageIndex, pageData);
+      }
       const chars = Array.isArray(pageData?.chars) ? pageData.chars : [];
       let haystack = '';
       const charIndexes = [];
@@ -3738,6 +3883,7 @@
       };
       document.getElementById('btn-canvas-ai').onclick = () => openAiModal();
       document.getElementById('btn-canvas-ai-document').onclick = generateCurrentPdfUnderstandingCanvas;
+      document.getElementById('btn-canvas-evidence-annotate').onclick = convertAllEvidenceToAnnotations;
       document.getElementById('btn-canvas-clear').onclick = clearCanvas;
       document.getElementById('btn-canvas-ai-translate').onclick = () => executeAiGeneration({ task: 'translate', prompt: '', quick: true });
       document.getElementById('btn-canvas-ai-synthesize').onclick = () => executeAiGeneration({ task: 'synthesize', prompt: '', quick: true });
