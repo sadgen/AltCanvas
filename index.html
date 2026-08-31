@@ -2750,7 +2750,7 @@
         setCanvasSaveState('保存中…');
         const node = await canvasFetch(`/boards/${canvasBoard.id}/nodes`, {
           method: 'POST',
-          body: { type: 'manual_note', ...position, width: 240, height: 150, zIndex: canvasNodes.size + 1, title: '', body: '' }
+          body: { type: 'manual_note', ...position, width: 280, height: 180, zIndex: canvasNodes.size + 1, title: '', body: '' }
         });
         canvasNodes.set(node.id, node);
         renderCanvas();
@@ -2783,10 +2783,13 @@
           if (quote) bodyParts.push(`“${quote}”`);
           if (comment) bodyParts.push(comment);
           const body = bodyParts.join('\n\n') || '空白标注';
+          const textLen = body.length;
+          const cardWidth = textLen > 200 ? 360 : 310;
+          const cardHeight = Math.min(360, Math.max(190, 110 + Math.ceil(textLen / Math.floor(cardWidth / 14)) * 18));
           const node = await canvasFetch(`/boards/${canvasBoard.id}/nodes`, {
             method: 'POST',
             body: {
-              type: 'annotation', ...point, width: 270, height: 170,
+              type: 'annotation', ...point, width: cardWidth, height: cardHeight,
               zIndex: canvasNodes.size + index + 1,
               title: `第 ${pageLabel} 页`,
               body: body,
@@ -2956,18 +2959,19 @@
     }
 
     async function convertOneEvidence(node, sourceRef, pageDataCache) {
+      const activeNode = canvasNodes.get(node.id) || node;
       const pageIndex = getAnnotationPageIndex(sourceRef);
       const quote = cleanAnnotationText(sourceRef.quoteSnapshot);
       const position = await locatePdfEvidence(pageIndex, quote, pageDataCache);
       if (!position) throw new Error('无法在 PDF 文本层定位该引用');
       const annotation = currentReaderInstance._annotationManager?.addAnnotation({
         type: 'highlight',
-        color: node.color || '#a28ae5',
+        color: activeNode.color || '#a28ae5',
         position,
         sortIndex: `${String(pageIndex).padStart(5, '0')}|000000|00000`,
         text: quote,
         pageLabel: sourceRef.pageLabel || String(pageIndex + 1),
-        comment: `AltCanvas 全文理解证据 · ${node.title || ''}`
+        comment: `AltCanvas 全文理解证据 · ${activeNode.title || ''}`
       });
       if (!annotation) throw new Error('阅读器当前为只读状态，无法创建批注');
       const serverKey = await waitForAnnotationServerKey(annotation.id);
@@ -2991,12 +2995,12 @@
       });
       let resource;
       try {
-        resource = await rebind(node);
+        resource = await rebind(activeNode);
       } catch (err) {
         if (err.status !== 412) throw err;
         await loadCanvasSnapshot();
-        const latestNode = canvasNodes.get(node.id);
-        if (!latestNode || latestNode.sourceRefId !== node.sourceRefId) {
+        const latestNode = canvasNodes.get(activeNode.id);
+        if (!latestNode || latestNode.sourceRefId !== activeNode.sourceRefId) {
           throw new Error('卡片来源已被其他操作修改，未覆盖新的来源');
         }
         resource = await rebind(latestNode);
@@ -3040,6 +3044,8 @@
         return node.type === 'ai_output' && evidenceConvertibleSource(sourceRef);
       });
       if (!cards.length) return showToast('画板中没有可转换的证据卡片', 'info');
+      clearTimeout(canvasLayoutTimer);
+      canvasLayoutTimer = null;
       canvasEvidenceBatchInFlight = true;
       updateCanvasAiToolbar();
       const pageDataCache = new Map();
@@ -3832,10 +3838,39 @@
       });
       surface.addEventListener('wheel', event => {
         if (!canvasReady) return;
+
+        // 1. Ctrl / Meta + Wheel: Zoom canvas anchored at mouse cursor
+        if (event.ctrlKey || event.metaKey) {
+          event.preventDefault();
+          const rect = surface.getBoundingClientRect();
+          const factor = Math.exp(-event.deltaY * .002);
+          setCanvasZoom(canvasViewport().zoom * factor, event.clientX - rect.left, event.clientY - rect.top);
+          return;
+        }
+
+        // 2. Over scrollable card content: let card scroll naturally
+        const scrollableTarget = event.target.closest?.('.canvas-node-body, .custom-scrollbar');
+        if (scrollableTarget) {
+          const { scrollTop, scrollHeight, clientHeight } = scrollableTarget;
+          const deltaY = event.deltaY;
+          const canScrollDown = deltaY > 0 && scrollTop + clientHeight < scrollHeight - 1;
+          const canScrollUp = deltaY < 0 && scrollTop > 1;
+          if (canScrollDown || canScrollUp) {
+            return;
+          }
+        }
+
+        // 3. Normal mouse wheel: Pan the canvas smoothly
         event.preventDefault();
-        const rect = surface.getBoundingClientRect();
-        const factor = Math.exp(-event.deltaY * .0015);
-        setCanvasZoom(canvasViewport().zoom * factor, event.clientX - rect.left, event.clientY - rect.top);
+        const viewportState = canvasViewport();
+        if (event.shiftKey) {
+          viewportState.x -= (event.deltaY || event.deltaX);
+        } else {
+          viewportState.x -= event.deltaX;
+          viewportState.y -= event.deltaY;
+        }
+        updateCanvasTransform();
+        scheduleCanvasLayoutSave();
       }, { passive: false });
       surface.addEventListener('keydown', event => {
         if (event.target !== surface) return;

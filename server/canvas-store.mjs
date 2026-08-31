@@ -942,14 +942,48 @@ export class CanvasStore {
       ...graph.concepts.map((item, index) => ({ ...item, title: `概念 · ${item.title}`, key: `concept-${index}`, kind: 'concept' })),
       ...graph.claims.map((item, index) => ({ ...item, title: `论点 · ${item.title}`, key: `claim-${index}`, kind: 'claim' }))
     ];
-    const columns = 3;
-    const sectionRows = Math.max(1, Math.ceil(graph.sections.length / columns));
-    const conceptRows = Math.max(1, Math.ceil(graph.concepts.length / columns));
-    const laneStarts = {
-      section: 380,
-      concept: 380 + sectionRows * 300 + 80,
-      claim: 380 + sectionRows * 300 + 80 + conceptRows * 300 + 80
-    };
+
+    // Compute adaptive card dimensions and non-overlapping layout
+    const layoutMap = new Map();
+    let currentY = 30;
+
+    // 1. Overview card (wide header)
+    const overviewItem = nodes[0];
+    const overviewTextLen = (overviewItem.body || '').length + (overviewItem.evidenceQuote || '').length;
+    const overviewWidth = 640;
+    const overviewHeight = Math.min(540, Math.max(320, 180 + Math.ceil(overviewTextLen / 36) * 22));
+    layoutMap.set('overview', { x: 280, y: currentY, width: overviewWidth, height: overviewHeight });
+    currentY += overviewHeight + 60;
+
+    // 2. Sections, Concepts, Claims lanes
+    for (const kind of ['section', 'concept', 'claim']) {
+      const kindNodes = nodes.filter(n => n.kind === kind);
+      if (!kindNodes.length) continue;
+      const count = kindNodes.length;
+      const cols = count === 1 ? 1 : (count === 2 ? 2 : 3);
+      const cardWidth = count === 1 ? 620 : (count === 2 ? 460 : 380);
+      const colGap = 40;
+      const startX = count === 1 ? 290 : (count === 2 ? 120 : 40);
+
+      const rows = Math.ceil(count / cols);
+      for (let r = 0; r < rows; r++) {
+        const rowNodes = kindNodes.slice(r * cols, (r + 1) * cols);
+        const rowItemsWithHeight = rowNodes.map(node => {
+          const textLen = (node.body || '').length + (node.evidenceQuote || '').length;
+          const charsPerLine = Math.floor(cardWidth / 14);
+          const extraForQuote = node.evidenceQuote ? 70 : 0;
+          const height = Math.min(480, Math.max(260, 120 + extraForQuote + Math.ceil(textLen / charsPerLine) * 20));
+          return { node, height };
+        });
+        const maxRowHeight = Math.max(...rowItemsWithHeight.map(item => item.height));
+        rowItemsWithHeight.forEach((item, cIndex) => {
+          const x = startX + cIndex * (cardWidth + colGap);
+          layoutMap.set(item.node.key, { x, y: currentY, width: cardWidth, height: item.height });
+        });
+        currentY += maxRowHeight + 50;
+      }
+      currentY += 30;
+    }
 
     this.transaction(() => {
       for (let index = 0; index < nodes.length; index++) {
@@ -971,17 +1005,13 @@ export class CanvasStore {
           },
           quoteSnapshot: item.evidenceQuote
         });
-        const laneIndex = item.kind === 'overview' ? 0 : nodes.slice(0, index).filter(candidate => candidate.kind === item.kind).length;
-        const x = item.kind === 'overview' ? 380 : 40 + (laneIndex % columns) * 360;
-        const y = item.kind === 'overview' ? 30 : laneStarts[item.kind] + Math.floor(laneIndex / columns) * 300;
-        const width = item.kind === 'overview' ? 420 : 320;
-        const height = item.kind === 'overview' ? 280 : 240;
+        const layout = layoutMap.get(item.key) || { x: 40, y: 40, width: 380, height: 260 };
         const colors = { overview: '#7c3aed', section: '#2563eb', concept: '#0891b2', claim: '#d97706' };
         this.db.prepare(`
           INSERT INTO nodes
             (id, board_id, node_type, x, y, width, height, z_index, title, body, color, source_ref_id, created_at, updated_at)
           VALUES (?, ?, 'ai_output', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(nodeId, boardId, x, y, width, height, index + 1, item.title || item.kind, item.body, colors[item.kind], sourceRefId, timestamp, timestamp);
+        `).run(nodeId, boardId, layout.x, layout.y, layout.width, layout.height, index + 1, item.title || item.kind, item.body, colors[item.kind], sourceRefId, timestamp, timestamp);
         nodeIds.set(item.key, nodeId);
         createdNodeIds.push(nodeId);
       }

@@ -763,8 +763,9 @@ export function createCanvasHandler(store, {
         const minY = Math.min(...inputNodes.map(n => n.y));
         const newX = maxX + 40;
         const newY = minY;
-        const width = 320;
-        const height = task === 'translate' ? 220 : 260;
+        const textLen = (responseText || '').trim().length;
+        const width = textLen > 300 ? 440 : 380;
+        const height = Math.min(500, Math.max(240, 120 + Math.ceil(textLen / Math.floor(width / 14)) * 20));
 
         const result = store.createAiSynthesisNode(actor.actorKey, boardId, {
           task,

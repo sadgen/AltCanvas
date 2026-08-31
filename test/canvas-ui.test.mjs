@@ -110,6 +110,12 @@ assert.match(html, /canvasFetch\('\/ai\/config'\)/);
 assert.match(html, /canvasFetch\('\/ai\/test'/);
 assert.match(html, /\/workspaces\/\$\{canvasWorkspace\.id\}\/boards\/import/);
 assert.match(html, /\/nodes\/\$\{node\.id\}\/restore/);
+assert.match(html, /event\.ctrlKey \|\| event\.metaKey/,
+  'Ctrl/Cmd + wheel must be reserved for canvas zooming');
+assert.match(html, /event\.target\.closest\?\.\('\.canvas-node-body, \.custom-scrollbar'\)/,
+  'mouse wheel over scrollable card body must allow native card content scrolling');
+assert.match(html, /viewportState\.x -= event\.deltaX;[\s\S]*viewportState\.y -= event\.deltaY/,
+  'normal mouse wheel must pan canvas smoothly');
 assert.match(html, /async function restoreCanvasAnnotationToPdf\(/,
   'restore button must be wired to the annotation restore handler');
 assert.match(html, /id="btn-canvas-evidence-annotate"/);
