@@ -454,17 +454,16 @@ try {
   const mappedSnapshot = store.snapshot(canvasActorKey('https://issuer.example', 'api-subject'), apiBoard.id);
   const mappedSources = new Map(mappedSnapshot.sources.map(item => [item.id, item]));
   assert.ok(documentMapResponse.payload.data.nodes.every(node => mappedSources.get(node.sourceRefId)?.attachmentKey === 'PDF1'));
-  const verifiableNodes = documentMapResponse.payload.data.nodes.filter(node => !node.title.startsWith('论点 · '));
-  assert.ok(verifiableNodes.every(node => mappedSources.get(node.sourceRefId)?.quoteSnapshot),
-    'matchable document-map cards must retain a server-verified verbatim PDF quote');
+  assert.ok(documentMapResponse.payload.data.nodes.every(node => mappedSources.get(node.sourceRefId)?.quoteSnapshot),
+    'every document-map card must carry a verbatim PDF quote so it can be highlighted');
   const conceptNode = documentMapResponse.payload.data.nodes.find(node => node.title.startsWith('概念 · '));
   assert.equal(mappedSources.get(conceptNode.sourceRefId).quoteSnapshot, '第二页主要发现和限制。',
     'a paraphrased model citation must be repaired to an exact sentence from the PDF');
-  const degradedClaimNode = documentMapResponse.payload.data.nodes.find(node => node.title.startsWith('论点 · '));
-  assert.equal(mappedSources.get(degradedClaimNode.sourceRefId).quoteSnapshot, null,
-    'an unmatchable model citation must degrade to a quote-less card instead of failing the generation');
-  assert.equal(mappedSources.get(degradedClaimNode.sourceRefId).pageLabel, '2',
-    'a degraded card must keep its page-range start as the locating page');
+  const fabricatedClaimNode = documentMapResponse.payload.data.nodes.find(node => node.title.startsWith('论点 · '));
+  assert.equal(mappedSources.get(fabricatedClaimNode.sourceRefId).quoteSnapshot, '第二页主要发现和限制。',
+    'a fabricated citation must anchor to a real sentence within its claimed page range');
+  assert.equal(mappedSources.get(fabricatedClaimNode.sourceRefId).pageLabel, '2',
+    'a fabricated citation must stay inside its claimed page range');
   assert.ok(documentMapResponse.payload.data.nodes.some(node => node.title === '全文概览 · 测试论文理解图'));
   assert.ok(documentMapResponse.payload.data.nodes.some(node => node.title.startsWith('章节 · ')));
   assert.ok(documentMapResponse.payload.data.nodes.some(node => node.title.startsWith('概念 · ')));

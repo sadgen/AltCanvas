@@ -130,9 +130,13 @@ function verifiedEvidence(item, evidenceIndex, pageStart, pageEnd, name, context
     const score = similarity + (inRange ? 0.05 : 0) + (candidate.pageNumber === requestedPage ? 0.03 : 0);
     if (!best || score > best.score) best = { ...candidate, score, similarity };
   }
-  // A hallucinated quote must not sink the whole graph: keep the card without
-  // evidence instead of failing the generation the user already waited for.
-  if (!best || best.similarity <= 0) return { evidenceQuote: null, evidencePage: null };
+  // Every card must stay locatable: a fabricated citation (zero lexical
+  // overlap) still anchors to the highest-scoring sentence of its claimed
+  // page range. Only a corpus without usable sentences leaves a card with
+  // no evidence at all.
+  if (!best || (best.similarity <= 0 && best.score <= 0)) {
+    return { evidenceQuote: null, evidencePage: null };
+  }
   return { evidenceQuote: best.text, evidencePage: best.pageNumber };
 }
 
