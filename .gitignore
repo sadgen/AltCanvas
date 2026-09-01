@@ -10,3 +10,7 @@ build/
 config/*.local.json
 config/altero.web-library.json
 /data/
+ai-settings.key
+.mimosa/
+.zcode/
+
