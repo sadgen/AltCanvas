@@ -832,7 +832,7 @@ try {
 
     const migratedStore = new CanvasStore(v2DbPath);
     const maxV = migratedStore.db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v;
-    assert.equal(maxV, 9, 'Database must be upgraded to schema v9');
+    assert.equal(maxV, 10, 'Database must be upgraded to schema v10');
 
     // Verify document_metas table and methods
     const savedMeta = migratedStore.saveDocumentMeta(actor, {
@@ -977,7 +977,7 @@ try {
 
     const migratedV5Store = new CanvasStore(v5DbPath);
     const maxV = migratedV5Store.db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v;
-    assert.equal(maxV, 9, 'Database must be upgraded from v5 to v9');
+    assert.equal(maxV, 10, 'Database must be upgraded from v5 to v10');
 
     const v5Analysis = migratedV5Store.getDocumentAnalysis(actor, {
       libraryType: 'user', libraryId: '42', attachmentKey: 'ATT_V5', attachmentVersion: 1, model: 'gpt-4o', promptVersion: 'v1'
@@ -1060,7 +1060,7 @@ try {
 
     const migratedV7Store = new CanvasStore(v7DbPath);
     const maxV = migratedV7Store.db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v;
-    assert.equal(maxV, 9, 'Database must be upgraded from v7 to v9');
+    assert.equal(maxV, 10, 'Database must be upgraded from v7 to v10');
 
     // Assert existing knowledge relations were 100% preserved
     const rels = migratedV7Store.listKnowledgeRelations(actor);
@@ -1083,9 +1083,9 @@ try {
     fs.rmSync(v7Dir, { recursive: true, force: true });
   }
 
-  // --- Schema v9: Topics, Topic Documents, Collection Bindings, Inbox, Jobs, Document Analyses, Document Metas, Knowledge Units & Relations ---
+  // --- Schema v10: Topics, Topic Documents, Collection Bindings, Inbox, Jobs, Document Analyses, Document Metas, Knowledge Units & Relations, Native Core ---
   const currentMigration = store.db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v;
-  assert.equal(currentMigration, 9, 'Schema migration version 9 must be applied');
+  assert.equal(currentMigration, 10, 'Schema migration version 10 must be applied');
 
   // Topic workspace with metadata
   const topic1 = store.createWorkspace(actor, {

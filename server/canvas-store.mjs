@@ -16,7 +16,7 @@ const TOPIC_ANALYSIS_STATUSES = new Set([
   'not_started', 'queued', 'running', 'ready', 'failed', 'stale'
 ]);
 const TOPIC_DOC_ORIGINS = new Set([
-  'collection_sync', 'canvas_import', 'manual', 'ai_suggestion'
+  'collection_sync', 'canvas_import', 'manual', 'ai_suggestion', 'native_upload'
 ]);
 const COLLECTION_BINDING_MODES = new Set([
   'inbound', 'confirm_both'
@@ -361,6 +361,154 @@ function knowledgeRelationRow(row) {
   };
 }
 
+export function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
+  const hash = crypto.scryptSync(password, salt, 64, { N: 16384, r: 8, p: 1 }).toString('hex');
+  return { hash, salt };
+}
+
+export function verifyPassword(password, hash, salt) {
+  if (!password || !hash || !salt) return false;
+  try {
+    const computedHash = crypto.scryptSync(password, salt, 64, { N: 16384, r: 8, p: 1 }).toString('hex');
+    const bufA = Buffer.from(computedHash, 'hex');
+    const bufB = Buffer.from(hash, 'hex');
+    if (bufA.length !== bufB.length) return false;
+    return crypto.timingSafeEqual(bufA, bufB);
+  } catch {
+    return false;
+  }
+}
+
+function userRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    username: row.username,
+    role: row.role,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function blobRow(row) {
+  if (!row) return null;
+  return {
+    sha256: row.sha256,
+    relativePath: row.relative_path,
+    sizeBytes: row.size_bytes,
+    mimeType: row.mime_type,
+    referenceCount: row.reference_count,
+    createdAt: row.created_at
+  };
+}
+
+function creatorRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    documentId: row.document_id,
+    position: row.position,
+    creatorType: row.creator_type,
+    firstName: row.first_name,
+    lastName: row.last_name,
+    name: row.name
+  };
+}
+
+function attachmentRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    documentId: row.document_id,
+    blobHash: row.blob_hash,
+    mimeType: row.mime_type,
+    originalFilename: row.original_filename,
+    title: row.title,
+    sourceUrl: row.source_url,
+    sizeBytes: row.size_bytes,
+    pageCount: row.page_count,
+    version: row.version,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function annotationRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    attachmentId: row.attachment_id,
+    annotationType: row.annotation_type,
+    pageLabel: row.page_label,
+    position: parseJson(row.position_json),
+    quote: row.quote,
+    comment: row.comment,
+    color: row.color,
+    sortIndex: row.sort_index,
+    version: row.version,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function documentRow(row, creators = [], attachments = []) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    ownerKey: row.owner_key,
+    itemType: row.item_type,
+    title: row.title,
+    abstract: row.abstract,
+    publicationTitle: row.publication_title,
+    publisher: row.publisher,
+    date: row.date,
+    year: row.year,
+    doi: row.doi,
+    isbn: row.isbn,
+    url: row.url,
+    language: row.language,
+    rights: row.rights,
+    extra: parseJson(row.extra_json) || {},
+    version: row.version,
+    creators,
+    attachments,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function externalRefRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    ownerKey: row.owner_key,
+    documentId: row.document_id,
+    provider: row.provider,
+    externalLibraryId: row.external_library_id,
+    externalItemId: row.external_item_id,
+    externalAttachmentId: row.external_attachment_id,
+    externalVersion: row.external_version,
+    sourceUrl: row.source_url,
+    importedAt: row.imported_at
+  };
+}
+
+function importJobRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    ownerKey: row.owner_key,
+    sourceType: row.source_type,
+    state: row.state,
+    totalCount: row.total_count,
+    completedCount: row.completed_count,
+    failedCount: row.failed_count,
+    report: parseJson(row.report_json) || {},
+    createdAt: row.created_at,
+    completedAt: row.completed_at
+  };
+}
+
 export class CanvasStore {
   constructor(dbPath = process.env.CANVAS_DB_PATH
     || path.join(process.env.DATA_DIR || './data', 'altcanvas-canvas.sqlite')) {
@@ -372,10 +520,10 @@ export class CanvasStore {
     fs.chmodSync(this.dbPath, 0o600);
     this.aiSettingsKey = loadOrCreateAiSettingsKey(this.dbPath);
     this.db = new DatabaseSync(this.dbPath);
-    this.db.exec('PRAGMA foreign_keys = ON');
     this.db.exec('PRAGMA journal_mode = WAL');
     this.db.exec('PRAGMA busy_timeout = 5000');
     this.migrate();
+    this.db.exec('PRAGMA foreign_keys = ON');
     for (const filePath of [this.dbPath, `${this.dbPath}-wal`, `${this.dbPath}-shm`]) {
       if (fs.existsSync(filePath)) fs.chmodSync(filePath, 0o600);
     }
@@ -420,7 +568,7 @@ export class CanvasStore {
           CREATE TABLE source_refs (
             id TEXT PRIMARY KEY,
             owner_key TEXT NOT NULL,
-            library_type TEXT NOT NULL CHECK (library_type IN ('user', 'group')),
+            library_type TEXT NOT NULL CHECK (library_type IN ('user', 'group', 'native')),
             library_id TEXT NOT NULL,
             item_key TEXT,
             attachment_key TEXT,
@@ -520,13 +668,13 @@ export class CanvasStore {
             id TEXT PRIMARY KEY,
             workspace_id TEXT NOT NULL REFERENCES workspaces(id),
             owner_key TEXT NOT NULL,
-            library_type TEXT NOT NULL CHECK (library_type IN ('user', 'group')),
+            library_type TEXT NOT NULL CHECK (library_type IN ('user', 'group', 'native')),
             library_id TEXT NOT NULL,
             item_key TEXT NOT NULL,
             attachment_key TEXT,
             status TEXT NOT NULL DEFAULT 'inbox' CHECK (status IN ('inbox', 'accepted', 'deferred', 'ignored', 'removed')),
             analysis_status TEXT NOT NULL DEFAULT 'not_started' CHECK (analysis_status IN ('not_started', 'queued', 'running', 'ready', 'failed', 'stale')),
-            origin TEXT NOT NULL DEFAULT 'manual' CHECK (origin IN ('collection_sync', 'canvas_import', 'manual', 'ai_suggestion')),
+            origin TEXT NOT NULL DEFAULT 'manual' CHECK (origin IN ('collection_sync', 'canvas_import', 'manual', 'ai_suggestion', 'native_upload')),
             classification_confidence REAL,
             classification_reason TEXT,
             item_version INTEGER,
@@ -543,7 +691,7 @@ export class CanvasStore {
             id TEXT PRIMARY KEY,
             workspace_id TEXT NOT NULL REFERENCES workspaces(id),
             owner_key TEXT NOT NULL,
-            library_type TEXT NOT NULL CHECK (library_type IN ('user', 'group')),
+            library_type TEXT NOT NULL CHECK (library_type IN ('user', 'group', 'native')),
             library_id TEXT NOT NULL,
             collection_key TEXT NOT NULL,
             mode TEXT NOT NULL DEFAULT 'inbound' CHECK (mode IN ('inbound', 'confirm_both')),
@@ -561,7 +709,7 @@ export class CanvasStore {
           CREATE TABLE IF NOT EXISTS inbox_entries (
             id TEXT PRIMARY KEY,
             owner_key TEXT NOT NULL,
-            library_type TEXT NOT NULL CHECK (library_type IN ('user', 'group')),
+            library_type TEXT NOT NULL CHECK (library_type IN ('user', 'group', 'native')),
             library_id TEXT NOT NULL,
             item_key TEXT NOT NULL,
             attachment_key TEXT,
@@ -623,7 +771,7 @@ export class CanvasStore {
           CREATE TABLE IF NOT EXISTS document_analyses (
             id TEXT PRIMARY KEY,
             owner_key TEXT NOT NULL,
-            library_type TEXT NOT NULL CHECK (library_type IN ('user', 'group')),
+            library_type TEXT NOT NULL CHECK (library_type IN ('user', 'group', 'native')),
             library_id TEXT NOT NULL,
             item_key TEXT NOT NULL,
             attachment_key TEXT NOT NULL,
@@ -651,7 +799,7 @@ export class CanvasStore {
           CREATE TABLE IF NOT EXISTS document_metas (
             id TEXT PRIMARY KEY,
             owner_key TEXT NOT NULL,
-            library_type TEXT NOT NULL CHECK (library_type IN ('user', 'group')),
+            library_type TEXT NOT NULL CHECK (library_type IN ('user', 'group', 'native')),
             library_id TEXT NOT NULL,
             item_key TEXT NOT NULL,
             attachment_key TEXT,
@@ -706,7 +854,7 @@ export class CanvasStore {
             owner_key TEXT NOT NULL,
             analysis_id TEXT NOT NULL REFERENCES document_analyses(id),
             type TEXT NOT NULL CHECK (type IN ('overview', 'section', 'concept', 'claim')),
-            library_type TEXT NOT NULL CHECK (library_type IN ('user', 'group')),
+            library_type TEXT NOT NULL CHECK (library_type IN ('user', 'group', 'native')),
             library_id TEXT NOT NULL,
             item_key TEXT NOT NULL,
             attachment_key TEXT,
@@ -828,7 +976,132 @@ export class CanvasStore {
         this.db.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(9, nowIso());
       });
     }
-    if (current > 9) throw new Error(`Canvas database schema ${current} is newer than this server supports`);
+    if (current < 10) {
+      this.transaction(() => {
+        this.db.exec(`
+          CREATE TABLE IF NOT EXISTS users (
+            id TEXT PRIMARY KEY,
+            username TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            password_salt TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'admin' CHECK (role IN ('admin', 'user')),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          ) STRICT;
+          CREATE INDEX IF NOT EXISTS users_username_idx ON users(username);
+
+          CREATE TABLE IF NOT EXISTS blobs (
+            sha256 TEXT PRIMARY KEY,
+            relative_path TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            mime_type TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            reference_count INTEGER NOT NULL DEFAULT 1
+          ) STRICT;
+
+          CREATE TABLE IF NOT EXISTS documents (
+            id TEXT PRIMARY KEY,
+            owner_key TEXT NOT NULL,
+            item_type TEXT NOT NULL DEFAULT 'journalArticle',
+            title TEXT NOT NULL,
+            abstract TEXT NOT NULL DEFAULT '',
+            publication_title TEXT NOT NULL DEFAULT '',
+            publisher TEXT NOT NULL DEFAULT '',
+            date TEXT NOT NULL DEFAULT '',
+            year INTEGER,
+            doi TEXT,
+            isbn TEXT,
+            url TEXT,
+            language TEXT NOT NULL DEFAULT '',
+            rights TEXT NOT NULL DEFAULT '',
+            extra_json TEXT NOT NULL DEFAULT '{}',
+            version INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            deleted_at TEXT
+          ) STRICT;
+          CREATE INDEX IF NOT EXISTS documents_owner_idx ON documents(owner_key, deleted_at, updated_at);
+          CREATE INDEX IF NOT EXISTS documents_doi_idx ON documents(owner_key, doi) WHERE deleted_at IS NULL;
+          CREATE INDEX IF NOT EXISTS documents_year_idx ON documents(owner_key, year) WHERE deleted_at IS NULL;
+
+          CREATE TABLE IF NOT EXISTS document_creators (
+            id TEXT PRIMARY KEY,
+            document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+            position INTEGER NOT NULL,
+            creator_type TEXT NOT NULL DEFAULT 'author',
+            first_name TEXT NOT NULL DEFAULT '',
+            last_name TEXT NOT NULL DEFAULT '',
+            name TEXT NOT NULL DEFAULT ''
+          ) STRICT;
+          CREATE INDEX IF NOT EXISTS doc_creators_doc_idx ON document_creators(document_id, position);
+
+          CREATE TABLE IF NOT EXISTS attachments (
+            id TEXT PRIMARY KEY,
+            document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+            blob_hash TEXT NOT NULL REFERENCES blobs(sha256),
+            mime_type TEXT NOT NULL DEFAULT 'application/pdf',
+            original_filename TEXT NOT NULL DEFAULT '',
+            title TEXT NOT NULL DEFAULT '',
+            source_url TEXT,
+            size_bytes INTEGER NOT NULL DEFAULT 0,
+            page_count INTEGER,
+            version INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            deleted_at TEXT
+          ) STRICT;
+          CREATE INDEX IF NOT EXISTS attachments_doc_idx ON attachments(document_id, deleted_at);
+          CREATE INDEX IF NOT EXISTS attachments_blob_idx ON attachments(blob_hash);
+
+          CREATE TABLE IF NOT EXISTS annotations (
+            id TEXT PRIMARY KEY,
+            attachment_id TEXT NOT NULL REFERENCES attachments(id) ON DELETE CASCADE,
+            annotation_type TEXT NOT NULL DEFAULT 'highlight',
+            page_label TEXT NOT NULL DEFAULT '',
+            position_json TEXT NOT NULL DEFAULT '{}',
+            quote TEXT NOT NULL DEFAULT '',
+            comment TEXT NOT NULL DEFAULT '',
+            color TEXT NOT NULL DEFAULT '#ffd400',
+            sort_index INTEGER NOT NULL DEFAULT 0,
+            version INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            deleted_at TEXT
+          ) STRICT;
+          CREATE INDEX IF NOT EXISTS annotations_attachment_idx ON annotations(attachment_id, deleted_at, sort_index);
+
+          CREATE TABLE IF NOT EXISTS external_refs (
+            id TEXT PRIMARY KEY,
+            owner_key TEXT NOT NULL,
+            document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+            provider TEXT NOT NULL,
+            external_library_id TEXT,
+            external_item_id TEXT,
+            external_attachment_id TEXT,
+            external_version INTEGER,
+            source_url TEXT,
+            imported_at TEXT NOT NULL
+          ) STRICT;
+          CREATE INDEX IF NOT EXISTS external_refs_owner_idx ON external_refs(owner_key, provider, external_item_id);
+
+          CREATE TABLE IF NOT EXISTS import_jobs (
+            id TEXT PRIMARY KEY,
+            owner_key TEXT NOT NULL,
+            source_type TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'running', 'completed', 'completed_with_errors', 'failed', 'cancelled')),
+            total_count INTEGER NOT NULL DEFAULT 0,
+            completed_count INTEGER NOT NULL DEFAULT 0,
+            failed_count INTEGER NOT NULL DEFAULT 0,
+            report_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            completed_at TEXT
+          ) STRICT;
+          CREATE INDEX IF NOT EXISTS import_jobs_owner_idx ON import_jobs(owner_key, state, created_at);
+        `);
+        this.db.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(10, nowIso());
+      });
+    }
+    if (current > 10) throw new Error(`Canvas database schema ${current} is newer than this server supports`);
   }
 
   transaction(callback) {
@@ -2440,6 +2713,587 @@ export class CanvasStore {
       `).run(cleanTitle, institution, timestamp, actorKey, libraryType, libraryId, itemKey);
     });
     return documentMetaRow(this.db.prepare('SELECT * FROM document_metas WHERE id = ?').get(metaId));
+  }
+
+  // ==========================================
+  // --- Native Library Core Methods (M1) ---
+  // ==========================================
+
+  // --- Users & Native Local Authentication ---
+
+  hasUsers() {
+    const row = this.db.prepare('SELECT COUNT(*) as c FROM users').get();
+    return (row?.c || 0) > 0;
+  }
+
+  countUsers() {
+    const row = this.db.prepare('SELECT COUNT(*) as c FROM users').get();
+    return row?.c || 0;
+  }
+
+  createUser({ username, password, role = 'admin' }) {
+    if (!username || typeof username !== 'string' || username.trim().length < 3) {
+      throw new TypeError('Username must be at least 3 characters');
+    }
+    if (!password || typeof password !== 'string' || password.length < 8) {
+      throw new TypeError('Password must be at least 8 characters');
+    }
+    const cleanUsername = username.trim().toLowerCase();
+    const existing = this.db.prepare('SELECT id FROM users WHERE username = ?').get(cleanUsername);
+    if (existing) {
+      throw new CanvasConflictError('Username already exists');
+    }
+    const userId = id();
+    const { hash, salt } = hashPassword(password);
+    const timestamp = nowIso();
+    this.db.prepare(`
+      INSERT INTO users (id, username, password_hash, password_salt, role, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(userId, cleanUsername, hash, salt, role, timestamp, timestamp);
+    return userRow(this.db.prepare('SELECT * FROM users WHERE id = ?').get(userId));
+  }
+
+  getUserById(userId) {
+    return userRow(this.db.prepare('SELECT * FROM users WHERE id = ?').get(userId));
+  }
+
+  getUserByUsername(username) {
+    if (!username || typeof username !== 'string') return null;
+    return userRow(this.db.prepare('SELECT * FROM users WHERE username = ?').get(username.trim().toLowerCase()));
+  }
+
+  verifyUserPassword(username, password) {
+    if (!username || !password) return null;
+    const user = this.db.prepare('SELECT * FROM users WHERE username = ?').get(username.trim().toLowerCase());
+    if (!user) return null;
+    const ok = verifyPassword(password, user.password_hash, user.password_salt);
+    if (!ok) return null;
+    return userRow(user);
+  }
+
+  // --- Blobs Storage ---
+
+  getBlobStorageDir() {
+    const dataDir = path.dirname(this.dbPath);
+    const blobDir = path.join(dataDir, 'blobs');
+    fs.mkdirSync(blobDir, { recursive: true, mode: 0o700 });
+    return blobDir;
+  }
+
+  resolveBlobPath(blobHash, ext = '.pdf') {
+    const blobDir = this.getBlobStorageDir();
+    return path.join(blobDir, 'sha256', blobHash.slice(0, 2), blobHash.slice(2, 4), `${blobHash}${ext}`);
+  }
+
+  getBlob(sha256) {
+    if (!sha256) return null;
+    return blobRow(this.db.prepare('SELECT * FROM blobs WHERE sha256 = ?').get(sha256));
+  }
+
+  upsertBlob({ sha256, relativePath, sizeBytes, mimeType = 'application/pdf' }) {
+    const timestamp = nowIso();
+    this.db.prepare(`
+      INSERT INTO blobs (sha256, relative_path, size_bytes, mime_type, created_at, reference_count)
+      VALUES (?, ?, ?, ?, ?, 1)
+      ON CONFLICT(sha256) DO UPDATE SET
+        reference_count = reference_count + 1
+    `).run(sha256, relativePath, sizeBytes, mimeType, timestamp);
+    return this.getBlob(sha256);
+  }
+
+  incrementBlobRef(sha256) {
+    this.db.prepare('UPDATE blobs SET reference_count = reference_count + 1 WHERE sha256 = ?').run(sha256);
+  }
+
+  decrementBlobRef(sha256) {
+    this.db.prepare('UPDATE blobs SET reference_count = MAX(0, reference_count - 1) WHERE sha256 = ?').run(sha256);
+  }
+
+  // --- Documents & Creators ---
+
+  createDocument(actorKey, {
+    itemType = 'journalArticle',
+    title = '未命名文献',
+    abstract = '',
+    publicationTitle = '',
+    publisher = '',
+    date = '',
+    year = null,
+    doi = null,
+    isbn = null,
+    url = null,
+    language = '',
+    rights = '',
+    extra = {},
+    creators = []
+  }) {
+    const docId = id();
+    const timestamp = nowIso();
+    this.transaction(() => {
+      this.db.prepare(`
+        INSERT INTO documents
+          (id, owner_key, item_type, title, abstract, publication_title, publisher,
+           date, year, doi, isbn, url, language, rights, extra_json, version, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+      `).run(
+        docId, actorKey, itemType, title, abstract, publicationTitle, publisher,
+        date, year ? Number(year) : null, doi || null, isbn || null, url || null,
+        language, rights, JSON.stringify(extra || {}), timestamp, timestamp
+      );
+
+      if (Array.isArray(creators)) {
+        creators.forEach((c, idx) => {
+          this.db.prepare(`
+            INSERT INTO document_creators
+              (id, document_id, position, creator_type, first_name, last_name, name)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+          `).run(id(), docId, idx, c.creatorType || 'author', c.firstName || '', c.lastName || '', c.name || '');
+        });
+      }
+    });
+    return this.getDocument(actorKey, docId);
+  }
+
+  getDocument(actorKey, documentId) {
+    const docRow = this.db.prepare(`
+      SELECT * FROM documents WHERE id = ? AND owner_key = ? AND deleted_at IS NULL
+    `).get(documentId, actorKey);
+    if (!docRow) return null;
+    const creators = this.db.prepare(`
+      SELECT * FROM document_creators WHERE document_id = ? ORDER BY position ASC
+    `).all(documentId).map(creatorRow);
+    const attachments = this.db.prepare(`
+      SELECT * FROM attachments WHERE document_id = ? AND deleted_at IS NULL ORDER BY created_at ASC
+    `).all(documentId).map(attachmentRow);
+    return documentRow(docRow, creators, attachments);
+  }
+
+  requireDocument(actorKey, documentId) {
+    const doc = this.getDocument(actorKey, documentId);
+    if (!doc) throw new CanvasNotFoundError('Document not found');
+    return doc;
+  }
+
+  listDocuments(actorKey, { search = '', year = null, limit = 50, offset = 0, includeDeleted = false } = {}) {
+    let query = 'SELECT * FROM documents WHERE owner_key = ?';
+    const params = [actorKey];
+    if (!includeDeleted) {
+      query += ' AND deleted_at IS NULL';
+    }
+    if (year) {
+      query += ' AND year = ?';
+      params.push(Number(year));
+    }
+    if (search && search.trim()) {
+      query += ' AND (title LIKE ? OR abstract LIKE ? OR publication_title LIKE ?)';
+      const s = `%${search.trim()}%`;
+      params.push(s, s, s);
+    }
+    query += ' ORDER BY updated_at DESC LIMIT ? OFFSET ?';
+    params.push(Math.min(200, Math.max(1, limit)), Math.max(0, offset));
+    const docRows = this.db.prepare(query).all(...params);
+    return docRows.map(r => {
+      const creators = this.db.prepare('SELECT * FROM document_creators WHERE document_id = ? ORDER BY position ASC').all(r.id).map(creatorRow);
+      const attachments = this.db.prepare('SELECT * FROM attachments WHERE document_id = ? AND deleted_at IS NULL ORDER BY created_at ASC').all(r.id).map(attachmentRow);
+      return documentRow(r, creators, attachments);
+    });
+  }
+
+  updateDocument(actorKey, documentId, expectedVersion, updates = {}) {
+    const current = this.requireDocument(actorKey, documentId);
+    if (expectedVersion !== undefined && expectedVersion !== null && current.version !== expectedVersion) {
+      throw new CanvasConflictError('Document version conflict');
+    }
+    const timestamp = nowIso();
+    this.transaction(() => {
+      this.db.prepare(`
+        UPDATE documents SET
+          item_type = COALESCE(?, item_type),
+          title = COALESCE(?, title),
+          abstract = COALESCE(?, abstract),
+          publication_title = COALESCE(?, publication_title),
+          publisher = COALESCE(?, publisher),
+          date = COALESCE(?, date),
+          year = CASE WHEN ? IS NOT NULL THEN ? ELSE year END,
+          doi = CASE WHEN ? IS NOT NULL THEN ? ELSE doi END,
+          isbn = CASE WHEN ? IS NOT NULL THEN ? ELSE isbn END,
+          url = CASE WHEN ? IS NOT NULL THEN ? ELSE url END,
+          language = COALESCE(?, language),
+          rights = COALESCE(?, rights),
+          extra_json = CASE WHEN ? IS NOT NULL THEN ? ELSE extra_json END,
+          version = version + 1,
+          updated_at = ?
+        WHERE id = ? AND owner_key = ? AND deleted_at IS NULL
+      `).run(
+        updates.itemType ?? null,
+        updates.title ?? null,
+        updates.abstract ?? null,
+        updates.publicationTitle ?? null,
+        updates.publisher ?? null,
+        updates.date ?? null,
+        updates.year !== undefined ? 1 : null,
+        updates.year !== undefined ? Number(updates.year) : null,
+        updates.doi !== undefined ? 1 : null,
+        updates.doi !== undefined ? updates.doi : null,
+        updates.isbn !== undefined ? 1 : null,
+        updates.isbn !== undefined ? updates.isbn : null,
+        updates.url !== undefined ? 1 : null,
+        updates.url !== undefined ? updates.url : null,
+        updates.language ?? null,
+        updates.rights ?? null,
+        updates.extra !== undefined ? 1 : null,
+        updates.extra !== undefined ? JSON.stringify(updates.extra) : null,
+        timestamp,
+        documentId,
+        actorKey
+      );
+
+      if (Array.isArray(updates.creators)) {
+        this.db.prepare('DELETE FROM document_creators WHERE document_id = ?').run(documentId);
+        updates.creators.forEach((c, idx) => {
+          this.db.prepare(`
+            INSERT INTO document_creators
+              (id, document_id, position, creator_type, first_name, last_name, name)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+          `).run(id(), docId, idx, c.creatorType || 'author', c.firstName || '', c.lastName || '', c.name || '');
+        });
+      }
+    });
+    return this.getDocument(actorKey, documentId);
+  }
+
+  deleteDocument(actorKey, documentId, expectedVersion) {
+    const current = this.requireDocument(actorKey, documentId);
+    if (expectedVersion !== undefined && expectedVersion !== null && current.version !== expectedVersion) {
+      throw new CanvasConflictError('Document version conflict');
+    }
+    const timestamp = nowIso();
+    this.transaction(() => {
+      this.db.prepare(`
+        UPDATE documents SET deleted_at = ?, version = version + 1, updated_at = ?
+        WHERE id = ? AND owner_key = ? AND deleted_at IS NULL
+      `).run(timestamp, timestamp, documentId, actorKey);
+      this.db.prepare(`
+        UPDATE attachments SET deleted_at = ?, version = version + 1, updated_at = ?
+        WHERE document_id = ? AND deleted_at IS NULL
+      `).run(timestamp, timestamp, documentId);
+    });
+  }
+
+  findDocumentByDoi(actorKey, doi) {
+    if (!doi) return null;
+    const row = this.db.prepare(`
+      SELECT id FROM documents WHERE owner_key = ? AND LOWER(doi) = LOWER(?) AND deleted_at IS NULL LIMIT 1
+    `).get(actorKey, doi.trim());
+    return row ? this.getDocument(actorKey, row.id) : null;
+  }
+
+  findDocumentByBlobHash(actorKey, blobHash) {
+    if (!blobHash) return null;
+    const row = this.db.prepare(`
+      SELECT d.id FROM documents d
+      JOIN attachments a ON a.document_id = d.id
+      WHERE d.owner_key = ? AND a.blob_hash = ? AND d.deleted_at IS NULL AND a.deleted_at IS NULL
+      LIMIT 1
+    `).get(actorKey, blobHash);
+    return row ? this.getDocument(actorKey, row.id) : null;
+  }
+
+  // --- Attachments ---
+
+  createAttachment(actorKey, documentId, {
+    blobHash,
+    mimeType = 'application/pdf',
+    originalFilename = '',
+    title = '',
+    sourceUrl = null,
+    sizeBytes = 0,
+    pageCount = null
+  }) {
+    this.requireDocument(actorKey, documentId);
+    const attachmentId = id();
+    const timestamp = nowIso();
+    this.db.prepare(`
+      INSERT INTO attachments
+        (id, document_id, blob_hash, mime_type, original_filename, title, source_url, size_bytes, page_count, version, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+    `).run(
+      attachmentId, documentId, blobHash, mimeType, originalFilename, title, sourceUrl, sizeBytes, pageCount, timestamp, timestamp
+    );
+    return this.getAttachment(actorKey, attachmentId);
+  }
+
+  getAttachment(actorKey, attachmentId) {
+    const row = this.db.prepare(`
+      SELECT a.* FROM attachments a
+      JOIN documents d ON d.id = a.document_id
+      WHERE a.id = ? AND d.owner_key = ? AND a.deleted_at IS NULL AND d.deleted_at IS NULL
+    `).get(attachmentId, actorKey);
+    return attachmentRow(row);
+  }
+
+  getAttachmentWithBlob(actorKey, attachmentId) {
+    const row = this.db.prepare(`
+      SELECT a.*, b.relative_path, b.size_bytes AS blob_size_bytes, b.mime_type AS blob_mime_type, d.id as doc_id, d.title as doc_title
+      FROM attachments a
+      JOIN documents d ON d.id = a.document_id
+      JOIN blobs b ON b.sha256 = a.blob_hash
+      WHERE a.id = ? AND d.owner_key = ? AND a.deleted_at IS NULL AND d.deleted_at IS NULL
+    `).get(attachmentId, actorKey);
+    if (!row) return null;
+    return {
+      attachment: attachmentRow(row),
+      blob: {
+        sha256: row.blob_hash,
+        relativePath: row.relative_path,
+        sizeBytes: row.blob_size_bytes,
+        mimeType: row.blob_mime_type
+      },
+      document: {
+        id: row.doc_id,
+        title: row.doc_title
+      }
+    };
+  }
+
+  requireAttachment(actorKey, attachmentId) {
+    const att = this.getAttachment(actorKey, attachmentId);
+    if (!att) throw new CanvasNotFoundError('Attachment not found');
+    return att;
+  }
+
+  listAttachments(actorKey, documentId) {
+    this.requireDocument(actorKey, documentId);
+    return this.db.prepare(`
+      SELECT * FROM attachments WHERE document_id = ? AND deleted_at IS NULL ORDER BY created_at ASC
+    `).all(documentId).map(attachmentRow);
+  }
+
+  updateAttachment(actorKey, attachmentId, expectedVersion, updates = {}) {
+    const current = this.requireAttachment(actorKey, attachmentId);
+    if (expectedVersion !== undefined && expectedVersion !== null && current.version !== expectedVersion) {
+      throw new CanvasConflictError('Attachment version conflict');
+    }
+    const timestamp = nowIso();
+    this.db.prepare(`
+      UPDATE attachments SET
+        title = COALESCE(?, title),
+        page_count = COALESCE(?, page_count),
+        version = version + 1,
+        updated_at = ?
+      WHERE id = ? AND deleted_at IS NULL
+    `).run(updates.title ?? null, updates.pageCount ?? null, timestamp, attachmentId);
+    return this.getAttachment(actorKey, attachmentId);
+  }
+
+  deleteAttachment(actorKey, attachmentId, expectedVersion) {
+    const current = this.requireAttachment(actorKey, attachmentId);
+    if (expectedVersion !== undefined && expectedVersion !== null && current.version !== expectedVersion) {
+      throw new CanvasConflictError('Attachment version conflict');
+    }
+    const timestamp = nowIso();
+    this.db.prepare(`
+      UPDATE attachments SET deleted_at = ?, version = version + 1, updated_at = ?
+      WHERE id = ? AND deleted_at IS NULL
+    `).run(timestamp, timestamp, attachmentId);
+  }
+
+  // --- Annotations ---
+
+  createAnnotation(actorKey, attachmentId, {
+    annotationType = 'highlight',
+    pageLabel = '',
+    position = {},
+    quote = '',
+    comment = '',
+    color = '#ffd400',
+    sortIndex = 0
+  }) {
+    this.requireAttachment(actorKey, attachmentId);
+    const annotationId = id();
+    const timestamp = nowIso();
+    this.db.prepare(`
+      INSERT INTO annotations
+        (id, attachment_id, annotation_type, page_label, position_json, quote, comment, color, sort_index, version, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+    `).run(
+      annotationId, attachmentId, annotationType, pageLabel,
+      JSON.stringify(position || {}), quote, comment, color, sortIndex,
+      timestamp, timestamp
+    );
+    return this.getAnnotation(actorKey, annotationId);
+  }
+
+  getAnnotation(actorKey, annotationId) {
+    const row = this.db.prepare(`
+      SELECT an.* FROM annotations an
+      JOIN attachments a ON a.id = an.attachment_id
+      JOIN documents d ON d.id = a.document_id
+      WHERE an.id = ? AND d.owner_key = ? AND an.deleted_at IS NULL AND a.deleted_at IS NULL AND d.deleted_at IS NULL
+    `).get(annotationId, actorKey);
+    return annotationRow(row);
+  }
+
+  requireAnnotation(actorKey, annotationId) {
+    const ann = this.getAnnotation(actorKey, annotationId);
+    if (!ann) throw new CanvasNotFoundError('Annotation not found');
+    return ann;
+  }
+
+  listAnnotations(actorKey, attachmentId, { includeDeleted = false } = {}) {
+    this.requireAttachment(actorKey, attachmentId);
+    let query = `
+      SELECT an.* FROM annotations an
+      JOIN attachments a ON a.id = an.attachment_id
+      JOIN documents d ON d.id = a.document_id
+      WHERE an.attachment_id = ? AND d.owner_key = ?
+    `;
+    if (!includeDeleted) {
+      query += ' AND an.deleted_at IS NULL';
+    }
+    query += ' ORDER BY an.sort_index ASC, an.created_at ASC';
+    return this.db.prepare(query).all(attachmentId, actorKey).map(annotationRow);
+  }
+
+  updateAnnotation(actorKey, annotationId, expectedVersion, updates = {}) {
+    const current = this.requireAnnotation(actorKey, annotationId);
+    if (expectedVersion !== undefined && expectedVersion !== null && current.version !== expectedVersion) {
+      throw new CanvasConflictError('Annotation version conflict');
+    }
+    const timestamp = nowIso();
+    this.db.prepare(`
+      UPDATE annotations SET
+        annotation_type = COALESCE(?, annotation_type),
+        page_label = COALESCE(?, page_label),
+        position_json = CASE WHEN ? IS NOT NULL THEN ? ELSE position_json END,
+        quote = COALESCE(?, quote),
+        comment = COALESCE(?, comment),
+        color = COALESCE(?, color),
+        sort_index = COALESCE(?, sort_index),
+        version = version + 1,
+        updated_at = ?
+      WHERE id = ? AND deleted_at IS NULL
+    `).run(
+      updates.annotationType ?? null,
+      updates.pageLabel ?? null,
+      updates.position !== undefined ? 1 : null,
+      updates.position !== undefined ? JSON.stringify(updates.position) : null,
+      updates.quote ?? null,
+      updates.comment ?? null,
+      updates.color ?? null,
+      updates.sortIndex ?? null,
+      timestamp,
+      annotationId
+    );
+    return this.getAnnotation(actorKey, annotationId);
+  }
+
+  deleteAnnotation(actorKey, annotationId, expectedVersion) {
+    const current = this.requireAnnotation(actorKey, annotationId);
+    if (expectedVersion !== undefined && expectedVersion !== null && current.version !== expectedVersion) {
+      throw new CanvasConflictError('Annotation version conflict');
+    }
+    const timestamp = nowIso();
+    this.db.prepare(`
+      UPDATE annotations SET deleted_at = ?, version = version + 1, updated_at = ?
+      WHERE id = ? AND deleted_at IS NULL
+    `).run(timestamp, timestamp, annotationId);
+  }
+
+  restoreAnnotation(actorKey, annotationId, expectedVersion) {
+    const row = this.db.prepare(`
+      SELECT an.* FROM annotations an
+      JOIN attachments a ON a.id = an.attachment_id
+      JOIN documents d ON d.id = a.document_id
+      WHERE an.id = ? AND d.owner_key = ?
+    `).get(annotationId, actorKey);
+    if (!row) throw new CanvasNotFoundError('Annotation not found');
+    if (expectedVersion !== undefined && expectedVersion !== null && row.version !== expectedVersion) {
+      throw new CanvasConflictError('Annotation version conflict');
+    }
+    const timestamp = nowIso();
+    this.db.prepare(`
+      UPDATE annotations SET deleted_at = NULL, version = version + 1, updated_at = ?
+      WHERE id = ?
+    `).run(timestamp, annotationId);
+    return this.getAnnotation(actorKey, annotationId);
+  }
+
+  // --- External Refs ---
+
+  createExternalRef(actorKey, documentId, {
+    provider,
+    externalLibraryId = null,
+    externalItemId = null,
+    externalAttachmentId = null,
+    externalVersion = null,
+    sourceUrl = null
+  }) {
+    this.requireDocument(actorKey, documentId);
+    const refId = id();
+    const timestamp = nowIso();
+    this.db.prepare(`
+      INSERT INTO external_refs
+        (id, owner_key, document_id, provider, external_library_id, external_item_id, external_attachment_id, external_version, source_url, imported_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(refId, actorKey, documentId, provider, externalLibraryId, externalItemId, externalAttachmentId, externalVersion, sourceUrl, timestamp);
+    return externalRefRow(this.db.prepare('SELECT * FROM external_refs WHERE id = ?').get(refId));
+  }
+
+  getExternalRef(actorKey, provider, externalItemId) {
+    return externalRefRow(this.db.prepare(`
+      SELECT * FROM external_refs WHERE owner_key = ? AND provider = ? AND external_item_id = ?
+    `).get(actorKey, provider, externalItemId));
+  }
+
+  listExternalRefs(actorKey, documentId) {
+    this.requireDocument(actorKey, documentId);
+    return this.db.prepare(`
+      SELECT * FROM external_refs WHERE owner_key = ? AND document_id = ? ORDER BY imported_at DESC
+    `).all(actorKey, documentId).map(externalRefRow);
+  }
+
+  // --- Import Jobs ---
+
+  createImportJob(actorKey, { sourceType, totalCount = 0 }) {
+    const jobId = id();
+    const timestamp = nowIso();
+    this.db.prepare(`
+      INSERT INTO import_jobs
+        (id, owner_key, source_type, state, total_count, completed_count, failed_count, report_json, created_at)
+      VALUES (?, ?, ?, 'pending', ?, 0, 0, '{}', ?)
+    `).run(jobId, actorKey, sourceType, totalCount, timestamp);
+    return importJobRow(this.db.prepare('SELECT * FROM import_jobs WHERE id = ?').get(jobId));
+  }
+
+  getImportJob(actorKey, jobId) {
+    return importJobRow(this.db.prepare(`
+      SELECT * FROM import_jobs WHERE id = ? AND owner_key = ?
+    `).get(jobId, actorKey));
+  }
+
+  updateImportJob(actorKey, jobId, { state, completedCount, failedCount, report, completedAt }) {
+    const timestamp = nowIso();
+    this.db.prepare(`
+      UPDATE import_jobs SET
+        state = COALESCE(?, state),
+        completed_count = COALESCE(?, completed_count),
+        failed_count = COALESCE(?, failed_count),
+        report_json = CASE WHEN ? IS NOT NULL THEN ? ELSE report_json END,
+        completed_at = CASE WHEN ? IS NOT NULL THEN ? ELSE completed_at END
+      WHERE id = ? AND owner_key = ?
+    `).run(
+      state ?? null,
+      completedCount ?? null,
+      failedCount ?? null,
+      report !== undefined ? 1 : null,
+      report !== undefined ? JSON.stringify(report) : null,
+      completedAt ?? (['completed', 'completed_with_errors', 'failed', 'cancelled'].includes(state) ? timestamp : null),
+      completedAt ?? (['completed', 'completed_with_errors', 'failed', 'cancelled'].includes(state) ? timestamp : null),
+      jobId,
+      actorKey
+    );
+    return this.getImportJob(actorKey, jobId);
   }
 }
 
