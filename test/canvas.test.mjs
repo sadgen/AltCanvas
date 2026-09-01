@@ -1515,23 +1515,25 @@ try {
       CREATE TABLE inbox_entries (
         id TEXT PRIMARY KEY, owner_key TEXT NOT NULL,
         library_type TEXT NOT NULL CHECK (library_type IN ('user', 'group')), library_id TEXT NOT NULL, item_key TEXT NOT NULL,
-        attachment_key TEXT, attachment_version INTEGER, detected_from TEXT NOT NULL DEFAULT 'scan',
-        title TEXT NOT NULL, clean_title TEXT, institution TEXT, doi TEXT, year TEXT,
-        creators_json TEXT NOT NULL DEFAULT '[]', abstract_note TEXT NOT NULL DEFAULT '', tags_json TEXT NOT NULL DEFAULT '[]',
-        state TEXT NOT NULL DEFAULT 'unread' CHECK (state IN ('unread', 'processed', 'dismissed')),
-        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        attachment_key TEXT, detected_from TEXT NOT NULL,
+        title TEXT NOT NULL DEFAULT '', creators_json TEXT NOT NULL DEFAULT '[]', year INTEGER,
+        abstract_note TEXT NOT NULL DEFAULT '', collection_keys_json TEXT NOT NULL DEFAULT '[]', tags_json TEXT NOT NULL DEFAULT '[]',
+        item_version INTEGER, state TEXT NOT NULL DEFAULT 'new' CHECK (state IN ('new', 'classifying', 'ready', 'accepted', 'deferred', 'ignored', 'failed')),
+        first_seen_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT,
+        clean_title TEXT, institution TEXT, attachment_version INTEGER, doi TEXT
       ) STRICT;
-      CREATE UNIQUE INDEX inbox_entries_unique_idx ON inbox_entries(owner_key, library_type, library_id, item_key);
-      CREATE INDEX inbox_entries_owner_state_idx ON inbox_entries(owner_key, state, updated_at);
+      CREATE UNIQUE INDEX inbox_entries_unique_active_idx ON inbox_entries(owner_key, library_type, library_id, item_key) WHERE deleted_at IS NULL;
+      CREATE INDEX inbox_entries_owner_state_idx ON inbox_entries(owner_key, state, deleted_at, updated_at);
 
       CREATE TABLE jobs (
         id TEXT PRIMARY KEY, owner_key TEXT NOT NULL, job_type TEXT NOT NULL,
-        state TEXT NOT NULL DEFAULT 'queued' CHECK (state IN ('queued', 'running', 'completed', 'failed')),
-        progress INTEGER NOT NULL DEFAULT 0, total INTEGER NOT NULL DEFAULT 0,
-        payload_json TEXT, result_json TEXT, error_code TEXT, error_message TEXT,
-        created_at TEXT NOT NULL, updated_at TEXT NOT NULL, started_at TEXT, completed_at TEXT
+        resource_type TEXT NOT NULL, resource_id TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'queued' CHECK (state IN ('queued', 'running', 'completed', 'failed', 'cancelled')),
+        attempts INTEGER NOT NULL DEFAULT 0, available_at TEXT NOT NULL, started_at TEXT, finished_at TEXT,
+        error_code TEXT, result_summary_json TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, payload_json TEXT
       ) STRICT;
-      CREATE INDEX jobs_owner_idx ON jobs(owner_key, state, updated_at);
+      CREATE INDEX jobs_runner_idx ON jobs(state, available_at, attempts);
+      CREATE INDEX jobs_owner_idx ON jobs(owner_key, job_type, state);
 
       CREATE TABLE document_analyses (
         id TEXT PRIMARY KEY, owner_key TEXT NOT NULL,
@@ -1596,16 +1598,20 @@ try {
       INSERT INTO collection_bindings (id, workspace_id, owner_key, library_type, library_id, collection_key, mode, created_at, updated_at, deleted_at) VALUES ('cb-v11-old', 'ws-v11', '${actor}', 'user', '42', 'COL_V11', 'inbound', '2026-08-30T00:00:00.000Z', '2026-08-30T00:00:00.000Z', '2026-08-30T00:00:00.000Z');
       INSERT INTO collection_bindings (id, workspace_id, owner_key, library_type, library_id, collection_key, mode, created_at, updated_at, deleted_at) VALUES ('cb-v11-1', 'ws-v11', '${actor}', 'user', '42', 'COL_V11', 'inbound', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z', NULL);
 
-      INSERT INTO inbox_entries (id, owner_key, library_type, library_id, item_key, title, clean_title, doi, created_at, updated_at) VALUES ('inbox-v11-1', '${actor}', 'user', '42', 'ITEM_V11', 'Raw Paper Title', 'Clean Title V11', '10.1000/v11doi', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
-      INSERT INTO jobs (id, owner_key, job_type, payload_json, created_at, updated_at) VALUES ('job-v11', '${actor}', 'import_document', '{"libraryType":"user","libraryId":"42"}', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
+      -- Multiple historical soft-deleted inbox entries + 1 active entry
+      INSERT INTO inbox_entries (id, owner_key, library_type, library_id, item_key, detected_from, title, clean_title, doi, first_seen_at, updated_at, deleted_at) VALUES ('inbox-v11-old-1', '${actor}', 'user', '42', 'ITEM_V11', 'scan', 'Old Raw Title', 'Old Clean Title', '10.1000/v11doi', '2026-08-29T00:00:00.000Z', '2026-08-29T00:00:00.000Z', '2026-08-29T00:00:00.000Z');
+      INSERT INTO inbox_entries (id, owner_key, library_type, library_id, item_key, detected_from, title, clean_title, doi, first_seen_at, updated_at, deleted_at) VALUES ('inbox-v11-old-2', '${actor}', 'user', '42', 'ITEM_V11', 'scan', 'Old Raw Title 2', 'Old Clean Title 2', '10.1000/v11doi', '2026-08-30T00:00:00.000Z', '2026-08-30T00:00:00.000Z', '2026-08-30T00:00:00.000Z');
+      INSERT INTO inbox_entries (id, owner_key, library_type, library_id, item_key, detected_from, title, clean_title, doi, first_seen_at, updated_at, deleted_at) VALUES ('inbox-v11-1', '${actor}', 'user', '42', 'ITEM_V11', 'scan', 'Raw Paper Title', 'Clean Title V11', '10.1000/v11doi', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z', NULL);
+
+      INSERT INTO jobs (id, owner_key, job_type, resource_type, resource_id, payload_json, available_at, created_at, updated_at) VALUES ('job-v11', '${actor}', 'import_document', 'library', '42', '{"libraryType":"user","libraryId":"42"}', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
       INSERT INTO document_analyses (id, owner_key, library_type, library_id, item_key, attachment_key, attachment_version, model, prompt_version, document_title, graph_json, created_at, updated_at) VALUES ('ana-v11-1', '${actor}', 'user', '42', 'ITEM_V11', 'ATT_V11', 1, 'gpt-4o', 'v1', 'Paper Analysis', '{"overview":{"title":"Overview","body":"Text"}}', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
       INSERT INTO document_metas (id, owner_key, library_type, library_id, item_key, clean_title, doi, created_at, updated_at) VALUES ('meta-v11-1', '${actor}', 'user', '42', 'ITEM_V11', 'Clean Title V11', '10.1000/v11doi', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
       INSERT INTO knowledge_units (id, owner_key, analysis_id, type, library_type, library_id, item_key, title, evidence_page, created_at, updated_at) VALUES ('ku-v11-1', '${actor}', 'ana-v11-1', 'overview', 'user', '42', 'ITEM_V11', 'Overview Unit', 3, '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
       INSERT INTO knowledge_units (id, owner_key, analysis_id, type, library_type, library_id, item_key, title, evidence_page, created_at, updated_at) VALUES ('ku-v11-2', '${actor}', 'ana-v11-1', 'claim', 'user', '42', 'ITEM_V11', 'Claim Unit', 4, '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
 
-      -- Insert DUPLICATE relations triples (valid in genuine v11, must be deduplicated deterministically by v12 migration)
-      INSERT INTO knowledge_relations (id, owner_key, source_unit_id, target_unit_id, relation_type, confidence, created_at, updated_at) VALUES ('kr-v11-dup1', '${actor}', 'ku-v11-1', 'ku-v11-2', 'supports', 0.8, '2026-08-30T00:00:00.000Z', '2026-08-30T00:00:00.000Z');
-      INSERT INTO knowledge_relations (id, owner_key, source_unit_id, target_unit_id, relation_type, confidence, created_at, updated_at) VALUES ('kr-v11-dup2', '${actor}', 'ku-v11-1', 'ku-v11-2', 'supports', 0.95, '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
+      -- Insert DUPLICATE relations triples in reverse time order (earlier rowid has LATER updated_at, later rowid has OLDER updated_at)
+      INSERT INTO knowledge_relations (id, owner_key, source_unit_id, target_unit_id, relation_type, confidence, created_at, updated_at) VALUES ('kr-v11-earlier-rowid', '${actor}', 'ku-v11-1', 'ku-v11-2', 'supports', 0.99, '2026-08-31T00:00:00.000Z', '2026-08-31T12:00:00.000Z');
+      INSERT INTO knowledge_relations (id, owner_key, source_unit_id, target_unit_id, relation_type, confidence, created_at, updated_at) VALUES ('kr-v11-later-rowid-stale-time', '${actor}', 'ku-v11-1', 'ku-v11-2', 'supports', 0.40, '2026-08-20T00:00:00.000Z', '2026-08-20T00:00:00.000Z');
     `);
     rawV11.close();
 
@@ -1622,8 +1628,8 @@ try {
     const expectedIndexes = [
       'topic_documents_unique_active_idx', 'topic_documents_owner_idx', 'topic_documents_lookup_idx',
       'collection_bindings_unique_active_idx', 'collection_bindings_owner_idx',
-      'inbox_entries_unique_idx', 'inbox_entries_owner_state_idx',
-      'jobs_owner_idx',
+      'inbox_entries_unique_active_idx', 'inbox_entries_owner_state_idx',
+      'jobs_runner_idx', 'jobs_owner_idx',
       'document_analyses_unique_cache_idx', 'document_analyses_lookup_idx',
       'document_metas_unique_idx', 'document_metas_owner_idx',
       'knowledge_units_owner_item_idx', 'knowledge_units_analysis_idx',
@@ -1647,24 +1653,36 @@ try {
     assert.equal(migratedV11Store.getKnowledgeUnit(actor, 'ku-v11-1').evidencePage, 3);
     assert.equal(migratedV11Store.getJob(actor, 'job-v11').payload.libraryType, 'user');
 
-    // Assert duplicate relations were deduplicated deterministically
+    // Assert duplicate relations were deduplicated deterministically by updated_at (NOT rowid)
     const rels = migratedV11Store.db.prepare('SELECT * FROM knowledge_relations WHERE source_unit_id = ? AND target_unit_id = ?').all('ku-v11-1', 'ku-v11-2');
     assert.equal(rels.length, 1, 'Duplicate knowledge relation triples must be deduplicated to 1 record');
-    assert.equal(rels[0].confidence, 0.95, 'Latest relation record must be retained during deduplication');
+    assert.equal(rels[0].id, 'kr-v11-earlier-rowid', 'Record with latest updated_at must be retained even if rowid is lower');
+    assert.equal(rels[0].confidence, 0.99, 'Latest relation record confidence must be preserved');
 
-    // 4. Assert partial unique constraint behavior: active duplicate rejected, soft-deleted allowed
+    // 4. Assert partial unique constraint behavior for topic_documents, collection_bindings, and inbox_entries
     assert.throws(() => {
       migratedV11Store.db.prepare(`
         INSERT INTO topic_documents (id, workspace_id, owner_key, library_type, library_id, item_key, created_at, updated_at, deleted_at)
         VALUES ('td-dup-active', 'ws-v11', '${actor}', 'user', '42', 'ITEM_V11', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z', NULL)
       `).run();
-    }, /UNIQUE constraint failed/, 'Partial unique index must block duplicate ACTIVE item');
+    }, /UNIQUE constraint failed/, 'Partial unique index must block duplicate ACTIVE topic document');
 
-    // Soft-deleted entry with same key MUST be allowed
+    assert.throws(() => {
+      migratedV11Store.db.prepare(`
+        INSERT INTO inbox_entries (id, owner_key, library_type, library_id, item_key, detected_from, title, first_seen_at, updated_at, deleted_at)
+        VALUES ('inbox-dup-active', '${actor}', 'user', '42', 'ITEM_V11', 'scan', 'Dup Active', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z', NULL)
+      `).run();
+    }, /UNIQUE constraint failed/, 'Partial unique index must block duplicate ACTIVE inbox entry');
+
+    // Soft-deleted entries with same key MUST be allowed
     assert.doesNotThrow(() => {
       migratedV11Store.db.prepare(`
         INSERT INTO topic_documents (id, workspace_id, owner_key, library_type, library_id, item_key, created_at, updated_at, deleted_at)
         VALUES ('td-another-deleted', 'ws-v11', '${actor}', 'user', '42', 'ITEM_V11', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z')
+      `).run();
+      migratedV11Store.db.prepare(`
+        INSERT INTO inbox_entries (id, owner_key, library_type, library_id, item_key, detected_from, title, first_seen_at, updated_at, deleted_at)
+        VALUES ('inbox-another-deleted', '${actor}', 'user', '42', 'ITEM_V11', 'scan', 'Another Deleted', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z')
       `).run();
     }, 'Partial unique index must allow inserting soft-deleted records with same itemKey');
 
