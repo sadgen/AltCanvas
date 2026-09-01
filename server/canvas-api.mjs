@@ -1,6 +1,20 @@
-import { CanvasConflictError, CanvasNotFoundError, CanvasStore, canvasEdgeRelations, canvasNodeTypes, canvasActorKey } from './canvas-store.mjs';
+import {
+  CanvasConflictError,
+  CanvasNotFoundError,
+  CanvasStore,
+  canvasActorKey,
+  canvasCollectionBindingModes,
+  canvasEdgeRelations,
+  canvasInboxEntryStates,
+  canvasJobStates,
+  canvasNodeTypes,
+  canvasTopicAnalysisStatuses,
+  canvasTopicDocOrigins,
+  canvasTopicDocStatuses
+} from './canvas-store.mjs';
 import { getSession, getSessionIdFromRequest } from './session.mjs';
 import { getAiPublicConfig, requestAiCompletion, validateAiEndpoint } from './ai-provider.mjs';
+import { resolveImportInput, findDuplicateCandidates } from './import-resolver.mjs';
 
 const MAX_BODY_BYTES = Number(process.env.MAX_CANVAS_BODY_BYTES || 512 * 1024);
 const MAX_DOCUMENT_BODY_BYTES = Number(process.env.MAX_AI_DOCUMENT_BODY_BYTES || 768 * 1024);
@@ -72,6 +86,43 @@ function parseAiJson(text) {
   catch { throw new Error('AI 返回的画板结构不是有效 JSON'); }
 }
 
+function saveClassificationDocumentMetas(store, actorKey, entries, parsed) {
+  const rawMap = parsed?.documentMetadata || parsed?.documentMetas || parsed?.titles || {};
+  const saved = [];
+
+  for (const entry of entries) {
+    const raw = rawMap?.[entry.id] ?? rawMap?.[entry.itemKey] ?? rawMap?.[entry.title];
+    const candidate = typeof raw === 'string' ? { cleanTitle: raw } : raw;
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
+
+    const cleanTitle = String(candidate.cleanTitle || candidate.chineseTitle || '').trim().slice(0, 500);
+    if (!cleanTitle) continue;
+
+    const existing = store.getDocumentMeta(actorKey, entry);
+    if (existing?.source === 'manual') {
+      saved.push(existing);
+      continue;
+    }
+
+    saved.push(store.saveDocumentMeta(actorKey, {
+      libraryType: entry.libraryType,
+      libraryId: entry.libraryId,
+      itemKey: entry.itemKey,
+      attachmentKey: existing?.attachmentKey || entry.attachmentKey || null,
+      attachmentVersion: existing?.attachmentVersion ?? null,
+      cleanTitle,
+      institution: String(candidate.institution || '').trim().slice(0, 200),
+      reportTitle: String(candidate.reportTitle || candidate.chineseTitle || '').trim().slice(0, 300),
+      subtitle: String(candidate.subtitle || '').trim().slice(0, 300),
+      year: String(candidate.year || entry.year || '').trim().slice(0, 50),
+      summary: String(candidate.summary || '').trim().slice(0, 5000),
+      source: 'ai_classification'
+    }));
+  }
+
+  return saved;
+}
+
 function searchableText(value) {
   return String(value || '').normalize('NFKC').replace(/[\s\u00ad]+/g, '').toLocaleLowerCase();
 }
@@ -140,7 +191,7 @@ function verifiedEvidence(item, evidenceIndex, pageStart, pageEnd, name, context
   return { evidenceQuote: best.text, evidencePage: best.pageNumber };
 }
 
-function normalizeDocumentGraph(raw, evidenceIndex, pageCount, fallbackTitle) {
+function normalizeDocumentGraph(raw, evidenceIndex, pageCount, fallbackTitle, existingNodeIds = []) {
   const page = value => Math.min(pageCount, Math.max(1, Number.isInteger(value) ? value : 1));
   const items = (value, kind, max) => (Array.isArray(value) ? value : []).slice(0, max).map((item, index) => {
     const pageStart = page(item?.pageStart);
@@ -160,13 +211,22 @@ function normalizeDocumentGraph(raw, evidenceIndex, pageCount, fallbackTitle) {
   const sections = items(raw?.sections, 'section', 12);
   const concepts = items(raw?.concepts, 'concept', 12);
   const claims = items(raw?.claims, 'claim', 12);
-  const validIds = new Set(['overview', ...sections.map(x => x.id), ...concepts.map(x => x.id), ...claims.map(x => x.id)]);
-  const relations = (Array.isArray(raw?.relations) ? raw.relations : []).slice(0, 60).flatMap(item => {
+  const validNewIds = new Set(['overview', ...sections.map(x => x.id), ...concepts.map(x => x.id), ...claims.map(x => x.id)]);
+  const validExistingSet = new Set(existingNodeIds);
+  const relations = (Array.isArray(raw?.relations) ? raw.relations : []).slice(0, 80).flatMap(item => {
     const from = String(item?.from || '');
     const to = String(item?.to || '');
-    if (!validIds.has(from) || !validIds.has(to) || from === to) return [];
+    const normalizeKey = key => {
+      if (validNewIds.has(key)) return key;
+      const stripped = key.startsWith('existing:') ? key.slice('existing:'.length) : key;
+      if (validExistingSet.has(stripped)) return `existing:${stripped}`;
+      return null;
+    };
+    const normFrom = normalizeKey(from);
+    const normTo = normalizeKey(to);
+    if (!normFrom || !normTo || normFrom === normTo) return [];
     const relation = canvasEdgeRelations.has(item?.relation) ? item.relation : 'related';
-    return [{ from, to, relation, label: string(item?.label || '', 'relation.label', { max: 120 }) }];
+    return [{ from: normFrom, to: normTo, relation, label: string(item?.label || '', 'relation.label', { max: 120 }) }];
   });
   if (!sections.length && !concepts.length && !claims.length) throw new Error('AI 返回的理解画板没有有效内容节点');
   const overview = string(raw?.overview || '', 'graph.overview', { min: 1, max: 30_000 });
@@ -244,12 +304,411 @@ function viewport(value, optional = false) {
   };
 }
 
+function validateLibraryAccess(libraryType, libraryId, session) {
+  if (!['user', 'group'].includes(libraryType)) throw new TypeError('libraryType is invalid');
+  const lid = key(libraryId, 'libraryId', false);
+  const allowed = libraryType === 'user'
+    ? lid === String(session.userId)
+    : (session.groupIds || []).map(String).includes(lid);
+  if (!allowed) {
+    const err = new Error('library is not accessible to this session');
+    err.status = 403;
+    throw err;
+  }
+  return { libraryType, libraryId: lid };
+}
+
+function topicDocumentInput(body, session) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) throw new TypeError('body must be an object');
+  const { libraryType, libraryId } = validateLibraryAccess(body.libraryType, body.libraryId, session);
+  const itemKey = key(body.itemKey, 'itemKey', false);
+  const attachmentKey = body.attachmentKey ? key(body.attachmentKey, 'attachmentKey') : null;
+  const status = body.status === undefined ? 'inbox' : body.status;
+  if (!canvasTopicDocStatuses.has(status)) throw new TypeError('status is invalid');
+  const origin = body.origin === undefined ? 'manual' : body.origin;
+  if (!canvasTopicDocOrigins.has(origin)) throw new TypeError('origin is invalid');
+  const classificationConfidence = body.classificationConfidence === undefined || body.classificationConfidence === null
+    ? null : number(body.classificationConfidence, 'classificationConfidence', { min: 0, max: 1 });
+  const classificationReason = body.classificationReason === undefined || body.classificationReason === null
+    ? null : string(body.classificationReason, 'classificationReason', { max: 2000 });
+  const itemVersion = body.itemVersion === undefined || body.itemVersion === null
+    ? null : number(body.itemVersion, 'itemVersion', { min: 0, max: Number.MAX_SAFE_INTEGER, integer: true });
+  const attachmentVersion = body.attachmentVersion === undefined || body.attachmentVersion === null
+    ? null : number(body.attachmentVersion, 'attachmentVersion', { min: 0, max: Number.MAX_SAFE_INTEGER, integer: true });
+  return {
+    libraryType, libraryId, itemKey, attachmentKey, status, origin,
+    classificationConfidence, classificationReason, itemVersion, attachmentVersion
+  };
+}
+
+function topicDocumentChanges(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) throw new TypeError('body must be an object');
+  const changes = {};
+  if (body.status !== undefined) {
+    if (!canvasTopicDocStatuses.has(body.status)) throw new TypeError('status is invalid');
+    changes.status = body.status;
+  }
+  if (body.analysisStatus !== undefined) {
+    if (!canvasTopicAnalysisStatuses.has(body.analysisStatus)) throw new TypeError('analysisStatus is invalid');
+    changes.analysisStatus = body.analysisStatus;
+  }
+  if (body.attachmentKey !== undefined) {
+    changes.attachmentKey = body.attachmentKey ? key(body.attachmentKey, 'attachmentKey') : null;
+  }
+  if (body.itemVersion !== undefined) {
+    changes.itemVersion = body.itemVersion === null ? null : number(body.itemVersion, 'itemVersion', { min: 0, max: Number.MAX_SAFE_INTEGER, integer: true });
+  }
+  if (body.attachmentVersion !== undefined) {
+    changes.attachmentVersion = body.attachmentVersion === null ? null : number(body.attachmentVersion, 'attachmentVersion', { min: 0, max: Number.MAX_SAFE_INTEGER, integer: true });
+  }
+  if (body.classificationConfidence !== undefined) {
+    changes.classificationConfidence = body.classificationConfidence === null ? null : number(body.classificationConfidence, 'classificationConfidence', { min: 0, max: 1 });
+  }
+  if (body.classificationReason !== undefined) {
+    changes.classificationReason = body.classificationReason === null ? null : string(body.classificationReason, 'classificationReason', { max: 2000 });
+  }
+  if (!Object.keys(changes).length) throw new TypeError('no supported topic document changes');
+  return changes;
+}
+
+function collectionBindingInput(body, session) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) throw new TypeError('body must be an object');
+  const { libraryType, libraryId } = validateLibraryAccess(body.libraryType, body.libraryId, session);
+  const collectionKey = key(body.collectionKey, 'collectionKey', false);
+  const mode = body.mode === undefined ? 'inbound' : body.mode;
+  if (!canvasCollectionBindingModes.has(mode)) throw new TypeError('mode is invalid');
+  return { libraryType, libraryId, collectionKey, mode };
+}
+
+function collectionBindingChanges(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) throw new TypeError('body must be an object');
+  const changes = {};
+  if (body.mode !== undefined) {
+    if (!canvasCollectionBindingModes.has(body.mode)) throw new TypeError('mode is invalid');
+    changes.mode = body.mode;
+  }
+  if (body.enabled !== undefined) {
+    changes.enabled = Boolean(body.enabled);
+  }
+  if (body.lastLibraryVersion !== undefined) {
+    changes.lastLibraryVersion = number(body.lastLibraryVersion, 'lastLibraryVersion', { min: 0, max: Number.MAX_SAFE_INTEGER, integer: true });
+  }
+  if (body.lastSyncedAt !== undefined) {
+    changes.lastSyncedAt = body.lastSyncedAt === null ? null : string(body.lastSyncedAt, 'lastSyncedAt', { max: 64 });
+  }
+  if (!Object.keys(changes).length) throw new TypeError('no supported collection binding changes');
+  return changes;
+}
+
+function inboxEntryInput(item, session) {
+  if (!item || typeof item !== 'object' || Array.isArray(item)) throw new TypeError('inbox entry must be an object');
+  const { libraryType, libraryId } = validateLibraryAccess(item.libraryType, item.libraryId, session);
+  const itemKey = key(item.itemKey, 'inboxEntry.itemKey', false);
+
+  let attachmentKey = undefined;
+  let attachmentVersion = undefined;
+
+  const hasAttachmentKey = item.attachmentKey !== undefined;
+  const hasAttachmentVersion = item.attachmentVersion !== undefined;
+
+  if (hasAttachmentKey || hasAttachmentVersion) {
+    if (item.attachmentKey === null && item.attachmentVersion === null) {
+      attachmentKey = null;
+      attachmentVersion = null;
+    } else if (item.attachmentKey && item.attachmentVersion !== null && item.attachmentVersion !== undefined) {
+      attachmentKey = key(item.attachmentKey, 'inboxEntry.attachmentKey');
+      attachmentVersion = number(item.attachmentVersion, 'inboxEntry.attachmentVersion', { min: 0, max: Number.MAX_SAFE_INTEGER, integer: true });
+    } else {
+      throw new TypeError('attachmentKey and attachmentVersion must be provided together as an atomic pair or both omitted/null');
+    }
+  }
+
+  const detectedFrom = item.detectedFrom !== undefined ? string(item.detectedFrom, 'inboxEntry.detectedFrom', { max: 128 }) : 'scan';
+  const title = item.title !== undefined ? string(item.title, 'inboxEntry.title', { max: 500 }) : '';
+  const abstractNote = item.abstractNote !== undefined ? string(item.abstractNote, 'inboxEntry.abstractNote', { max: 20_000 }) : '';
+  const year = item.year === undefined || item.year === null ? null : number(item.year, 'inboxEntry.year', { min: 0, max: 3000, integer: true });
+  const itemVersion = item.itemVersion === undefined || item.itemVersion === null
+    ? null : number(item.itemVersion, 'inboxEntry.itemVersion', { min: 0, max: Number.MAX_SAFE_INTEGER, integer: true });
+  const creators = Array.isArray(item.creators) ? item.creators.slice(0, 100).map(c => {
+    if (typeof c === 'string') return string(c, 'inboxEntry.creators', { max: 200 });
+    if (c && typeof c === 'object' && !Array.isArray(c)) {
+      const creator = {};
+      if (c.creatorType !== undefined) creator.creatorType = string(c.creatorType, 'inboxEntry.creators.creatorType', { max: 64 });
+      if (c.firstName !== undefined) creator.firstName = string(c.firstName, 'inboxEntry.creators.firstName', { max: 200 });
+      if (c.lastName !== undefined) creator.lastName = string(c.lastName, 'inboxEntry.creators.lastName', { max: 200 });
+      if (c.name !== undefined) creator.name = string(c.name, 'inboxEntry.creators.name', { max: 200 });
+      return creator;
+    }
+    return '';
+  }).filter(c => (typeof c === 'string' ? Boolean(c) : Object.keys(c).length > 0)) : [];
+  const collectionKeys = Array.isArray(item.collectionKeys)
+    ? item.collectionKeys.slice(0, 100).map(k => key(k, 'inboxEntry.collectionKeys'))
+    : [];
+  const tags = Array.isArray(item.tags)
+    ? item.tags.slice(0, 100).map(t => {
+      if (typeof t === 'string') return string(t, 'inboxEntry.tags', { max: 200 });
+      if (t && typeof t === 'object' && !Array.isArray(t) && t.tag !== undefined) {
+        return string(t.tag, 'inboxEntry.tags.tag', { max: 200 });
+      }
+      return '';
+    }).filter(Boolean)
+    : [];
+
+  const entry = {
+    libraryType,
+    libraryId,
+    itemKey,
+    detectedFrom,
+    title,
+    creators,
+    year,
+    abstractNote,
+    collectionKeys,
+    tags,
+    itemVersion
+  };
+  if (attachmentKey !== undefined) entry.attachmentKey = attachmentKey;
+  if (attachmentVersion !== undefined) entry.attachmentVersion = attachmentVersion;
+  return entry;
+}
+
+export function normalizeZoteroItemToInboxEntry(item, libraryType, libraryId) {
+  if (!item || typeof item !== 'object') return null;
+  const itemData = item.data && typeof item.data === 'object' ? item.data : item;
+  const itemKey = itemData.key || item.key;
+  if (!itemKey) return null;
+  const itemType = itemData.itemType;
+  if (itemType === 'annotation' || itemType === 'note') return null;
+
+  const isAttachment = itemType === 'attachment';
+  const isPdfAttachment = isAttachment && (
+    itemData.contentType === 'application/pdf' ||
+    String(itemData.filename || '').toLowerCase().endsWith('.pdf')
+  );
+  if (isAttachment && !isPdfAttachment) return null;
+
+  let title = String(itemData.title || itemData.name || '').slice(0, 500);
+  if (!title && isAttachment && itemData.filename) {
+    title = String(itemData.filename).replace(/\.[pP][dD][fF]$/, '').slice(0, 500);
+  }
+  if (!title) {
+    title = isAttachment ? '无标题研报' : '无标题文档';
+  }
+  const creators = Array.isArray(itemData.creators) ? itemData.creators.slice(0, 100).map(c => {
+    if (typeof c === 'string') return c.slice(0, 200);
+    if (c && typeof c === 'object') {
+      const res = {};
+      if (c.creatorType) res.creatorType = String(c.creatorType).slice(0, 64);
+      if (c.firstName) res.firstName = String(c.firstName).slice(0, 200);
+      if (c.lastName) res.lastName = String(c.lastName).slice(0, 200);
+      if (c.name) res.name = String(c.name).slice(0, 200);
+      return res;
+    }
+    return '';
+  }).filter(c => (typeof c === 'string' ? Boolean(c) : Object.keys(c).length > 0)) : [];
+
+  let year = null;
+  if (itemData.date) {
+    const m = /\b(\d{4})\b/.exec(String(itemData.date));
+    if (m) year = Number(m[1]);
+  }
+
+  const abstractNote = String(itemData.abstractNote || itemData.abstract || '').slice(0, 20000);
+  const collectionKeys = Array.isArray(itemData.collections) ? itemData.collections.slice(0, 100).map(String) : [];
+  const tags = Array.isArray(itemData.tags) ? itemData.tags.slice(0, 100).map(t => (typeof t === 'string' ? t.slice(0, 200) : String(t?.tag || '').slice(0, 200))).filter(Boolean) : [];
+  const itemVersion = itemData.version !== undefined ? Number(itemData.version) : (item.version !== undefined ? Number(item.version) : null);
+
+  let attachmentKey = itemData.attachmentKey || item.attachmentKey || null;
+  let attachmentVersion = itemData.attachmentVersion !== undefined ? Number(itemData.attachmentVersion) : (item.attachmentVersion !== undefined ? Number(item.attachmentVersion) : null);
+
+  if (isPdfAttachment) {
+    attachmentKey = attachmentKey || itemKey;
+    if (attachmentVersion === null) {
+      attachmentVersion = itemVersion;
+    }
+  } else if (!attachmentKey && Array.isArray(item.children)) {
+    const pdfChild = item.children.find(c => (c?.data?.itemType || c?.itemType) === 'attachment' && (c?.data?.contentType === 'application/pdf' || String(c?.data?.filename || '').toLowerCase().endsWith('.pdf')));
+    if (pdfChild) {
+      attachmentKey = pdfChild.key || pdfChild.data?.key || null;
+      const childVer = pdfChild.data?.version ?? pdfChild.version;
+      if (childVer !== undefined) attachmentVersion = Number(childVer);
+    }
+  }
+
+  return {
+    libraryType: libraryType === 'group' ? 'group' : 'user',
+    libraryId: String(libraryId),
+    itemKey: String(itemKey),
+    attachmentKey: attachmentKey ? String(attachmentKey) : null,
+    attachmentVersion: Number.isFinite(attachmentVersion) ? attachmentVersion : null,
+    detectedFrom: 'scan',
+    title,
+    creators,
+    year: Number.isFinite(year) ? year : null,
+    abstractNote,
+    collectionKeys,
+    tags,
+    itemVersion: Number.isFinite(itemVersion) ? itemVersion : null
+  };
+}
+
+export async function resolveItemAttachment(fetchFn, session, libraryType, libraryId, item) {
+  if (!item || typeof item !== 'object') return item;
+  const itemData = item.data && typeof item.data === 'object' ? item.data : item;
+  const itemKey = itemData.key || item.key;
+  if (!itemKey) return item;
+
+  let attachmentKey = itemData.attachmentKey || item.attachmentKey || null;
+  let attachmentVersion = itemData.attachmentVersion !== undefined ? Number(itemData.attachmentVersion) : (item.attachmentVersion !== undefined ? Number(item.attachmentVersion) : null);
+
+  if (attachmentKey && attachmentVersion !== null) {
+    return { ...item, attachmentKey, attachmentVersion };
+  }
+
+  if (itemData.itemType === 'attachment') {
+    const isPdf = itemData.contentType === 'application/pdf' || String(itemData.filename || '').toLowerCase().endsWith('.pdf');
+    if (isPdf) {
+      const version = itemData.version !== undefined ? Number(itemData.version) : (item.version !== undefined ? Number(item.version) : null);
+      return {
+        ...item,
+        attachmentKey: itemKey,
+        attachmentVersion: Number.isFinite(version) ? version : null
+      };
+    }
+    return item;
+  }
+
+  // Fetch children from Altero upstream
+  const prefix = libraryType === 'group' ? 'groups' : 'users';
+  const childrenRes = await fetchFn(session, `/${prefix}/${encodeURIComponent(libraryId)}/items/${encodeURIComponent(itemKey)}/children`);
+  if (!childrenRes || !childrenRes.ok) {
+    const status = childrenRes ? childrenRes.status : 'no response';
+    throw new Error(`Failed to fetch child attachments for item ${itemKey}: upstream returned HTTP ${status}`);
+  }
+
+  const children = await childrenRes.json();
+  if (!Array.isArray(children)) {
+    throw new Error(`Invalid child attachments response for item ${itemKey}: expected array`);
+  }
+
+  const pdfChild = children.find(c => (c?.data?.itemType || c?.itemType) === 'attachment' && (c?.data?.contentType === 'application/pdf' || String(c?.data?.filename || '').toLowerCase().endsWith('.pdf')));
+  if (pdfChild) {
+    attachmentKey = pdfChild.key || pdfChild.data?.key || null;
+    const childVer = pdfChild.data?.version ?? pdfChild.version;
+    if (childVer !== undefined) attachmentVersion = Number(childVer);
+    return { ...item, attachmentKey, attachmentVersion };
+  }
+
+  return item;
+}
+
+async function defaultFetchAltero(session, path, options = {}) {
+  const alteroApi = (session.alteroApi || process.env.ALTERO_API || 'http://localhost:8000').replace(/\/$/, '');
+  const url = `${alteroApi}${path}`;
+  const headers = {
+    'Accept': 'application/json',
+    'Zotero-API-Version': '3',
+    ...(session.accessToken ? { 'Authorization': `Bearer ${session.accessToken}` } : {})
+  };
+  return fetch(url, { headers, ...options });
+}
+
+export async function fetchAllUpstreamItems(fetchFn, session, basePath, {
+  since = undefined,
+  limitPerPage = 100,
+  maxSafetyPages = 500,
+  onPage = null
+} = {}) {
+  let start = 0;
+  const allItems = onPage ? null : [];
+  let lastModifiedVersion = 0;
+  const seenItemKeys = new Set();
+  let completed = false;
+
+  for (let page = 0; page < maxSafetyPages; page++) {
+    const separator = basePath.includes('?') ? '&' : '?';
+    let path = `${basePath}${separator}limit=${limitPerPage}&start=${start}`;
+    if (since !== undefined && Number.isFinite(since) && since > 0) {
+      path += `&since=${since}`;
+    }
+
+    const res = await fetchFn(session, path);
+    if (!res.ok) {
+      if (res.status === 304) {
+        if (start === 0) {
+          return { items: [], lastModifiedVersion: since || 0, totalScanned: 0 };
+        }
+        throw new Error(`Unexpected 304 Not Modified received on page offset ${start}`);
+      }
+      throw new Error(`Upstream fetch failed: HTTP ${res.status}`);
+    }
+
+    const headerVersion = Number(res.headers?.get ? res.headers.get('Last-Modified-Version') : 0) || 0;
+    if (headerVersion > lastModifiedVersion) lastModifiedVersion = headerVersion;
+
+    const totalResultsHeader = res.headers?.get ? res.headers.get('Total-Results') : null;
+    const totalResults = totalResultsHeader !== null && !isNaN(Number(totalResultsHeader)) ? Number(totalResultsHeader) : null;
+
+    let itemsChunk;
+    try {
+      itemsChunk = await res.json();
+    } catch (parseErr) {
+      throw new Error(`Upstream returned non-JSON body: ${parseErr.message}`);
+    }
+
+    if (!Array.isArray(itemsChunk)) {
+      throw new Error('Upstream returned non-array items chunk');
+    }
+
+    if (itemsChunk.length === 0) {
+      if (totalResults !== null && start < totalResults) {
+        throw new Error(`Premature end of upstream stream: expected ${totalResults} items, received ${start} at offset ${start}`);
+      }
+      completed = true;
+      break;
+    }
+
+    for (const item of itemsChunk) {
+      const k = item?.key || item?.data?.key;
+      if (k) {
+        if (seenItemKeys.has(k)) {
+          throw new Error(`Upstream pagination overlap/loop detected: duplicate item key ${k} received at offset ${start}`);
+        }
+        seenItemKeys.add(k);
+      }
+    }
+
+    if (onPage) {
+      await onPage(itemsChunk, { start, totalResults, headerVersion });
+    } else {
+      allItems.push(...itemsChunk);
+    }
+    start += itemsChunk.length;
+
+    if (totalResults !== null && start < totalResults && itemsChunk.length < limitPerPage) {
+      throw new Error(`Premature end of upstream stream: expected ${totalResults} items, received ${start}`);
+    }
+
+    if (itemsChunk.length < limitPerPage || (totalResults !== null && start >= totalResults)) {
+      completed = true;
+      break;
+    }
+  }
+
+  if (!completed) {
+    throw new Error(`Upstream pagination exceeded safety limit of ${maxSafetyPages} pages; sync halted to prevent incomplete scan`);
+  }
+
+  return { items: allItems || [], lastModifiedVersion, totalScanned: start };
+}
+
 function source(value, session) {
   if (value === undefined || value === null) return null;
   if (typeof value !== 'object' || Array.isArray(value)) throw new TypeError('source must be an object');
   const libraryType = value.libraryType;
   if (!['user', 'group'].includes(libraryType)) throw new TypeError('source.libraryType is invalid');
-  const libraryId = key(value.libraryId, 'source.libraryId', false);
+  const normalizedLibId = (value.libraryId !== undefined && value.libraryId !== null) ? String(value.libraryId) : value.libraryId;
+  const libraryId = key(normalizedLibId, 'source.libraryId', false);
   const allowed = libraryType === 'user'
     ? libraryId === String(session.userId)
     : (session.groupIds || []).map(String).includes(libraryId);
@@ -269,6 +728,8 @@ function source(value, session) {
     libraryId,
     itemKey: key(value.itemKey, 'source.itemKey'),
     attachmentKey: key(value.attachmentKey, 'source.attachmentKey'),
+    attachmentVersion: value.attachmentVersion === undefined || value.attachmentVersion === null
+      ? null : number(value.attachmentVersion, 'source.attachmentVersion', { min: 0, max: Number.MAX_SAFE_INTEGER, integer: true }),
     annotationKey: key(value.annotationKey, 'source.annotationKey'),
     annotationVersion: value.annotationVersion === undefined || value.annotationVersion === null
       ? null : number(value.annotationVersion, 'source.annotationVersion', { min: 0, max: Number.MAX_SAFE_INTEGER, integer: true }),
@@ -397,6 +858,7 @@ export function createCanvasHandler(store, {
   aiCompletion = requestAiCompletion,
   aiPublicConfig = getAiPublicConfig,
   aiEndpointValidator = validateAiEndpoint,
+  fetchAltero = defaultFetchAltero,
 } = {}) {
   return async function handleCanvasApi(req, res, url) {
     const actor = actorFromRequest(req);
@@ -409,6 +871,471 @@ export function createCanvasHandler(store, {
     const method = req.method || 'GET';
     let match;
     try {
+      if (pathname === '/canvas/inbox' && method === 'GET') {
+        const state = url.searchParams.get('state') || undefined;
+        const collectionKey = url.searchParams.get('collectionKey') || undefined;
+        const limit = url.searchParams.get('limit') ? Number(url.searchParams.get('limit')) : 100;
+        const cursor = url.searchParams.get('cursor') || undefined;
+        const entries = store.listInboxEntries(actor.actorKey, { state, collectionKey, limit, cursor });
+        const unreadCount = store.countInboxEntries(actor.actorKey, { state: 'new' });
+        const totalCount = store.countInboxEntries(actor.actorKey, { state, collectionKey });
+        const lastEntry = entries.length === limit ? entries[entries.length - 1] : null;
+        const nextCursor = lastEntry ? `${lastEntry.updatedAt}|${lastEntry.id}` : null;
+        json(res, 200, {
+          data: entries,
+          meta: {
+            unreadCount,
+            totalCount,
+            nextCursor
+          }
+        });
+        return;
+      }
+      if (pathname === '/canvas/inbox/scan' && method === 'POST') {
+        const body = await readJson(req);
+        if (body && (typeof body !== 'object' || Array.isArray(body))) {
+          throw new TypeError('request body must be an object');
+        }
+        const libType = body?.libraryType !== undefined ? string(body.libraryType, 'libraryType') : 'user';
+        const libId = body?.libraryId !== undefined ? string(body.libraryId, 'libraryId', { max: 128 }) : actor.session.userId;
+        const targetLib = validateLibraryAccess(libType, libId, actor.session);
+        const since = body?.since === undefined || body?.since === null
+          ? undefined
+          : number(body.since, 'since', { min: 0, max: Number.MAX_SAFE_INTEGER, integer: true });
+
+        const prefix = targetLib.libraryType === 'group' ? 'groups' : 'users';
+        const basePath = `/${prefix}/${encodeURIComponent(targetLib.libraryId)}/items/top`;
+
+        let scannedCount = 0;
+        let upsertedCount = 0;
+        let fetchResult;
+        try {
+          fetchResult = await fetchAllUpstreamItems(fetchAltero, actor.session, basePath, {
+            since,
+            limitPerPage: 100,
+            onPage: async (itemsChunk) => {
+              const enrichedChunk = await mapWithConcurrency(itemsChunk, 6, item => resolveItemAttachment(fetchAltero, actor.session, targetLib.libraryType, targetLib.libraryId, item));
+              const entries = enrichedChunk
+                .map(item => normalizeZoteroItemToInboxEntry(item, targetLib.libraryType, targetLib.libraryId))
+                .filter(Boolean);
+              scannedCount += entries.length;
+              if (entries.length) {
+                const upserted = store.upsertInboxEntries(actor.actorKey, entries);
+                upsertedCount += upserted.length;
+              }
+            }
+          });
+        } catch (upstreamErr) {
+          error(res, 502, 'upstream_error', `Altero items scan failed: ${upstreamErr.message}`);
+          return;
+        }
+
+        json(res, 200, {
+          data: {
+            scanned: scannedCount,
+            upsertedCount,
+            lastLibraryVersion: fetchResult.lastModifiedVersion
+          }
+        });
+        return;
+      }
+      if (pathname === '/canvas/inbox/entries' && method === 'POST') {
+        const body = await readJson(req);
+        if (!Array.isArray(body.entries) || body.entries.length > 500) {
+          throw new TypeError('entries must be an array of at most 500 items');
+        }
+        const validatedEntries = body.entries.map(entry => inboxEntryInput(entry, actor.session));
+        const results = store.upsertInboxEntries(actor.actorKey, validatedEntries);
+        json(res, 201, { data: results });
+        return;
+      }
+      if (pathname === '/canvas/inbox/batch-action' && method === 'POST') {
+        const body = await readJson(req);
+        if (!Array.isArray(body.entryIds) || !body.entryIds.length) throw new TypeError('entryIds must be a non-empty array');
+        const action = string(body.action, 'action');
+        if (!['accept', 'add_to_topics', 'defer', 'ignore', 'reopen'].includes(action)) throw new TypeError('action is invalid');
+        const targetWorkspaceIds = Array.isArray(body.targetWorkspaceIds) ? body.targetWorkspaceIds.map(String) : [];
+        const result = store.batchActionInbox(actor.actorKey, {
+          entryIds: body.entryIds.map(String),
+          action,
+          targetWorkspaceIds
+        });
+        json(res, 200, { data: result });
+        return;
+      }
+      if (pathname === '/canvas/imports/resolve' && method === 'POST') {
+        const body = await readJson(req);
+        if (!body || typeof body !== 'object' || Array.isArray(body)) {
+          throw new TypeError('request body must be an object');
+        }
+        const rawInput = string(body.input, 'input', { min: 1, max: 2000 });
+        let resolved;
+        try {
+          resolved = await resolveImportInput(rawInput);
+        } catch (err) {
+          error(res, 400, 'resolve_error', `Failed to resolve input: ${err.message}`);
+          return;
+        }
+
+        const duplicateCandidates = findDuplicateCandidates(store, actor.actorKey, resolved);
+        json(res, 200, {
+          data: {
+            resolved,
+            duplicateCandidates
+          }
+        });
+        return;
+      }
+      if (pathname === '/canvas/imports' && method === 'POST') {
+        const body = await readJson(req);
+        if (!body || typeof body !== 'object' || Array.isArray(body)) {
+          throw new TypeError('request body must be an object');
+        }
+
+        let resolved = body.resolved;
+        if (!resolved) {
+          const rawInput = string(body.input, 'input', { min: 1, max: 2000 });
+          try {
+            resolved = await resolveImportInput(rawInput);
+          } catch (err) {
+            error(res, 400, 'resolve_error', `Failed to resolve input: ${err.message}`);
+            return;
+          }
+        }
+
+        const targetWorkspaceId = body.targetWorkspaceId ? string(body.targetWorkspaceId, 'targetWorkspaceId', { max: 128 }) : null;
+        if (targetWorkspaceId) {
+          store.requireWorkspace(actor.actorKey, targetWorkspaceId);
+        }
+
+        const importJob = store.enqueueJob(actor.actorKey, {
+          jobType: 'import_document',
+          resourceType: 'inbox_entry',
+          resourceId: 'pending'
+        });
+
+        store.updateJobState(importJob.id, { state: 'running', startedAt: new Date().toISOString() });
+
+        const itemKey = `IMP_${Date.now().toString(36).toUpperCase()}_${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+        const tags = [resolved.sourceType, resolved.doi ? 'doi' : '', resolved.arxivId ? 'arxiv' : ''].filter(Boolean);
+
+        const entryInput = {
+          libraryType: 'user',
+          libraryId: String(actor.session.userId),
+          itemKey,
+          detectedFrom: 'import',
+          title: string(resolved.title || '未命名导入文献', 'title', { max: 500 }),
+          creators: Array.isArray(resolved.creators) ? resolved.creators : [],
+          year: resolved.year ? Number(resolved.year) : null,
+          abstractNote: string(resolved.abstractNote || '', 'abstractNote', { max: 20_000 }),
+          tags
+        };
+
+        const upserted = store.upsertInboxEntries(actor.actorKey, [entryInput]);
+        const entry = upserted[0];
+
+        let topicDocument = null;
+        if (targetWorkspaceId && entry) {
+          topicDocument = store.addTopicDocument(actor.actorKey, targetWorkspaceId, {
+            libraryType: entry.libraryType,
+            libraryId: entry.libraryId,
+            itemKey: entry.itemKey,
+            status: 'accepted',
+            origin: 'canvas_import'
+          });
+        }
+
+        const updatedJob = store.updateJobState(importJob.id, {
+          state: 'completed',
+          finishedAt: new Date().toISOString(),
+          resultSummary: {
+            entryId: entry?.id,
+            itemKey,
+            targetWorkspaceId: targetWorkspaceId || null,
+            topicDocumentId: topicDocument?.id || null
+          }
+        });
+
+        json(res, 201, {
+          data: {
+            job: updatedJob,
+            entry,
+            topicDocument
+          }
+        });
+        return;
+      }
+      match = /^\/canvas\/imports\/([0-9a-f-]+)\/retry$/.exec(pathname);
+      if (match && method === 'POST') {
+        const job = store.getJob(actor.actorKey, match[1]);
+        if (!job || job.jobType !== 'import_document') {
+          throw new CanvasNotFoundError('Import job not found');
+        }
+        if (job.state !== 'failed') {
+          json(res, 200, { data: job, message: 'Job is not in failed state' });
+          return;
+        }
+        const retried = store.updateJobState(job.id, {
+          state: 'queued',
+          errorCode: null,
+          incrementAttempts: true
+        });
+        json(res, 200, { data: retried });
+        return;
+      }
+      match = /^\/canvas\/imports\/([0-9a-f-]+)$/.exec(pathname);
+      if (match && method === 'GET') {
+        const job = store.getJob(actor.actorKey, match[1]);
+        if (!job || job.jobType !== 'import_document') {
+          throw new CanvasNotFoundError('Import job not found');
+        }
+        json(res, 200, { data: job });
+        return;
+      }
+      if (pathname === '/canvas/inbox/classify' && method === 'POST') {
+        const body = await readJson(req);
+        if (body && (typeof body !== 'object' || Array.isArray(body))) {
+          throw new TypeError('request body must be an object');
+        }
+        const workspaces = store.listWorkspaces(actor.actorKey);
+        if (!workspaces.length) {
+          json(res, 200, { data: { classifications: {}, message: '暂无可用的研究主题，请先创建主题' } });
+          return;
+        }
+
+        let targetEntries = [];
+        if (body?.entryIds !== undefined) {
+          if (!Array.isArray(body.entryIds) || body.entryIds.length > 100) {
+            throw new TypeError('entryIds must be an array of at most 100 items');
+          }
+          for (const id of body.entryIds) {
+            const entryId = string(id, 'entryIds.id', { max: 128 });
+            const entry = store.getInboxEntry(actor.actorKey, entryId);
+            if (entry) targetEntries.push(entry);
+          }
+        } else {
+          targetEntries = store.listInboxEntries(actor.actorKey, { state: 'new', limit: 20 });
+        }
+
+        if (!targetEntries.length) {
+          json(res, 200, { data: { classifications: {} } });
+          return;
+        }
+
+        const privateConfig = store.getAiSettings(actor.actorKey);
+        const publicConfig = aiPublicConfig(privateConfig);
+        if (!publicConfig.configured) {
+          error(res, 503, 'ai_not_configured', 'AI 模型尚未配置');
+          return;
+        }
+
+        try {
+          const systemPrompt = [
+            '你是专业学术研究助手。你的任务是根据用户的多个研究主题及其纳入/排除规则，评估给定的文献是否适合归入各主题。',
+            '只输出一个合法的 JSON 对象，不要 Markdown 代码块。',
+            'JSON 格式示例：',
+            '{"classifications": {',
+            '  "entry-id-1": [',
+            '    {"workspaceId": "ws-1", "workspaceName": "主题名称", "confidence": 0.92, "reason": "匹配纳入规则：聚焦于大模型逻辑推理机制"}',
+            '  ]',
+            '}, "documentMetadata": {',
+            '  "entry-id-1": {"cleanTitle": "【机构】规范中文标题（2025）", "institution": "机构", "reportTitle": "中文主标题", "subtitle": "", "year": "2025", "summary": "一句话中文摘要"}',
+            '}}',
+            '【规则】',
+            '1. confidence 为 0.0 到 1.0 之间的浮点数。若不符合主题或命中排除规则，置信度应低于 0.3；',
+            '2. reason 简述推荐或不推荐的核心理由（30字以内）；',
+            '3. 同一篇文献可同时推荐给多个符合的主题（多对多归类）；',
+            '4. 必须在同一次返回中为每篇文献生成 documentMetadata；cleanTitle 必须是准确、自然、可直接展示的简体中文名，保留机构与年份等关键辨识信息。'
+          ].join('\n');
+
+          const topicContexts = workspaces.map((w, idx) => `[主题 ${idx + 1}] ID: ${w.id}\n名称: ${w.name}\n研究问题: ${w.researchQuestion || '无'}\n纳入规则: ${w.inclusionRules || '无'}\n排除规则: ${w.exclusionRules || '无'}`).join('\n\n');
+          const docContexts = targetEntries.map(e => `[待分拣文献] ID: ${e.id}\n标题: ${e.title}\n作者: ${(e.creators || []).map(c => typeof c === 'string' ? c : (c.name || `${c.firstName || ''} ${c.lastName || ''}`)).join(', ')}\n年份: ${e.year || '未知'}\n摘要: ${(e.abstractNote || '').slice(0, 800)}\n标签: ${(e.tags || []).join(', ')}`).join('\n\n');
+
+          const aiResponse = await aiCompletion({
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: `【候选研究主题】\n\n${topicContexts}\n\n【待分类文献列表】\n\n${docContexts}` }
+            ],
+            temperature: 0.2
+          }, privateConfig);
+
+          let parsed = parseAiJson(aiResponse);
+          if (!parsed || typeof parsed !== 'object') parsed = { classifications: {} };
+          const rawMap = parsed.classifications || parsed;
+          const classifications = {};
+
+          for (const entry of targetEntries) {
+            const list = Array.isArray(rawMap[entry.id])
+              ? rawMap[entry.id]
+              : (Array.isArray(rawMap[entry.itemKey])
+                ? rawMap[entry.itemKey]
+                : (Array.isArray(rawMap[entry.title]) ? rawMap[entry.title] : []));
+
+            classifications[entry.id] = list.map(item => {
+              const matchedWs = workspaces.find(w => w.id === item.workspaceId) || workspaces.find(w => w.name === item.workspaceName);
+              if (!matchedWs) return null;
+              const conf = typeof item.confidence === 'number' ? Math.max(0, Math.min(1, item.confidence)) : 0.5;
+              return {
+                workspaceId: matchedWs.id,
+                workspaceName: matchedWs.name,
+                confidence: conf,
+                reason: String(item.reason || '主题匹配').slice(0, 30)
+              };
+            }).filter(Boolean);
+          }
+
+          const documentMetas = saveClassificationDocumentMetas(store, actor.actorKey, targetEntries, parsed);
+          json(res, 200, { data: { classifications, documentMetas } });
+        } catch (aiErr) {
+          error(res, aiErr?.name === 'AbortError' ? 504 : 502, 'ai_gateway_error', aiErr.message);
+        }
+        return;
+      }
+
+      if (pathname === '/canvas/inbox/generate-topics' && method === 'POST') {
+        const body = await readJson(req);
+        if (body && (typeof body !== 'object' || Array.isArray(body))) {
+          throw new TypeError('request body must be an object');
+        }
+
+        let targetEntries = [];
+        if (body?.entryIds !== undefined) {
+          if (!Array.isArray(body.entryIds) || body.entryIds.length > 100) {
+            throw new TypeError('entryIds must be an array of at most 100 items');
+          }
+          for (const id of body.entryIds) {
+            const entryId = string(id, 'entryIds.id', { max: 128 });
+            const entry = store.getInboxEntry(actor.actorKey, entryId);
+            if (entry) targetEntries.push(entry);
+          }
+        } else {
+          targetEntries = store.listInboxEntries(actor.actorKey, { limit: 50 });
+        }
+
+        if (!targetEntries.length) {
+          json(res, 200, { data: { createdWorkspaces: [], workspaces: store.listWorkspaces(actor.actorKey), classifications: {}, message: '文献库或收件箱暂无可供提炼的文献' } });
+          return;
+        }
+
+        const privateConfig = store.getAiSettings(actor.actorKey);
+        const publicConfig = aiPublicConfig(privateConfig);
+        if (!publicConfig.configured) {
+          error(res, 503, 'ai_not_configured', 'AI 模型尚未配置');
+          return;
+        }
+
+        const existingWorkspaces = store.listWorkspaces(actor.actorKey);
+        const maxTopics = typeof body?.maxTopics === 'number' ? Math.max(2, Math.min(8, Math.floor(body.maxTopics))) : 5;
+
+        try {
+          const systemPrompt = [
+            '你是资深学术研究与产业分析专家。请根据给定的文献列表，自动提炼并规划一套清晰、聚焦的研究主题体系（Topic Taxonomy）。',
+            '【关键原则】',
+            `1. 主题数量严格精炼：提炼 3 到 ${maxTopics} 个高层次、非重叠的核心研究方向，避免过多细碎主题；`,
+            '2. 若已有候选主题且语义契合，请优先复用或在其基础上扩展，避免创建重复主题；',
+            '3. 为每个主题提供：`name`（15字以内的凝练中文名称）、`researchQuestion`（核心研究问题）、`inclusionRules`（清晰的纳入规则）、`exclusionRules`（排除规则）；',
+            '4. 为每篇待分类文献推荐最契合的主题（可多对多），仅当极个别文献确实与主要主题完全无关时才设立兜底补充主题；',
+            '5. 在同一次返回中为每篇文献生成规范中文名与元数据，不要要求第二次模型调用；',
+            '6. 只输出合法的 JSON 对象，严禁 Markdown 代码块。',
+            'JSON 格式示例：',
+            '{',
+            '  "topics": [',
+            '    {',
+            '      "name": "具身智能与机器人控制",',
+            '      "researchQuestion": "端到端具身多模态模型在通用机器人控制与动作规划中的落地机制",',
+            '      "inclusionRules": "涉及机器人感知、决策、控制、动作生成及具身数据训练的文献",',
+            '      "exclusionRules": "纯软件大模型推理或传统非智能自动化"',
+            '    }',
+            '  ],',
+            '  "classifications": {',
+            '    "entry-id-1": [',
+            '      { "topicName": "具身智能与机器人控制", "confidence": 0.95, "reason": "聚焦端到端机器人动作生成" }',
+            '    ]',
+            '  },',
+            '  "documentMetadata": {',
+            '    "entry-id-1": { "cleanTitle": "【机构】规范中文标题（2025）", "institution": "机构", "reportTitle": "中文主标题", "subtitle": "", "year": "2025", "summary": "一句话中文摘要" }',
+            '  }',
+            '}'
+          ].join('\n');
+
+          const existingContext = existingWorkspaces.length
+            ? existingWorkspaces.map((w, idx) => `[已有主题 ${idx + 1}] 名称: ${w.name}\n研究问题: ${w.researchQuestion || '无'}\n纳入规则: ${w.inclusionRules || '无'}`).join('\n\n')
+            : '（当前尚无已有主题）';
+
+          const docContexts = targetEntries.map(e => `[文献] ID: ${e.id}\n标题: ${e.title}\n作者: ${(e.creators || []).map(c => typeof c === 'string' ? c : (c.name || `${c.firstName || ''} ${c.lastName || ''}`)).join(', ')}\n年份: ${e.year || '未知'}\n摘要: ${(e.abstractNote || '').slice(0, 500)}\n标签: ${(e.tags || []).join(', ')}`).join('\n\n');
+
+          const aiResponse = await aiCompletion({
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: `【用户已有主题】\n\n${existingContext}\n\n【待分析与归类文献列表】\n\n${docContexts}` }
+            ],
+            temperature: 0.2
+          }, privateConfig);
+
+          let parsed = parseAiJson(aiResponse);
+          if (!parsed || typeof parsed !== 'object') parsed = { topics: [], classifications: {} };
+
+          const rawTopics = Array.isArray(parsed.topics) ? parsed.topics : [];
+          const rawClassifications = parsed.classifications || {};
+
+          const createdWorkspaces = [];
+          const allCurrentWorkspaces = [...existingWorkspaces];
+
+          for (const topic of rawTopics) {
+            const rawName = String(topic?.name || '').trim().slice(0, 100);
+            if (!rawName) continue;
+            const existing = allCurrentWorkspaces.find(w => w.name.toLowerCase() === rawName.toLowerCase());
+            if (existing) continue;
+
+            const ws = store.createWorkspace(actor.actorKey, {
+              name: rawName,
+              researchQuestion: String(topic.researchQuestion || '').slice(0, 500),
+              inclusionRules: String(topic.inclusionRules || '').slice(0, 500),
+              exclusionRules: String(topic.exclusionRules || '').slice(0, 500)
+            });
+            createdWorkspaces.push(ws);
+            allCurrentWorkspaces.push(ws);
+          }
+
+          const classifications = {};
+          for (const entry of targetEntries) {
+            const list = Array.isArray(rawClassifications[entry.id])
+              ? rawClassifications[entry.id]
+              : (Array.isArray(rawClassifications[entry.itemKey])
+                ? rawClassifications[entry.itemKey]
+                : (Array.isArray(rawClassifications[entry.title]) ? rawClassifications[entry.title] : []));
+
+            classifications[entry.id] = list.map(item => {
+              const topicName = String(item?.topicName || item?.workspaceName || '').trim().toLowerCase();
+              const wsId = item?.workspaceId;
+              const matchedWs = allCurrentWorkspaces.find(w => w.id === wsId) || allCurrentWorkspaces.find(w => w.name.toLowerCase() === topicName);
+              if (!matchedWs) return null;
+              const conf = typeof item.confidence === 'number' ? Math.max(0, Math.min(1, item.confidence)) : 0.85;
+              return {
+                workspaceId: matchedWs.id,
+                workspaceName: matchedWs.name,
+                confidence: conf,
+                reason: String(item.reason || '契合主题研究方向').slice(0, 30)
+              };
+            }).filter(Boolean);
+          }
+
+          const documentMetas = saveClassificationDocumentMetas(store, actor.actorKey, targetEntries, parsed);
+
+          json(res, 200, {
+            data: {
+              createdWorkspaces,
+              workspaces: store.listWorkspaces(actor.actorKey),
+              classifications,
+              documentMetas
+            }
+          });
+        } catch (aiErr) {
+          error(res, aiErr?.name === 'AbortError' ? 504 : 502, 'ai_gateway_error', aiErr.message);
+        }
+        return;
+      }
+
       if (pathname === '/canvas/workspaces' && method === 'GET') {
         json(res, 200, { data: store.listWorkspaces(actor.actorKey) });
         return;
@@ -416,7 +1343,11 @@ export function createCanvasHandler(store, {
       if (pathname === '/canvas/workspaces' && method === 'POST') {
         const body = await readJson(req);
         const resource = store.createWorkspace(actor.actorKey, {
-          name: string(body.name, 'name', { min: 1, max: 200 })
+          name: string(body.name, 'name', { min: 1, max: 200 }),
+          description: body.description !== undefined ? string(body.description, 'description', { max: 5000 }) : '',
+          researchQuestion: body.researchQuestion !== undefined ? string(body.researchQuestion, 'researchQuestion', { max: 2000 }) : '',
+          inclusionRules: body.inclusionRules !== undefined ? string(body.inclusionRules, 'inclusionRules', { max: 5000 }) : '',
+          exclusionRules: body.exclusionRules !== undefined ? string(body.exclusionRules, 'exclusionRules', { max: 5000 }) : ''
         });
         json(res, 201, { data: resource }, { ETag: etag(resource.version) });
         return;
@@ -502,6 +1433,204 @@ export function createCanvasHandler(store, {
         return;
       }
 
+      if (pathname === '/canvas/documents/metadata' && method === 'GET') {
+        const libType = url.searchParams.get('libraryType') || 'user';
+        const libId = url.searchParams.get('libraryId') || actor.session.userId;
+        const targetLib = validateLibraryAccess(libType, libId, actor.session);
+        const itemKey = url.searchParams.get('itemKey');
+        if (itemKey) {
+          const validatedItemKey = key(itemKey, 'itemKey', false);
+          const meta = store.getDocumentMeta(actor.actorKey, {
+            libraryType: targetLib.libraryType,
+            libraryId: targetLib.libraryId,
+            itemKey: validatedItemKey
+          });
+          json(res, 200, { data: meta });
+          return;
+        }
+        const metas = store.listDocumentMetas(actor.actorKey, {
+          libraryType: targetLib.libraryType,
+          libraryId: targetLib.libraryId
+        });
+        json(res, 200, { data: metas });
+        return;
+      }
+
+      if (pathname === '/canvas/documents/metadata' && method === 'PATCH') {
+        const body = await readJson(req);
+        const libType = body?.libraryType !== undefined ? string(body.libraryType, 'libraryType') : 'user';
+        const libId = body?.libraryId !== undefined ? string(body.libraryId, 'libraryId', { max: 128 }) : actor.session.userId;
+        const targetLib = validateLibraryAccess(libType, libId, actor.session);
+        const itemKey = key(body.itemKey, 'itemKey', false);
+        const existing = store.getDocumentMeta(actor.actorKey, {
+          libraryType: targetLib.libraryType,
+          libraryId: targetLib.libraryId,
+          itemKey
+        });
+
+        const cleanTitle = body.cleanTitle !== undefined
+          ? string(body.cleanTitle, 'cleanTitle', { min: 1, max: 500 }).trim()
+          : (existing?.cleanTitle || '');
+        if (!cleanTitle) throw new TypeError('cleanTitle is required');
+
+        const institution = body.institution !== undefined
+          ? string(body.institution, 'institution', { max: 200 }).trim()
+          : (existing?.institution || '');
+        const reportTitle = body.reportTitle !== undefined
+          ? string(body.reportTitle, 'reportTitle', { max: 300 }).trim()
+          : (existing?.reportTitle || '');
+        const subtitle = body.subtitle !== undefined
+          ? string(body.subtitle, 'subtitle', { max: 300 }).trim()
+          : (existing?.subtitle || '');
+        const year = body.year !== undefined
+          ? string(body.year, 'year', { max: 50 }).trim()
+          : (existing?.year || '');
+        const summary = body.summary !== undefined
+          ? string(body.summary, 'summary', { max: 5000 }).trim()
+          : (existing?.summary || '');
+        const attachmentKey = body.attachmentKey !== undefined
+          ? key(body.attachmentKey, 'attachmentKey', true)
+          : (existing?.attachmentKey || null);
+        const attachmentVersion = body.attachmentVersion !== undefined
+          ? (body.attachmentVersion === null ? null : number(body.attachmentVersion, 'attachmentVersion', { min: 0, max: Number.MAX_SAFE_INTEGER, integer: true }))
+          : (existing?.attachmentVersion ?? null);
+
+        const meta = store.saveDocumentMeta(actor.actorKey, {
+          libraryType: targetLib.libraryType,
+          libraryId: targetLib.libraryId,
+          itemKey,
+          attachmentKey,
+          attachmentVersion,
+          cleanTitle,
+          institution,
+          reportTitle,
+          subtitle,
+          year,
+          summary,
+          source: 'manual'
+        });
+        json(res, 200, { data: meta });
+        return;
+      }
+
+      if (pathname === '/canvas/documents/extract-metadata' && method === 'POST') {
+        const body = await readJson(req, MAX_DOCUMENT_BODY_BYTES);
+        const libType = body?.libraryType !== undefined ? string(body.libraryType, 'libraryType') : 'user';
+        const libId = body?.libraryId !== undefined ? string(body.libraryId, 'libraryId', { max: 128 }) : actor.session.userId;
+        const targetLib = validateLibraryAccess(libType, libId, actor.session);
+        const itemKey = key(body.itemKey, 'itemKey', false);
+        const attachmentKey = body?.attachmentKey !== undefined ? key(body.attachmentKey, 'attachmentKey', true) : null;
+        const attachmentVersion = body?.attachmentVersion !== undefined
+          ? (body.attachmentVersion === null ? null : number(body.attachmentVersion, 'attachmentVersion', { min: 0, max: Number.MAX_SAFE_INTEGER, integer: true }))
+          : null;
+        const filename = body.filename !== undefined ? string(body.filename, 'filename', { max: 500 }) : '';
+        const rawTitle = body.rawTitle !== undefined ? string(body.rawTitle, 'rawTitle', { max: 500 }) : '';
+        const textSnippet = body.textSnippet !== undefined ? string(body.textSnippet, 'textSnippet', { max: 50_000 }) : '';
+        const forceRefresh = Boolean(body.forceRefresh);
+
+        if (!forceRefresh) {
+          const cached = store.getDocumentMeta(actor.actorKey, {
+            libraryType: targetLib.libraryType,
+            libraryId: targetLib.libraryId,
+            itemKey
+          });
+          if (cached) {
+            const attachmentMatches = (!attachmentKey && !cached.attachmentKey) || (attachmentKey && cached.attachmentKey === attachmentKey);
+            const cachedVer = cached.attachmentVersion ?? null;
+            const targetVer = attachmentVersion ?? null;
+            const versionMatches = (cachedVer === null && targetVer === null) || (cachedVer !== null && targetVer !== null && cachedVer === targetVer);
+            if (attachmentMatches && versionMatches) {
+              json(res, 200, { data: cached, cached: true });
+              return;
+            }
+          }
+        }
+
+        const privateConfig = store.getAiSettings(actor.actorKey);
+        const publicConfig = aiPublicConfig(privateConfig);
+        if (!publicConfig.configured) {
+          error(res, 503, 'ai_not_configured', 'AI 模型尚未配置');
+          return;
+        }
+
+        const prompt = `你是专业的投研与研报文献分析助手。请分析以下报告文本（前1-2页摘要/封面/导言）和文件名，提取并输出规范易读的中文研报元数据。
+
+要求：
+1. 机构来源 (institution)：提取发布机构（如中金公司、华泰证券、麦肯锡、高盛、清华大学等；无法确认则写"未知机构"或作者）。
+2. 报告主标题 (reportTitle)：提取核心中文研报主标题。如果原标题是无意义文件名或含糊名称（如"周报"、"专题研究"），请根据正文提取精炼准确的业务研报名称。
+3. 副标题 (subtitle)：若有细分方向或具体副标题则提取，否则留空字符串 ""。
+4. 年份 (year)：提取发布年份（如 2024；无法确认则留空字符串 ""）。
+5. 规范中文标题 (cleanTitle)：组合成【机构】主标题：副标题 (年份) 格式。例如：【中金公司】人形机器人产业链深度：从核心零部件到整机制造（2024）。
+6. 一句话摘要 (summary)：用一句话概括本篇报告的核心结论或论述主题（50-100字）。
+
+必须严格返回合法 JSON 对象，格式如下：
+{
+  "institution": "机构名",
+  "reportTitle": "报告主标题",
+  "subtitle": "副标题",
+  "year": "2024",
+  "cleanTitle": "【机构名】报告主标题：副标题（2024）",
+  "summary": "一句话核心结论"
+}
+
+参考输入：
+文件名：${filename || '无'}
+原始标题：${rawTitle || '无'}
+文档前序文本：
+${textSnippet.slice(0, 8000) || '无'}`;
+
+        try {
+          const rawAi = await aiCompletion({
+            messages: [
+              { role: 'system', content: '你是严谨专业的研报元数据结构化提取助手，必须仅返回合法 JSON。' },
+              { role: 'user', content: prompt }
+            ],
+            temperature: 0.1,
+            maxTokens: 1000
+          }, privateConfig);
+
+          let parsed;
+          try {
+            parsed = parseAiJson(rawAi);
+          } catch {
+            parsed = null;
+          }
+
+          const institution = (parsed?.institution && typeof parsed.institution === 'string') ? parsed.institution.trim() : '';
+          const reportTitle = (parsed?.reportTitle && typeof parsed.reportTitle === 'string') ? parsed.reportTitle.trim() : (rawTitle || filename || '研究报告');
+          const subtitle = (parsed?.subtitle && typeof parsed.subtitle === 'string') ? parsed.subtitle.trim() : '';
+          const year = (parsed?.year && typeof parsed.year === 'string') ? parsed.year.trim() : '';
+          let cleanTitle = (parsed?.cleanTitle && typeof parsed.cleanTitle === 'string') ? parsed.cleanTitle.trim() : '';
+          if (!cleanTitle) {
+            const instPrefix = institution ? `【${institution}】` : '';
+            const subSuffix = subtitle ? `：${subtitle}` : '';
+            const yearSuffix = year ? `（${year}）` : '';
+            cleanTitle = `${instPrefix}${reportTitle}${subSuffix}${yearSuffix}`;
+          }
+          const summary = (parsed?.summary && typeof parsed.summary === 'string') ? parsed.summary.trim() : '';
+
+          const saved = store.saveDocumentMeta(actor.actorKey, {
+            libraryType: targetLib.libraryType,
+            libraryId: targetLib.libraryId,
+            itemKey,
+            attachmentKey,
+            attachmentVersion,
+            cleanTitle,
+            institution,
+            reportTitle,
+            subtitle,
+            year,
+            summary,
+            source: 'ai'
+          });
+
+          json(res, 200, { data: saved, cached: false });
+        } catch (aiError) {
+          error(res, aiError?.name === 'AbortError' ? 504 : 502, 'ai_gateway_error', aiError.message);
+        }
+        return;
+      }
+
       match = /^\/canvas\/boards\/([0-9a-f-]+)\/ai\/document-map$/.exec(pathname);
       if (match && method === 'POST') {
         const boardId = match[1];
@@ -512,6 +1641,42 @@ export function createCanvasHandler(store, {
           throw new TypeError('document itemKey and attachmentKey are required');
         }
         const title = string(body.title || 'PDF 全文理解', 'title', { min: 1, max: 500 });
+        const attachmentVersion = documentSource.attachmentVersion ?? documentSource.annotationVersion ?? (Number.isFinite(body.attachmentVersion) ? body.attachmentVersion : null);
+
+        const privateConfig = store.getAiSettings(actor.actorKey);
+        const publicConfig = aiPublicConfig(privateConfig);
+        if (!publicConfig.configured) {
+          error(res, 503, 'ai_not_configured', 'AI 模型尚未配置');
+          return;
+        }
+
+        const promptVersion = 'altcanvas-document-map-v1';
+        const cachedAnalysis = store.getDocumentAnalysis(actor.actorKey, {
+          libraryType: documentSource.libraryType,
+          libraryId: documentSource.libraryId,
+          attachmentKey: documentSource.attachmentKey,
+          attachmentVersion,
+          model: publicConfig.model,
+          promptVersion
+        });
+
+        if (cachedAnalysis && cachedAnalysis.status === 'ready' && cachedAnalysis.graph) {
+          const result = store.projectDocumentAnalysisToBoard(actor.actorKey, boardId, {
+            model: publicConfig.model,
+            promptVersion,
+            document: { ...documentSource, title, pageCount: cachedAnalysis.pageCount || body.pages?.length || 1 },
+            graph: cachedAnalysis.graph,
+            cached: true
+          });
+          json(res, 201, { data: { ...result, cached: true } });
+          return;
+        }
+
+        if (body.checkOnly) {
+          json(res, 200, { data: { cached: false } });
+          return;
+        }
+
         if (!Array.isArray(body.pages) || body.pages.length < 1 || body.pages.length > 500) {
           throw new TypeError('pages must contain between 1 and 500 PDF pages');
         }
@@ -528,13 +1693,6 @@ export function createCanvasHandler(store, {
           const limitError = new Error(`PDF 可提取文本超过当前全文分析上限（${MAX_DOCUMENT_TEXT_CHARS} 字符）`);
           limitError.status = 413;
           throw limitError;
-        }
-
-        const privateConfig = store.getAiSettings(actor.actorKey);
-        const publicConfig = aiPublicConfig(privateConfig);
-        if (!publicConfig.configured) {
-          error(res, 503, 'ai_not_configured', 'AI 模型尚未配置');
-          return;
         }
 
         try {
@@ -591,6 +1749,368 @@ export function createCanvasHandler(store, {
         return;
       }
 
+      match = /^\/canvas\/workspaces\/([0-9a-f-]+)\/related-knowledge$/.exec(pathname);
+      if (match && method === 'POST') {
+        const workspaceId = match[1];
+        store.requireWorkspace(actor.actorKey, workspaceId);
+        const body = await readJson(req);
+        const focalText = body.focalText ? string(body.focalText, 'focalText', { max: 10_000 }) : '';
+        let focalFocal = null;
+        if (body.focalDocument) {
+          const focalSource = source(body.focalDocument, actor.session);
+          if (focalSource) {
+            focalFocal = {
+              libraryType: focalSource.libraryType,
+              libraryId: String(focalSource.libraryId),
+              itemKey: focalSource.itemKey
+            };
+          }
+        } else if (body.focalItemKey) {
+          focalFocal = {
+            libraryType: body.libraryType || 'user',
+            libraryId: String(body.libraryId || actor.session.userId),
+            itemKey: body.focalItemKey
+          };
+        }
+
+        let focalUnit = null;
+        if (body.focalUnitId) {
+          const unitIdStr = string(body.focalUnitId, 'focalUnitId', { max: 128 });
+          const activeTopicUnits = store.listTopicKnowledgeUnits(actor.actorKey, workspaceId);
+          focalUnit = activeTopicUnits.find(u => u.id === unitIdStr);
+          if (!focalUnit) {
+            throw new TypeError('focalUnitId not found in active topic knowledge units');
+          }
+          if (focalFocal) {
+            if (focalUnit.libraryType !== focalFocal.libraryType || String(focalUnit.libraryId) !== String(focalFocal.libraryId) || focalUnit.itemKey !== focalFocal.itemKey) {
+              throw new TypeError('focalUnitId does not match focalDocument');
+            }
+          } else {
+            focalFocal = { libraryType: focalUnit.libraryType, libraryId: String(focalUnit.libraryId), itemKey: focalUnit.itemKey };
+          }
+        }
+
+        const focalTriple = focalFocal ? `${focalFocal.libraryType}:${focalFocal.libraryId}:${focalFocal.itemKey}` : null;
+        const requestedLimit = body.limit !== undefined ? number(body.limit, 'limit', { min: 1, max: 20, integer: true }) : 5;
+
+        // Fetch candidate knowledge units from other documents in this topic
+        const candidates = store.listTopicKnowledgeUnits(actor.actorKey, workspaceId, { excludeFocal: focalFocal });
+        if (!candidates.length || !focalText) {
+          json(res, 200, { data: { relations: [] } });
+          return;
+        }
+
+        const privateConfig = store.getAiSettings(actor.actorKey);
+        const publicConfig = aiPublicConfig(privateConfig);
+
+        if (!publicConfig.configured) {
+          // Rule-based keyword matching fallback when AI is not configured
+          const keywords = focalText.toLowerCase().split(/[\s,，.。；;、]+/).filter(w => w.length >= 2).slice(0, 10);
+          const matched = candidates.filter(u => {
+            const text = `${u.title} ${u.body} ${u.evidenceQuote}`.toLowerCase();
+            return keywords.some(kw => text.includes(kw));
+          }).slice(0, requestedLimit);
+
+          json(res, 200, {
+            data: {
+              relations: matched.map(unit => ({
+                unit,
+                relationType: 'related',
+                confidence: 0.6,
+                reason: '关键词语义关联'
+              }))
+            }
+          });
+          return;
+        }
+
+        try {
+          const systemPrompt = [
+            '你是一位严谨的学术研报跨文档关联分析专家。',
+            '你的任务是在给定的焦点观点/论点与同主题下的其他研报知识单元之间，评估是否存在跨报告关联。',
+            '只输出一个 JSON 对象，不要 Markdown 代码块。',
+            'JSON schema:',
+            '{"relations": [',
+            '  {"unitId": "...", "relationType": "supports", "confidence": 0.88, "reason": "支撑论点：相同实证发现"}',
+            ']}',
+            '【关系类型】',
+            '- supports: 外部报告提供了支撑、相同结论或一致实证证据；',
+            '- contradicts: 外部报告提出了冲突、反驳、相反发现或质疑；',
+            '- extends: 外部报告提供了补充视角、深化拓展或延伸讨论；',
+            '- same_method: 外部报告采用了相似的研究方法或模型架构；',
+            '- context_differs: 结论在不同情境、样本或边界条件下存在差异；',
+            '- related: 一般性主题相关。',
+            '【严格准则】',
+            '1. 必须客观严谨，无明确关联则不推荐；',
+            '2. confidence 为 0.0 到 1.0 之间的浮点数；',
+            '3. reason 简要说明跨报告关联的核心理由（30字以内）。'
+          ].join('\n');
+
+          const candidateList = candidates.slice(0, 20).map((u, idx) => `[候选单元 ${idx + 1}] ID: ${u.id}\n来源研报: 《${u.documentTitle}》 (Doc #${u.itemKey}, p.${u.pageStart}-${u.pageEnd})\n标题/类别: [${u.type}] ${u.title}\n内容: ${u.body}\n原文证据: ${u.evidenceQuote || '无'}`).join('\n\n');
+          const userMessage = `【焦点观点/论点】\n${focalText}\n\n【其他研报候选知识单元】\n${candidateList}`;
+
+          const aiRes = await aiCompletion({
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: userMessage }
+            ],
+            temperature: 0.2
+          }, privateConfig);
+
+          let parsed = parseAiJson(aiRes);
+          if (!parsed || typeof parsed !== 'object') parsed = { relations: [] };
+          const rawRelations = Array.isArray(parsed.relations) ? parsed.relations : [];
+
+          const relations = [];
+          for (const rel of rawRelations) {
+            let unit = candidates.find(u => u.id === rel.unitId);
+            if (!unit && rel.unitId) {
+              const idxMatch = /^(?:\[?候选单元\s*|candidate[-_\s]*|unit-target[-_\s]*)([1-9][0-9]*)\]?$/i.exec(String(rel.unitId || '').trim());
+              if (idxMatch) {
+                const idx = Number(idxMatch[1]) - 1;
+                if (idx >= 0 && idx < candidates.length) unit = candidates[idx];
+              }
+            }
+            if (!unit) continue;
+
+            const targetTriple = `${unit.libraryType}:${unit.libraryId}:${unit.itemKey}`;
+            if (focalTriple && targetTriple === focalTriple) {
+              continue; // Exclude units from the same document
+            }
+
+            const relationType = ['supports', 'contradicts', 'extends', 'same_method', 'context_differs', 'related'].includes(rel.relationType)
+              ? rel.relationType : 'related';
+            const confidence = typeof rel.confidence === 'number' ? Math.max(0, Math.min(1, rel.confidence)) : 0.6;
+            const reason = string(rel.reason || '关联观点', 'reason', { max: 200 });
+
+            // Store discovered knowledge relation with verified focal unit ownership, topic membership, and cross-report constraint
+            if (body.focalUnitId) {
+              try {
+                const focalUnit = store.getKnowledgeUnit(actor.actorKey, string(body.focalUnitId, 'focalUnitId', { max: 128 }));
+                if (focalUnit) {
+                  const topicDocs = store.listTopicDocuments(actor.actorKey, workspaceId);
+                  const allowedTriples = new Set(topicDocs.map(d => `${d.libraryType}:${d.libraryId}:${d.itemKey}`));
+                  const focalTriple = `${focalUnit.libraryType}:${focalUnit.libraryId}:${focalUnit.itemKey}`;
+
+                  // Verify focalUnit matches focalDocument (if provided), belongs to topic, and is strictly cross-report (different document)
+                  const matchesFocalDoc = !focalFocal || (focalUnit.libraryType === focalFocal.libraryType && focalUnit.libraryId === focalFocal.libraryId && focalUnit.itemKey === focalFocal.itemKey);
+                  if (matchesFocalDoc && allowedTriples.has(focalTriple) && allowedTriples.has(targetTriple) && focalTriple !== targetTriple) {
+                    store.saveKnowledgeRelation(actor.actorKey, {
+                      sourceUnitId: focalUnit.id,
+                      targetUnitId: unit.id,
+                      relationType,
+                      confidence,
+                      reason
+                    });
+                  }
+                }
+              } catch {}
+            }
+
+            relations.push({
+              unit,
+              relationType,
+              confidence,
+              reason
+            });
+            if (relations.length >= requestedLimit) break;
+          }
+
+          json(res, 200, { data: { relations } });
+        } catch (aiErr) {
+          error(res, aiErr?.name === 'AbortError' ? 504 : 502, 'ai_gateway_error', aiErr.message);
+        }
+        return;
+      }
+
+      match = /^\/canvas\/boards\/([0-9a-f-]+)\/expand-related$/.exec(pathname);
+      if (match && method === 'POST') {
+        const boardId = match[1];
+        const board = store.requireBoard(actor.actorKey, boardId);
+        const body = await readJson(req);
+        const focalNodeId = string(body.focalNodeId, 'focalNodeId');
+        const focalNode = store.getNode(actor.actorKey, focalNodeId);
+        if (!focalNode || focalNode.boardId !== boardId) {
+          throw new TypeError('focal node not found on this board');
+        }
+
+        const relatedUnitsInput = Array.isArray(body.relatedUnits) ? body.relatedUnits.slice(0, 6) : [];
+        if (!relatedUnitsInput.length) {
+          json(res, 200, { data: { createdNodes: [], createdEdges: [] } });
+          return;
+        }
+
+        // Validate that requested units exist in DB, are owned by user, and belong to this topic workspace
+        const topicDocs = store.listTopicDocuments(actor.actorKey, board.workspaceId);
+        const allowedTriples = new Set(topicDocs.map(d => `${d.libraryType}:${d.libraryId}:${d.itemKey}`));
+
+        const timestamp = new Date().toISOString();
+        const createdNodes = [];
+        const createdEdges = [];
+
+        store.transaction(() => {
+          const startX = focalNode.x + focalNode.width + 60;
+          let startY = focalNode.y;
+          const cardWidth = 360;
+
+          for (const item of relatedUnitsInput) {
+            const rawUnitId = item.unitId || item.unit?.id;
+            if (!rawUnitId) continue;
+            const unitId = key(rawUnitId, 'relatedUnit.unitId', false);
+            const u = store.getKnowledgeUnit(actor.actorKey, unitId);
+            if (!u) continue; // Skip non-existent units
+
+            // Verify library triple belongs to the current workspace
+            const triple = `${u.libraryType}:${u.libraryId}:${u.itemKey}`;
+            if (!allowedTriples.has(triple)) continue;
+
+            const relationType = ['supports', 'contradicts', 'extends', 'same_method', 'context_differs', 'related'].includes(item.relationType)
+              ? item.relationType : 'related';
+            const reason = string(item.reason || relationType, 'reason', { max: 100 });
+
+            const evidencePageNum = u.evidencePage || u.pageStart || 1;
+            const sourceRefId = store.createSourceRef(actor.actorKey, {
+              libraryType: u.libraryType,
+              libraryId: u.libraryId,
+              itemKey: u.itemKey,
+              attachmentKey: u.attachmentKey || null,
+              annotationKey: null,
+              annotationVersion: null,
+              pageLabel: String(evidencePageNum),
+              position: {
+                pageIndex: Math.max(0, evidencePageNum - 1),
+                pageStart: u.pageStart || 1,
+                pageEnd: u.pageEnd || u.pageStart || 1,
+                textQuote: u.evidenceQuote || ''
+              },
+              quoteSnapshot: u.evidenceQuote || null
+            });
+
+            const textLen = (u.body || '').length;
+            const quoteLen = (u.evidenceQuote || '').length;
+            const extraForQuote = quoteLen ? 36 + Math.ceil(quoteLen / 24) * 16 : 0;
+            const height = Math.min(420, Math.max(88, 76 + extraForQuote + Math.ceil(textLen / 24) * 18));
+            const nodeId = crypto.randomUUID();
+
+            const relationColors = {
+              supports: '#10b981',
+              contradicts: '#f43f5e',
+              extends: '#3b82f6',
+              same_method: '#8b5cf6',
+              context_differs: '#f59e0b',
+              related: '#6366f1'
+            };
+
+            const relationBadge = {
+              supports: '支持论点',
+              contradicts: '质疑/冲突',
+              extends: '补充视角',
+              same_method: '同类方法',
+              context_differs: '情境差异',
+              related: '相关观点'
+            }[relationType] || '关联观点';
+
+            store.db.prepare(`
+              INSERT INTO nodes
+                (id, board_id, node_type, x, y, width, height, z_index, title, body, color, source_ref_id, created_at, updated_at)
+              VALUES (?, ?, 'ai_output', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `).run(
+              nodeId, boardId, startX, startY, cardWidth, height, focalNode.zIndex + 1,
+              `[${relationBadge}] ${u.title || u.type} · 《${u.documentTitle || u.itemKey}》`,
+              u.body, relationColors[relationType], sourceRefId, timestamp, timestamp
+            );
+
+            const edgeId = crypto.randomUUID();
+            store.db.prepare(`
+              INSERT INTO edges
+                (id, board_id, source_node_id, target_node_id, relation, label, created_at, updated_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            `).run(edgeId, boardId, focalNode.id, nodeId, relationType, reason, timestamp, timestamp);
+
+            createdNodes.push(store.getNode(actor.actorKey, nodeId));
+            createdEdges.push(store.getEdge(actor.actorKey, edgeId));
+
+            startY += height + 30;
+          }
+
+            store.recordEvent({
+              workspaceId: board.workspaceId,
+              boardId,
+              nodeId: focalNode.id,
+              actorKey: actor.actorKey,
+              type: 'board.expanded_related',
+              payload: {
+                focalNodeId,
+                nodeIds: createdNodes.map(n => n.id),
+                count: createdNodes.length
+              }
+            });
+          });
+
+          json(res, 201, { data: { createdNodes, createdEdges } });
+          return;
+        }
+
+        match = /^\/canvas\/boards\/([0-9a-f-]+)\/collapse-related$/.exec(pathname);
+        if (match && method === 'POST') {
+          const boardId = match[1];
+          const board = store.requireBoard(actor.actorKey, boardId);
+          const body = await readJson(req);
+          const focalNodeId = string(body.focalNodeId, 'focalNodeId');
+          const focalNode = store.getNode(actor.actorKey, focalNodeId);
+          if (!focalNode || focalNode.boardId !== boardId) {
+            throw new TypeError('valid focalNodeId is required on this board');
+          }
+
+          const requestedNodeIds = Array.isArray(body.nodeIds) ? body.nodeIds.map(String) : [];
+          if (!requestedNodeIds.length) {
+            json(res, 200, { data: { collapsedCount: 0 } });
+            return;
+          }
+
+          // Query provenance events to strictly verify which nodes were expanded by /expand-related from this focalNode
+          const expandEvents = store.db.prepare(`
+            SELECT payload_json FROM provenance_events
+            WHERE board_id = ? AND actor_key = ? AND event_type = 'board.expanded_related'
+          `).all(boardId, actor.actorKey);
+          const provenExpandedNodeIds = new Set();
+          for (const ev of expandEvents) {
+            let payload = null;
+            try { payload = JSON.parse(ev.payload_json); } catch {}
+            if (payload?.focalNodeId === focalNodeId && Array.isArray(payload.nodeIds)) {
+              payload.nodeIds.forEach(id => provenExpandedNodeIds.add(id));
+            }
+          }
+
+          const safeNodeIdsToDelete = requestedNodeIds.filter(nid => {
+            if (!provenExpandedNodeIds.has(nid)) return false;
+            const node = store.getNode(actor.actorKey, nid);
+            return node && node.boardId === boardId && node.type === 'ai_output';
+          });
+
+          if (safeNodeIdsToDelete.length) {
+            store.transaction(() => {
+              for (const nodeId of safeNodeIdsToDelete) {
+                const node = store.getNode(actor.actorKey, nodeId);
+                if (node && node.boardId === boardId) {
+                  store.deleteNode(actor.actorKey, nodeId, node.version);
+                }
+              }
+              store.recordEvent({
+                workspaceId: board.workspaceId,
+                boardId,
+                nodeId: focalNodeId,
+                actorKey: actor.actorKey,
+                type: 'board.collapsed_related',
+                payload: { nodeIds: safeNodeIdsToDelete }
+              });
+            });
+          }
+
+          json(res, 200, { data: { collapsedCount: safeNodeIdsToDelete.length } });
+          return;
+        }
+
       match = /^\/canvas\/workspaces\/([0-9a-f-]+)$/.exec(pathname);
       if (match && method === 'GET') {
         const resource = store.getWorkspace(actor.actorKey, match[1]);
@@ -611,10 +2131,169 @@ export function createCanvasHandler(store, {
           return;
         }
         const body = await readJson(req);
-        const resource = store.updateWorkspace(actor.actorKey, match[1], version, {
-          name: string(body.name, 'name', { min: 1, max: 200 })
-        });
+        const changes = {};
+        if (body.name !== undefined) changes.name = string(body.name, 'name', { min: 1, max: 200 });
+        if (body.description !== undefined) changes.description = string(body.description, 'description', { max: 5000 });
+        if (body.researchQuestion !== undefined) changes.researchQuestion = string(body.researchQuestion, 'researchQuestion', { max: 2000 });
+        if (body.inclusionRules !== undefined) changes.inclusionRules = string(body.inclusionRules, 'inclusionRules', { max: 5000 });
+        if (body.exclusionRules !== undefined) changes.exclusionRules = string(body.exclusionRules, 'exclusionRules', { max: 5000 });
+        if (!Object.keys(changes).length) throw new TypeError('no supported workspace changes');
+        const resource = store.updateWorkspace(actor.actorKey, match[1], version, changes);
         json(res, 200, { data: resource }, { ETag: etag(resource.version) });
+        return;
+      }
+
+      match = /^\/canvas\/workspaces\/([0-9a-f-]+)\/documents$/.exec(pathname);
+      if (match && method === 'GET') {
+        const status = url.searchParams.get('status') || undefined;
+        const docs = store.listTopicDocuments(actor.actorKey, match[1], { status });
+        json(res, 200, { data: docs });
+        return;
+      }
+      if (match && method === 'POST') {
+        const body = await readJson(req);
+        const input = topicDocumentInput(body, actor.session);
+        const resource = store.addTopicDocument(actor.actorKey, match[1], input);
+        json(res, 201, { data: resource }, { ETag: etag(resource.version) });
+        return;
+      }
+
+      match = /^\/canvas\/topic-documents\/([0-9a-f-]+)$/.exec(pathname);
+      if (match && method === 'GET') {
+        const resource = store.getTopicDocument(actor.actorKey, match[1]);
+        if (!resource) throw new CanvasNotFoundError('topic document not found');
+        json(res, 200, { data: resource }, { ETag: etag(resource.version) });
+        return;
+      }
+      if (match && ['PATCH', 'DELETE'].includes(method)) {
+        const version = versionFromIfMatch(req);
+        if (version === null) {
+          error(res, 428, 'precondition_required', 'A valid If-Match header is required');
+          return;
+        }
+        if (method === 'DELETE') {
+          store.removeTopicDocument(actor.actorKey, match[1], version);
+          res.writeHead(204, { 'Cache-Control': 'no-store' });
+          res.end();
+          return;
+        }
+        const body = await readJson(req);
+        const changes = topicDocumentChanges(body);
+        const resource = store.updateTopicDocument(actor.actorKey, match[1], version, changes);
+        json(res, 200, { data: resource }, { ETag: etag(resource.version) });
+        return;
+      }
+
+      match = /^\/canvas\/workspaces\/([0-9a-f-]+)\/collection-bindings$/.exec(pathname);
+      if (match && method === 'GET') {
+        const bindings = store.listCollectionBindings(actor.actorKey, match[1]);
+        json(res, 200, { data: bindings });
+        return;
+      }
+      if (match && method === 'POST') {
+        const body = await readJson(req);
+        const input = collectionBindingInput(body, actor.session);
+        const resource = store.addCollectionBinding(actor.actorKey, match[1], input);
+        json(res, 201, { data: resource }, { ETag: etag(resource.version) });
+        return;
+      }
+
+      match = /^\/canvas\/collection-bindings\/([0-9a-f-]+)$/.exec(pathname);
+      if (match && method === 'GET') {
+        const resource = store.getCollectionBinding(actor.actorKey, match[1]);
+        if (!resource) throw new CanvasNotFoundError('collection binding not found');
+        json(res, 200, { data: resource }, { ETag: etag(resource.version) });
+        return;
+      }
+      if (match && ['PATCH', 'DELETE'].includes(method)) {
+        const version = versionFromIfMatch(req);
+        if (version === null) {
+          error(res, 428, 'precondition_required', 'A valid If-Match header is required');
+          return;
+        }
+        if (method === 'DELETE') {
+          store.removeCollectionBinding(actor.actorKey, match[1], version);
+          res.writeHead(204, { 'Cache-Control': 'no-store' });
+          res.end();
+          return;
+        }
+        const body = await readJson(req);
+        const changes = collectionBindingChanges(body);
+        const resource = store.updateCollectionBinding(actor.actorKey, match[1], version, changes);
+        json(res, 200, { data: resource }, { ETag: etag(resource.version) });
+        return;
+      }
+
+      match = /^\/canvas\/collection-bindings\/([0-9a-f-]+)\/sync$/.exec(pathname);
+      if (match && method === 'POST') {
+        const binding = store.getCollectionBinding(actor.actorKey, match[1]);
+        if (!binding) throw new CanvasNotFoundError('collection binding not found');
+
+        const prefix = binding.libraryType === 'group' ? 'groups' : 'users';
+        const basePath = `/${prefix}/${encodeURIComponent(binding.libraryId)}/collections/${encodeURIComponent(binding.collectionKey)}/items`;
+        const since = binding.lastLibraryVersion ? Number(binding.lastLibraryVersion) : undefined;
+
+        let scannedCount = 0;
+        let addedToTopic = 0;
+        let fetchResult;
+        try {
+          fetchResult = await fetchAllUpstreamItems(fetchAltero, actor.session, basePath, {
+            since,
+            limitPerPage: 100,
+            onPage: async (itemsChunk) => {
+              const enrichedChunk = await mapWithConcurrency(itemsChunk, 6, item => resolveItemAttachment(fetchAltero, actor.session, binding.libraryType, binding.libraryId, item));
+              const entries = enrichedChunk
+                .map(item => normalizeZoteroItemToInboxEntry(item, binding.libraryType, binding.libraryId))
+                .filter(Boolean);
+              scannedCount += entries.length;
+              if (entries.length) {
+                store.transaction(() => {
+                  const upserted = store.upsertInboxEntries(actor.actorKey, entries);
+                  if (binding.mode === 'inbound') {
+                    for (const entry of upserted) {
+                      store.addTopicDocument(actor.actorKey, binding.workspaceId, {
+                        libraryType: entry.libraryType,
+                        libraryId: entry.libraryId,
+                        itemKey: entry.itemKey,
+                        attachmentKey: entry.attachmentKey,
+                        status: 'inbox',
+                        origin: 'collection_sync',
+                        itemVersion: entry.itemVersion,
+                        attachmentVersion: entry.attachmentVersion
+                      });
+                      store.syncTopicDocumentAttachment(actor.actorKey, binding.workspaceId, {
+                        libraryType: entry.libraryType,
+                        libraryId: entry.libraryId,
+                        itemKey: entry.itemKey,
+                        attachmentKey: entry.attachmentKey,
+                        attachmentVersion: entry.attachmentVersion
+                      });
+                      addedToTopic += 1;
+                    }
+                  }
+                });
+              }
+            }
+          });
+        } catch (upstreamErr) {
+          error(res, 502, 'upstream_error', `Collection sync failed: ${upstreamErr.message}`);
+          return;
+        }
+
+        const lastVersion = fetchResult.lastModifiedVersion || binding.lastLibraryVersion || 0;
+        const updatedBinding = store.updateCollectionBinding(actor.actorKey, binding.id, binding.version, {
+          lastLibraryVersion: lastVersion,
+          lastSyncedAt: new Date().toISOString()
+        });
+
+        json(res, 200, {
+          data: {
+            binding: updatedBinding,
+            syncedCount: scannedCount,
+            addedToTopicCount: addedToTopic,
+            lastLibraryVersion: lastVersion
+          }
+        });
         return;
       }
 
@@ -765,7 +2444,8 @@ export function createCanvasHandler(store, {
         const newY = minY;
         const textLen = (responseText || '').trim().length;
         const width = textLen > 300 ? 440 : 380;
-        const height = Math.min(500, Math.max(240, 120 + Math.ceil(textLen / Math.floor(width / 14)) * 20));
+        const charsPerLine = Math.floor(width / 13);
+        const height = Math.min(500, Math.max(88, 76 + Math.ceil(textLen / charsPerLine) * 18));
 
         const result = store.createAiSynthesisNode(actor.actorKey, boardId, {
           task,

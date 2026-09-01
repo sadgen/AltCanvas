@@ -9,6 +9,24 @@ const NODE_TYPES = new Set([
 const EDGE_RELATIONS = new Set([
   'related', 'supports', 'contradicts', 'causes', 'cites', 'custom'
 ]);
+const TOPIC_DOC_STATUSES = new Set([
+  'inbox', 'accepted', 'deferred', 'ignored', 'removed'
+]);
+const TOPIC_ANALYSIS_STATUSES = new Set([
+  'not_started', 'queued', 'running', 'ready', 'failed', 'stale'
+]);
+const TOPIC_DOC_ORIGINS = new Set([
+  'collection_sync', 'canvas_import', 'manual', 'ai_suggestion'
+]);
+const COLLECTION_BINDING_MODES = new Set([
+  'inbound', 'confirm_both'
+]);
+const INBOX_ENTRY_STATES = new Set([
+  'new', 'classifying', 'ready', 'accepted', 'deferred', 'ignored', 'failed'
+]);
+const JOB_STATES = new Set([
+  'queued', 'running', 'completed', 'failed', 'cancelled'
+]);
 
 export class CanvasNotFoundError extends Error {}
 export class CanvasConflictError extends Error {}
@@ -85,6 +103,10 @@ function workspaceRow(row) {
   return {
     id: row.id,
     name: row.name,
+    description: row.description || '',
+    researchQuestion: row.research_question || '',
+    inclusionRules: row.inclusion_rules || '',
+    exclusionRules: row.exclusion_rules || '',
     version: row.version,
     createdAt: row.created_at,
     updatedAt: row.updated_at
@@ -173,6 +195,169 @@ function provenanceRow(row) {
     type: row.event_type,
     payload: parseJson(row.payload_json),
     createdAt: row.created_at
+  };
+}
+
+function topicDocumentRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    libraryType: row.library_type,
+    libraryId: row.library_id,
+    itemKey: row.item_key,
+    attachmentKey: row.attachment_key,
+    status: row.status,
+    analysisStatus: row.analysis_status,
+    origin: row.origin,
+    classificationConfidence: row.classification_confidence,
+    classificationReason: row.classification_reason,
+    itemVersion: row.item_version,
+    attachmentVersion: row.attachment_version,
+    version: row.version,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function collectionBindingRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    libraryType: row.library_type,
+    libraryId: row.library_id,
+    collectionKey: row.collection_key,
+    mode: row.mode,
+    lastLibraryVersion: row.last_library_version,
+    lastSyncedAt: row.last_synced_at,
+    enabled: Boolean(row.enabled),
+    version: row.version,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function inboxEntryRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    libraryType: row.library_type,
+    libraryId: row.library_id,
+    itemKey: row.item_key,
+    attachmentKey: row.attachment_key,
+    attachmentVersion: row.attachment_version !== undefined && row.attachment_version !== null ? row.attachment_version : null,
+    detectedFrom: row.detected_from,
+    title: row.title || '',
+    cleanTitle: row.clean_title || null,
+    institution: row.institution || null,
+    creators: parseJson(row.creators_json) || [],
+    year: row.year,
+    abstractNote: row.abstract_note || '',
+    collectionKeys: parseJson(row.collection_keys_json) || [],
+    tags: parseJson(row.tags_json) || [],
+    itemVersion: row.item_version,
+    state: row.state,
+    firstSeenAt: row.first_seen_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function documentMetaRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    libraryType: row.library_type,
+    libraryId: row.library_id,
+    itemKey: row.item_key,
+    attachmentKey: row.attachment_key || null,
+    attachmentVersion: row.attachment_version ?? null,
+    cleanTitle: row.clean_title,
+    institution: row.institution || '',
+    reportTitle: row.report_title || '',
+    subtitle: row.subtitle || '',
+    year: row.year || '',
+    summary: row.summary || '',
+    source: row.source || 'ai',
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function jobRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    jobType: row.job_type,
+    resourceType: row.resource_type,
+    resourceId: row.resource_id,
+    state: row.state,
+    attempts: row.attempts,
+    availableAt: row.available_at,
+    startedAt: row.started_at,
+    finishedAt: row.finished_at,
+    errorCode: row.error_code,
+    resultSummary: parseJson(row.result_summary_json),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function documentAnalysisRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    libraryType: row.library_type,
+    libraryId: row.library_id,
+    itemKey: row.item_key,
+    attachmentKey: row.attachment_key,
+    attachmentVersion: row.attachment_version,
+    model: row.model,
+    promptVersion: row.prompt_version,
+    status: row.status,
+    documentTitle: row.document_title || '',
+    pageCount: row.page_count,
+    graph: parseJson(row.graph_json),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function knowledgeUnitRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    analysisId: row.analysis_id,
+    type: row.type,
+    libraryType: row.library_type,
+    libraryId: row.library_id,
+    itemKey: row.item_key,
+    attachmentKey: row.attachment_key,
+    documentTitle: row.document_title || '',
+    title: row.title || '',
+    body: row.body || '',
+    pageStart: row.page_start,
+    pageEnd: row.page_end,
+    evidencePage: row.evidence_page !== undefined && row.evidence_page !== null ? row.evidence_page : (row.page_start || 1),
+    evidenceQuote: row.evidence_quote || '',
+    position: parseJson(row.position_json),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function knowledgeRelationRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    sourceUnitId: row.source_unit_id,
+    targetUnitId: row.target_unit_id,
+    relationType: row.relation_type,
+    confidence: row.confidence,
+    reason: row.reason || '',
+    status: row.status,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
   };
 }
 
@@ -314,10 +499,343 @@ export class CanvasStore {
         this.db.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(2, nowIso());
       });
     }
-    if (current > 2) throw new Error(`Canvas database schema ${current} is newer than this server supports`);
+    if (current < 3) {
+      this.transaction(() => {
+        const cols = this.db.prepare('PRAGMA table_info(workspaces)').all().map(c => c.name);
+        if (!cols.includes('description')) {
+          this.db.exec("ALTER TABLE workspaces ADD COLUMN description TEXT NOT NULL DEFAULT ''");
+        }
+        if (!cols.includes('research_question')) {
+          this.db.exec("ALTER TABLE workspaces ADD COLUMN research_question TEXT NOT NULL DEFAULT ''");
+        }
+        if (!cols.includes('inclusion_rules')) {
+          this.db.exec("ALTER TABLE workspaces ADD COLUMN inclusion_rules TEXT NOT NULL DEFAULT ''");
+        }
+        if (!cols.includes('exclusion_rules')) {
+          this.db.exec("ALTER TABLE workspaces ADD COLUMN exclusion_rules TEXT NOT NULL DEFAULT ''");
+        }
+
+        this.db.exec(`
+          CREATE TABLE IF NOT EXISTS topic_documents (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+            owner_key TEXT NOT NULL,
+            library_type TEXT NOT NULL CHECK (library_type IN ('user', 'group')),
+            library_id TEXT NOT NULL,
+            item_key TEXT NOT NULL,
+            attachment_key TEXT,
+            status TEXT NOT NULL DEFAULT 'inbox' CHECK (status IN ('inbox', 'accepted', 'deferred', 'ignored', 'removed')),
+            analysis_status TEXT NOT NULL DEFAULT 'not_started' CHECK (analysis_status IN ('not_started', 'queued', 'running', 'ready', 'failed', 'stale')),
+            origin TEXT NOT NULL DEFAULT 'manual' CHECK (origin IN ('collection_sync', 'canvas_import', 'manual', 'ai_suggestion')),
+            classification_confidence REAL,
+            classification_reason TEXT,
+            item_version INTEGER,
+            attachment_version INTEGER,
+            version INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            deleted_at TEXT
+          ) STRICT;
+          CREATE UNIQUE INDEX IF NOT EXISTS topic_documents_unique_active_idx ON topic_documents(workspace_id, library_type, library_id, item_key) WHERE deleted_at IS NULL;
+          CREATE INDEX IF NOT EXISTS topic_documents_owner_idx ON topic_documents(owner_key, workspace_id, status, deleted_at);
+
+          CREATE TABLE IF NOT EXISTS collection_bindings (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+            owner_key TEXT NOT NULL,
+            library_type TEXT NOT NULL CHECK (library_type IN ('user', 'group')),
+            library_id TEXT NOT NULL,
+            collection_key TEXT NOT NULL,
+            mode TEXT NOT NULL DEFAULT 'inbound' CHECK (mode IN ('inbound', 'confirm_both')),
+            last_library_version INTEGER NOT NULL DEFAULT 0,
+            last_synced_at TEXT,
+            enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+            version INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            deleted_at TEXT
+          ) STRICT;
+          CREATE UNIQUE INDEX IF NOT EXISTS collection_bindings_unique_active_idx ON collection_bindings(workspace_id, library_type, library_id, collection_key) WHERE deleted_at IS NULL;
+          CREATE INDEX IF NOT EXISTS collection_bindings_owner_idx ON collection_bindings(owner_key, workspace_id, deleted_at);
+
+          CREATE TABLE IF NOT EXISTS inbox_entries (
+            id TEXT PRIMARY KEY,
+            owner_key TEXT NOT NULL,
+            library_type TEXT NOT NULL CHECK (library_type IN ('user', 'group')),
+            library_id TEXT NOT NULL,
+            item_key TEXT NOT NULL,
+            attachment_key TEXT,
+            detected_from TEXT NOT NULL,
+            title TEXT NOT NULL DEFAULT '',
+            creators_json TEXT NOT NULL DEFAULT '[]',
+            year INTEGER,
+            abstract_note TEXT NOT NULL DEFAULT '',
+            collection_keys_json TEXT NOT NULL DEFAULT '[]',
+            tags_json TEXT NOT NULL DEFAULT '[]',
+            item_version INTEGER,
+            state TEXT NOT NULL DEFAULT 'new' CHECK (state IN ('new', 'classifying', 'ready', 'accepted', 'deferred', 'ignored', 'failed')),
+            first_seen_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            deleted_at TEXT
+          ) STRICT;
+          CREATE UNIQUE INDEX IF NOT EXISTS inbox_entries_unique_active_idx ON inbox_entries(owner_key, library_type, library_id, item_key) WHERE deleted_at IS NULL;
+          CREATE INDEX IF NOT EXISTS inbox_entries_owner_state_idx ON inbox_entries(owner_key, state, deleted_at, updated_at);
+
+          CREATE TABLE IF NOT EXISTS jobs (
+            id TEXT PRIMARY KEY,
+            owner_key TEXT NOT NULL,
+            job_type TEXT NOT NULL,
+            resource_type TEXT NOT NULL,
+            resource_id TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'queued' CHECK (state IN ('queued', 'running', 'completed', 'failed', 'cancelled')),
+            attempts INTEGER NOT NULL DEFAULT 0,
+            available_at TEXT NOT NULL,
+            started_at TEXT,
+            finished_at TEXT,
+            error_code TEXT,
+            result_summary_json TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          ) STRICT;
+          CREATE INDEX IF NOT EXISTS jobs_runner_idx ON jobs(state, available_at, attempts);
+          CREATE INDEX IF NOT EXISTS jobs_owner_idx ON jobs(owner_key, job_type, state);
+        `);
+
+        if (this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='topic_documents'").get()) {
+          const docCols = this.db.prepare('PRAGMA table_info(topic_documents)').all().map(c => c.name);
+          if (!docCols.includes('version')) {
+            this.db.exec('ALTER TABLE topic_documents ADD COLUMN version INTEGER NOT NULL DEFAULT 1');
+          }
+        }
+        if (this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='collection_bindings'").get()) {
+          const bindCols = this.db.prepare('PRAGMA table_info(collection_bindings)').all().map(c => c.name);
+          if (!bindCols.includes('version')) {
+            this.db.exec('ALTER TABLE collection_bindings ADD COLUMN version INTEGER NOT NULL DEFAULT 1');
+          }
+        }
+
+        this.db.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(3, nowIso());
+      });
+    }
+    if (current < 4) {
+      this.transaction(() => {
+        this.db.exec(`
+          CREATE TABLE IF NOT EXISTS document_analyses (
+            id TEXT PRIMARY KEY,
+            owner_key TEXT NOT NULL,
+            library_type TEXT NOT NULL CHECK (library_type IN ('user', 'group')),
+            library_id TEXT NOT NULL,
+            item_key TEXT NOT NULL,
+            attachment_key TEXT NOT NULL,
+            attachment_version INTEGER,
+            model TEXT NOT NULL,
+            prompt_version TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'ready' CHECK (status IN ('queued', 'running', 'ready', 'failed', 'stale')),
+            document_title TEXT NOT NULL DEFAULT '',
+            page_count INTEGER NOT NULL DEFAULT 1,
+            graph_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          ) STRICT;
+          CREATE UNIQUE INDEX IF NOT EXISTS document_analyses_unique_cache_idx
+            ON document_analyses(owner_key, library_type, library_id, attachment_key, COALESCE(attachment_version, 0), model, prompt_version);
+          CREATE INDEX IF NOT EXISTS document_analyses_lookup_idx
+            ON document_analyses(owner_key, library_type, library_id, item_key, status);
+        `);
+        this.db.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(4, nowIso());
+      });
+    }
+    if (current < 5) {
+      this.transaction(() => {
+        this.db.exec(`
+          CREATE TABLE IF NOT EXISTS document_metas (
+            id TEXT PRIMARY KEY,
+            owner_key TEXT NOT NULL,
+            library_type TEXT NOT NULL CHECK (library_type IN ('user', 'group')),
+            library_id TEXT NOT NULL,
+            item_key TEXT NOT NULL,
+            attachment_key TEXT,
+            attachment_version INTEGER,
+            clean_title TEXT NOT NULL,
+            institution TEXT,
+            report_title TEXT,
+            subtitle TEXT,
+            year TEXT,
+            summary TEXT,
+            source TEXT NOT NULL DEFAULT 'ai',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          ) STRICT;
+          CREATE UNIQUE INDEX IF NOT EXISTS document_metas_unique_idx
+            ON document_metas(owner_key, library_type, library_id, item_key);
+          CREATE INDEX IF NOT EXISTS document_metas_owner_idx
+            ON document_metas(owner_key, library_type, library_id);
+        `);
+        const metaCols = this.db.prepare('PRAGMA table_info(document_metas)').all().map(c => c.name);
+        if (!metaCols.includes('attachment_key')) {
+          this.db.exec("ALTER TABLE document_metas ADD COLUMN attachment_key TEXT");
+        }
+        if (!metaCols.includes('attachment_version')) {
+          this.db.exec("ALTER TABLE document_metas ADD COLUMN attachment_version INTEGER");
+        }
+        const inboxCols = this.db.prepare('PRAGMA table_info(inbox_entries)').all().map(c => c.name);
+        if (!inboxCols.includes('clean_title')) {
+          this.db.exec("ALTER TABLE inbox_entries ADD COLUMN clean_title TEXT");
+        }
+        if (!inboxCols.includes('institution')) {
+          this.db.exec("ALTER TABLE inbox_entries ADD COLUMN institution TEXT");
+        }
+        this.db.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(5, nowIso());
+      });
+    }
+    if (current < 6) {
+      this.transaction(() => {
+        this.db.exec(`
+          DROP INDEX IF EXISTS document_analyses_unique_cache_idx;
+          CREATE UNIQUE INDEX IF NOT EXISTS document_analyses_unique_cache_idx
+            ON document_analyses(owner_key, library_type, library_id, attachment_key, COALESCE(attachment_version, 0), model, prompt_version);
+        `);
+        this.db.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(6, nowIso());
+      });
+    }
+    if (current < 7) {
+      this.transaction(() => {
+        this.db.exec(`
+          CREATE TABLE IF NOT EXISTS knowledge_units (
+            id TEXT PRIMARY KEY,
+            owner_key TEXT NOT NULL,
+            analysis_id TEXT NOT NULL REFERENCES document_analyses(id),
+            type TEXT NOT NULL CHECK (type IN ('overview', 'section', 'concept', 'claim')),
+            library_type TEXT NOT NULL CHECK (library_type IN ('user', 'group')),
+            library_id TEXT NOT NULL,
+            item_key TEXT NOT NULL,
+            attachment_key TEXT,
+            document_title TEXT NOT NULL DEFAULT '',
+            title TEXT NOT NULL DEFAULT '',
+            body TEXT NOT NULL DEFAULT '',
+            page_start INTEGER NOT NULL DEFAULT 1,
+            page_end INTEGER NOT NULL DEFAULT 1,
+            evidence_page INTEGER NOT NULL DEFAULT 1,
+            evidence_quote TEXT NOT NULL DEFAULT '',
+            position_json TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          ) STRICT;
+          CREATE INDEX IF NOT EXISTS knowledge_units_owner_item_idx
+            ON knowledge_units(owner_key, library_type, library_id, item_key);
+          CREATE INDEX IF NOT EXISTS knowledge_units_analysis_idx
+            ON knowledge_units(owner_key, analysis_id);
+
+          CREATE TABLE IF NOT EXISTS knowledge_relations (
+            id TEXT PRIMARY KEY,
+            owner_key TEXT NOT NULL,
+            source_unit_id TEXT NOT NULL REFERENCES knowledge_units(id) ON DELETE CASCADE,
+            target_unit_id TEXT NOT NULL REFERENCES knowledge_units(id) ON DELETE CASCADE,
+            relation_type TEXT NOT NULL CHECK (relation_type IN ('supports', 'contradicts', 'extends', 'same_method', 'context_differs', 'related')),
+            confidence REAL NOT NULL DEFAULT 0.5,
+            reason TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'suggested' CHECK (status IN ('suggested', 'confirmed', 'rejected')),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            CHECK (source_unit_id <> target_unit_id)
+          ) STRICT;
+          CREATE INDEX IF NOT EXISTS knowledge_relations_source_idx
+            ON knowledge_relations(owner_key, source_unit_id, status);
+          CREATE INDEX IF NOT EXISTS knowledge_relations_target_idx
+            ON knowledge_relations(owner_key, target_unit_id, status);
+        `);
+        this.db.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(7, nowIso());
+      });
+    }
+    if (current < 8) {
+      this.transaction(() => {
+        const kuCols = this.db.prepare('PRAGMA table_info(knowledge_units)').all().map(c => c.name);
+        if (!kuCols.includes('evidence_page')) {
+          this.db.exec("ALTER TABLE knowledge_units ADD COLUMN evidence_page INTEGER NOT NULL DEFAULT 1");
+          this.db.exec("UPDATE knowledge_units SET evidence_page = page_start WHERE page_start IS NOT NULL AND page_start > 0");
+
+          // Accurately update existing knowledge units in-place by primary key from graph_json without title collision
+          const analyses = this.db.prepare("SELECT * FROM document_analyses WHERE status = 'ready'").all();
+          for (const a of analyses) {
+            const graph = parseJson(a.graph_json);
+            if (!graph) continue;
+            if (graph.evidencePage) {
+              this.db.prepare("UPDATE knowledge_units SET evidence_page = ? WHERE analysis_id = ? AND type = 'overview'").run(graph.evidencePage, a.id);
+            }
+            if (Array.isArray(graph.sections)) {
+              const secUnits = this.db.prepare("SELECT id FROM knowledge_units WHERE analysis_id = ? AND type = 'section' ORDER BY rowid ASC").all(a.id);
+              graph.sections.forEach((sec, idx) => {
+                if (secUnits[idx] && sec.evidencePage) {
+                  this.db.prepare("UPDATE knowledge_units SET evidence_page = ? WHERE id = ?").run(sec.evidencePage, secUnits[idx].id);
+                }
+              });
+            }
+            if (Array.isArray(graph.concepts)) {
+              const conceptUnits = this.db.prepare("SELECT id FROM knowledge_units WHERE analysis_id = ? AND type = 'concept' ORDER BY rowid ASC").all(a.id);
+              graph.concepts.forEach((concept, idx) => {
+                if (conceptUnits[idx] && concept.evidencePage) {
+                  this.db.prepare("UPDATE knowledge_units SET evidence_page = ? WHERE id = ?").run(concept.evidencePage, conceptUnits[idx].id);
+                }
+              });
+            }
+            if (Array.isArray(graph.claims)) {
+              const claimUnits = this.db.prepare("SELECT id FROM knowledge_units WHERE analysis_id = ? AND type = 'claim' ORDER BY rowid ASC").all(a.id);
+              graph.claims.forEach((claim, idx) => {
+                if (claimUnits[idx] && claim.evidencePage) {
+                  this.db.prepare("UPDATE knowledge_units SET evidence_page = ? WHERE id = ?").run(claim.evidencePage, claimUnits[idx].id);
+                }
+              });
+            }
+          }
+        }
+
+        // Recreate knowledge_relations table with ON DELETE CASCADE for existing databases
+        this.db.exec(`
+          CREATE TABLE IF NOT EXISTS knowledge_relations_new (
+            id TEXT PRIMARY KEY,
+            owner_key TEXT NOT NULL,
+            source_unit_id TEXT NOT NULL REFERENCES knowledge_units(id) ON DELETE CASCADE,
+            target_unit_id TEXT NOT NULL REFERENCES knowledge_units(id) ON DELETE CASCADE,
+            relation_type TEXT NOT NULL CHECK (relation_type IN ('supports', 'contradicts', 'extends', 'same_method', 'context_differs', 'related')),
+            confidence REAL NOT NULL DEFAULT 0.5,
+            reason TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'suggested' CHECK (status IN ('suggested', 'confirmed', 'rejected')),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            CHECK (source_unit_id <> target_unit_id)
+          ) STRICT;
+          INSERT OR IGNORE INTO knowledge_relations_new SELECT * FROM knowledge_relations;
+          DROP TABLE knowledge_relations;
+          ALTER TABLE knowledge_relations_new RENAME TO knowledge_relations;
+          CREATE INDEX IF NOT EXISTS knowledge_relations_source_idx
+            ON knowledge_relations(owner_key, source_unit_id, status);
+          CREATE INDEX IF NOT EXISTS knowledge_relations_target_idx
+            ON knowledge_relations(owner_key, target_unit_id, status);
+        `);
+
+        this.db.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(8, nowIso());
+      });
+    }
+    if (current < 9) {
+      this.transaction(() => {
+        const hasInbox = this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='inbox_entries'").get();
+        if (hasInbox) {
+          const inboxCols = this.db.prepare('PRAGMA table_info(inbox_entries)').all().map(c => c.name);
+          if (!inboxCols.includes('attachment_version')) {
+            this.db.exec("ALTER TABLE inbox_entries ADD COLUMN attachment_version INTEGER");
+          }
+        }
+        this.db.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(9, nowIso());
+      });
+    }
+    if (current > 9) throw new Error(`Canvas database schema ${current} is newer than this server supports`);
   }
 
   transaction(callback) {
+    if (this._inTransaction) {
+      return callback();
+    }
+    this._inTransaction = true;
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const result = callback();
@@ -326,6 +844,8 @@ export class CanvasStore {
     } catch (error) {
       this.db.exec('ROLLBACK');
       throw error;
+    } finally {
+      this._inTransaction = false;
     }
   }
 
@@ -388,27 +908,47 @@ export class CanvasStore {
     return workspace;
   }
 
-  createWorkspace(actorKey, { name }) {
+  createWorkspace(actorKey, { name, description = '', researchQuestion = '', inclusionRules = '', exclusionRules = '' }) {
     const workspaceId = id();
     const timestamp = nowIso();
     this.transaction(() => {
       this.db.prepare(`
-        INSERT INTO workspaces(id, owner_key, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)
-      `).run(workspaceId, actorKey, name, timestamp, timestamp);
-      this.recordEvent({ workspaceId, actorKey, type: 'workspace.created', payload: { name } });
+        INSERT INTO workspaces
+          (id, owner_key, name, description, research_question, inclusion_rules, exclusion_rules, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(workspaceId, actorKey, name, description, researchQuestion, inclusionRules, exclusionRules, timestamp, timestamp);
+      this.recordEvent({
+        workspaceId, actorKey, type: 'workspace.created',
+        payload: { name, description, researchQuestion }
+      });
     });
     return this.getWorkspace(actorKey, workspaceId);
   }
 
-  updateWorkspace(actorKey, workspaceId, version, { name }) {
-    this.requireWorkspace(actorKey, workspaceId);
+  updateWorkspace(actorKey, workspaceId, version, changes = {}) {
+    const current = this.requireWorkspace(actorKey, workspaceId);
+    const name = changes.name !== undefined ? changes.name : current.name;
+    const description = changes.description !== undefined ? changes.description : current.description;
+    const researchQuestion = changes.researchQuestion !== undefined ? changes.researchQuestion : current.researchQuestion;
+    const inclusionRules = changes.inclusionRules !== undefined ? changes.inclusionRules : current.inclusionRules;
+    const exclusionRules = changes.exclusionRules !== undefined ? changes.exclusionRules : current.exclusionRules;
     this.transaction(() => {
       const result = this.db.prepare(`
-        UPDATE workspaces SET name = ?, version = version + 1, updated_at = ?
+        UPDATE workspaces SET
+          name = ?,
+          description = ?,
+          research_question = ?,
+          inclusion_rules = ?,
+          exclusion_rules = ?,
+          version = version + 1,
+          updated_at = ?
         WHERE id = ? AND owner_key = ? AND deleted_at IS NULL AND version = ?
-      `).run(name, nowIso(), workspaceId, actorKey, version);
+      `).run(name, description, researchQuestion, inclusionRules, exclusionRules, nowIso(), workspaceId, actorKey, version);
       if (!result.changes) throw new CanvasConflictError('workspace version conflict');
-      this.recordEvent({ workspaceId, actorKey, type: 'workspace.updated', payload: { name } });
+      this.recordEvent({
+        workspaceId, actorKey, type: 'workspace.updated',
+        payload: { name, description, researchQuestion }
+      });
     });
     return this.getWorkspace(actorKey, workspaceId);
   }
@@ -424,6 +964,505 @@ export class CanvasStore {
       if (!result.changes) throw new CanvasConflictError('workspace version conflict');
       this.recordEvent({ workspaceId, actorKey, type: 'workspace.deleted' });
     });
+  }
+
+  // --- Topic Documents ---
+
+  listTopicDocuments(actorKey, workspaceId, { status } = {}) {
+    this.requireWorkspace(actorKey, workspaceId);
+    let query = 'SELECT * FROM topic_documents WHERE workspace_id = ? AND owner_key = ? AND deleted_at IS NULL';
+    const params = [workspaceId, actorKey];
+    if (status) {
+      query += ' AND status = ?';
+      params.push(status);
+    }
+    query += ' ORDER BY updated_at DESC';
+    return this.db.prepare(query).all(...params).map(topicDocumentRow);
+  }
+
+  getTopicDocument(actorKey, topicDocumentId) {
+    return topicDocumentRow(this.db.prepare(`
+      SELECT * FROM topic_documents WHERE id = ? AND owner_key = ? AND deleted_at IS NULL
+    `).get(topicDocumentId, actorKey));
+  }
+
+  requireTopicDocument(actorKey, topicDocumentId) {
+    const doc = this.getTopicDocument(actorKey, topicDocumentId);
+    if (!doc) throw new CanvasNotFoundError('topic document not found');
+    return doc;
+  }
+
+  addTopicDocument(actorKey, workspaceId, {
+    libraryType, libraryId, itemKey, attachmentKey = null,
+    status = 'inbox', origin = 'manual',
+    classificationConfidence = null, classificationReason = null,
+    itemVersion = null, attachmentVersion = null
+  }) {
+    this.requireWorkspace(actorKey, workspaceId);
+    const timestamp = nowIso();
+    const existing = this.db.prepare(`
+      SELECT * FROM topic_documents
+      WHERE workspace_id = ? AND library_type = ? AND library_id = ? AND item_key = ?
+    `).get(workspaceId, libraryType, libraryId, itemKey);
+
+    if (existing && existing.deleted_at === null) {
+      // Idempotent duplicate: return existing entity unmodified to preserve ETag and concurrent edits
+      return topicDocumentRow(existing);
+    }
+
+    let docId;
+    this.transaction(() => {
+      if (existing) {
+        docId = existing.id;
+        this.db.prepare(`
+          UPDATE topic_documents SET
+            attachment_key = ?,
+            status = ?,
+            origin = ?,
+            classification_confidence = ?,
+            classification_reason = ?,
+            item_version = ?,
+            attachment_version = ?,
+            version = version + 1,
+            deleted_at = NULL,
+            updated_at = ?
+          WHERE id = ?
+        `).run(attachmentKey, status, origin, classificationConfidence, classificationReason, itemVersion, attachmentVersion, timestamp, docId);
+      } else {
+        docId = id();
+        this.db.prepare(`
+          INSERT INTO topic_documents
+            (id, workspace_id, owner_key, library_type, library_id, item_key, attachment_key,
+             status, origin, classification_confidence, classification_reason, item_version, attachment_version,
+             version, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+        `).run(docId, workspaceId, actorKey, libraryType, libraryId, itemKey, attachmentKey,
+               status, origin, classificationConfidence, classificationReason, itemVersion, attachmentVersion,
+               timestamp, timestamp);
+      }
+      this.recordEvent({
+        workspaceId, actorKey, type: 'topic.document_added',
+        payload: { docId, itemKey, libraryType, libraryId, status, origin }
+      });
+    });
+    return this.getTopicDocument(actorKey, docId);
+  }
+
+  syncTopicDocumentAttachment(actorKey, workspaceId, { libraryType, libraryId, itemKey, attachmentKey, attachmentVersion = null }) {
+    this.requireWorkspace(actorKey, workspaceId);
+    const existing = this.db.prepare(`
+      SELECT * FROM topic_documents
+      WHERE workspace_id = ? AND library_type = ? AND library_id = ? AND item_key = ? AND deleted_at IS NULL
+    `).get(workspaceId, libraryType, libraryId, itemKey);
+    if (!existing) return null;
+    if (existing.attachment_key === attachmentKey && existing.attachment_version === attachmentVersion) {
+      return topicDocumentRow(existing);
+    }
+    const timestamp = nowIso();
+    this.transaction(() => {
+      this.db.prepare(`
+        UPDATE topic_documents SET
+          attachment_key = ?,
+          attachment_version = ?,
+          analysis_status = CASE WHEN analysis_status IN ('ready', 'running', 'queued') THEN 'stale' ELSE analysis_status END,
+          version = version + 1,
+          updated_at = ?
+        WHERE id = ?
+      `).run(attachmentKey, attachmentVersion, timestamp, existing.id);
+    });
+    return this.getTopicDocument(actorKey, existing.id);
+  }
+
+  updateTopicDocument(actorKey, docId, version, changes = {}) {
+    this.requireTopicDocument(actorKey, docId);
+    const timestamp = nowIso();
+    const current = this.getTopicDocument(actorKey, docId);
+    const status = changes.status !== undefined ? changes.status : current.status;
+    const analysisStatus = changes.analysisStatus !== undefined ? changes.analysisStatus : current.analysisStatus;
+    const attachmentKey = changes.attachmentKey !== undefined ? changes.attachmentKey : current.attachmentKey;
+    const itemVersion = changes.itemVersion !== undefined ? changes.itemVersion : current.itemVersion;
+    const attachmentVersion = changes.attachmentVersion !== undefined ? changes.attachmentVersion : current.attachmentVersion;
+    const classificationConfidence = changes.classificationConfidence !== undefined ? changes.classificationConfidence : current.classificationConfidence;
+    const classificationReason = changes.classificationReason !== undefined ? changes.classificationReason : current.classificationReason;
+
+    this.transaction(() => {
+      const result = this.db.prepare(`
+        UPDATE topic_documents SET
+          status = ?,
+          analysis_status = ?,
+          attachment_key = ?,
+          item_version = ?,
+          attachment_version = ?,
+          classification_confidence = ?,
+          classification_reason = ?,
+          version = version + 1,
+          updated_at = ?
+        WHERE id = ? AND owner_key = ? AND deleted_at IS NULL AND version = ?
+      `).run(status, analysisStatus, attachmentKey, itemVersion, attachmentVersion,
+             classificationConfidence, classificationReason, timestamp, docId, actorKey, version);
+      if (!result.changes) throw new CanvasConflictError('topic document version conflict');
+      this.recordEvent({
+        workspaceId: current.workspaceId, actorKey, type: 'topic.document_updated',
+        payload: { docId, itemKey: current.itemKey, status, analysisStatus }
+      });
+    });
+    return this.getTopicDocument(actorKey, docId);
+  }
+
+  removeTopicDocument(actorKey, docId, version) {
+    const doc = this.requireTopicDocument(actorKey, docId);
+    const timestamp = nowIso();
+    this.transaction(() => {
+      const result = this.db.prepare(`
+        UPDATE topic_documents SET deleted_at = ?, version = version + 1, updated_at = ?
+        WHERE id = ? AND owner_key = ? AND deleted_at IS NULL AND version = ?
+      `).run(timestamp, timestamp, docId, actorKey, version);
+      if (!result.changes) throw new CanvasConflictError('topic document version conflict');
+      this.recordEvent({
+        workspaceId: doc.workspaceId, actorKey, type: 'topic.document_removed',
+        payload: { docId, itemKey: doc.itemKey }
+      });
+    });
+  }
+
+  // --- Collection Bindings ---
+
+  listCollectionBindings(actorKey, workspaceId) {
+    this.requireWorkspace(actorKey, workspaceId);
+    return this.db.prepare(`
+      SELECT * FROM collection_bindings
+      WHERE workspace_id = ? AND owner_key = ? AND deleted_at IS NULL
+      ORDER BY updated_at DESC
+    `).all(workspaceId, actorKey).map(collectionBindingRow);
+  }
+
+  getCollectionBinding(actorKey, bindingId) {
+    return collectionBindingRow(this.db.prepare(`
+      SELECT * FROM collection_bindings WHERE id = ? AND owner_key = ? AND deleted_at IS NULL
+    `).get(bindingId, actorKey));
+  }
+
+  requireCollectionBinding(actorKey, bindingId) {
+    const binding = this.getCollectionBinding(actorKey, bindingId);
+    if (!binding) throw new CanvasNotFoundError('collection binding not found');
+    return binding;
+  }
+
+  addCollectionBinding(actorKey, workspaceId, { libraryType, libraryId, collectionKey, mode = 'inbound' }) {
+    this.requireWorkspace(actorKey, workspaceId);
+    const timestamp = nowIso();
+    const existing = this.db.prepare(`
+      SELECT * FROM collection_bindings
+      WHERE workspace_id = ? AND library_type = ? AND library_id = ? AND collection_key = ?
+    `).get(workspaceId, libraryType, libraryId, collectionKey);
+
+    if (existing && existing.deleted_at === null) {
+      // Idempotent duplicate: return existing entity unmodified to preserve ETag and concurrent edits
+      return collectionBindingRow(existing);
+    }
+
+    let bindingId;
+    this.transaction(() => {
+      if (existing) {
+        bindingId = existing.id;
+        this.db.prepare(`
+          UPDATE collection_bindings SET
+            mode = ?,
+            enabled = 1,
+            version = version + 1,
+            deleted_at = NULL,
+            updated_at = ?
+          WHERE id = ?
+        `).run(mode, timestamp, bindingId);
+      } else {
+        bindingId = id();
+        this.db.prepare(`
+          INSERT INTO collection_bindings
+            (id, workspace_id, owner_key, library_type, library_id, collection_key, mode, version, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+        `).run(bindingId, workspaceId, actorKey, libraryType, libraryId, collectionKey, mode, timestamp, timestamp);
+      }
+      this.recordEvent({
+        workspaceId, actorKey, type: 'topic.collection_bound',
+        payload: { bindingId, collectionKey, mode }
+      });
+    });
+    return this.getCollectionBinding(actorKey, bindingId);
+  }
+
+  updateCollectionBinding(actorKey, bindingId, version, changes = {}) {
+    const binding = this.requireCollectionBinding(actorKey, bindingId);
+    const timestamp = nowIso();
+    const mode = changes.mode !== undefined ? changes.mode : binding.mode;
+    const lastLibraryVersion = changes.lastLibraryVersion !== undefined ? changes.lastLibraryVersion : binding.lastLibraryVersion;
+    const lastSyncedAt = changes.lastSyncedAt !== undefined ? changes.lastSyncedAt : binding.lastSyncedAt;
+    const enabled = changes.enabled !== undefined ? (changes.enabled ? 1 : 0) : (binding.enabled ? 1 : 0);
+
+    this.transaction(() => {
+      const result = this.db.prepare(`
+        UPDATE collection_bindings SET
+          mode = ?,
+          last_library_version = ?,
+          last_synced_at = ?,
+          enabled = ?,
+          version = version + 1,
+          updated_at = ?
+        WHERE id = ? AND owner_key = ? AND deleted_at IS NULL AND version = ?
+      `).run(mode, lastLibraryVersion, lastSyncedAt, enabled, timestamp, bindingId, actorKey, version);
+      if (!result.changes) throw new CanvasConflictError('collection binding version conflict');
+      this.recordEvent({
+        workspaceId: binding.workspaceId, actorKey, type: 'topic.collection_binding_updated',
+        payload: { bindingId, mode, enabled: Boolean(enabled) }
+      });
+    });
+    return this.getCollectionBinding(actorKey, bindingId);
+  }
+
+  removeCollectionBinding(actorKey, bindingId, version) {
+    const binding = this.requireCollectionBinding(actorKey, bindingId);
+    const timestamp = nowIso();
+    this.transaction(() => {
+      const result = this.db.prepare(`
+        UPDATE collection_bindings SET deleted_at = ?, version = version + 1, updated_at = ?
+        WHERE id = ? AND owner_key = ? AND deleted_at IS NULL AND version = ?
+      `).run(timestamp, timestamp, bindingId, actorKey, version);
+      if (!result.changes) throw new CanvasConflictError('collection binding version conflict');
+      this.recordEvent({
+        workspaceId: binding.workspaceId, actorKey, type: 'topic.collection_unbound',
+        payload: { bindingId, collectionKey: binding.collectionKey }
+      });
+    });
+  }
+
+  // --- Inbox Entries ---
+
+  listInboxEntries(actorKey, { state, collectionKey, limit = 100, cursor } = {}) {
+    let query = 'SELECT * FROM inbox_entries WHERE owner_key = ? AND deleted_at IS NULL';
+    const params = [actorKey];
+    if (state) {
+      query += ' AND state = ?';
+      params.push(state);
+    }
+    if (collectionKey) {
+      query += ' AND collection_keys_json LIKE ?';
+      params.push(`%"${collectionKey}"%`);
+    }
+    if (cursor) {
+      const parts = String(cursor).split('|');
+      if (parts.length === 2 && parts[0] && parts[1]) {
+        query += ' AND (updated_at < ? OR (updated_at = ? AND id < ?))';
+        params.push(parts[0], parts[0], parts[1]);
+      } else {
+        query += ' AND updated_at < ?';
+        params.push(String(cursor));
+      }
+    }
+    query += ' ORDER BY updated_at DESC, id DESC LIMIT ?';
+    params.push(Math.min(500, Math.max(1, limit)));
+    return this.db.prepare(query).all(...params).map(inboxEntryRow);
+  }
+
+  countInboxEntries(actorKey, { state, collectionKey } = {}) {
+    let query = 'SELECT COUNT(*) AS count FROM inbox_entries WHERE owner_key = ? AND deleted_at IS NULL';
+    const params = [actorKey];
+    if (state) {
+      query += ' AND state = ?';
+      params.push(state);
+    }
+    if (collectionKey) {
+      query += ' AND collection_keys_json LIKE ?';
+      params.push(`%"${collectionKey}"%`);
+    }
+    return this.db.prepare(query).get(...params).count;
+  }
+
+  getInboxEntry(actorKey, entryId) {
+    return inboxEntryRow(this.db.prepare(`
+      SELECT * FROM inbox_entries WHERE id = ? AND owner_key = ? AND deleted_at IS NULL
+    `).get(entryId, actorKey));
+  }
+
+  upsertInboxEntries(actorKey, entries = []) {
+    if (!Array.isArray(entries) || !entries.length) return [];
+    const timestamp = nowIso();
+    const results = [];
+    this.transaction(() => {
+      for (const entry of entries) {
+        const existing = this.db.prepare(`
+          SELECT * FROM inbox_entries
+          WHERE owner_key = ? AND library_type = ? AND library_id = ? AND item_key = ?
+        `).get(actorKey, entry.libraryType, entry.libraryId, entry.itemKey);
+
+        let entryId;
+        if (existing) {
+          entryId = existing.id;
+          const nextAttachmentKey = entry.attachmentKey !== undefined ? entry.attachmentKey : existing.attachment_key;
+          const nextAttachmentVersion = entry.attachmentKey !== undefined
+            ? (entry.attachmentVersion !== undefined ? entry.attachmentVersion : null)
+            : existing.attachment_version;
+
+          this.db.prepare(`
+            UPDATE inbox_entries SET
+              attachment_key = ?,
+              attachment_version = ?,
+              title = ?,
+              creators_json = ?,
+              year = ?,
+              abstract_note = ?,
+              collection_keys_json = ?,
+              tags_json = ?,
+              item_version = ?,
+              deleted_at = NULL,
+              updated_at = ?
+            WHERE id = ?
+          `).run(
+            nextAttachmentKey || null,
+            nextAttachmentVersion,
+            entry.title || '',
+            JSON.stringify(entry.creators || []),
+            entry.year || null,
+            entry.abstractNote || '',
+            JSON.stringify(entry.collectionKeys || []),
+            JSON.stringify(entry.tags || []),
+            entry.itemVersion || null,
+            timestamp,
+            entryId
+          );
+        } else {
+          entryId = id();
+          this.db.prepare(`
+            INSERT INTO inbox_entries
+              (id, owner_key, library_type, library_id, item_key, attachment_key, attachment_version, detected_from,
+               title, creators_json, year, abstract_note, collection_keys_json, tags_json, item_version,
+               state, first_seen_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?)
+          `).run(
+            entryId, actorKey, entry.libraryType, entry.libraryId, entry.itemKey, entry.attachmentKey || null,
+            entry.attachmentVersion !== undefined ? entry.attachmentVersion : null,
+            entry.detectedFrom || 'scan', entry.title || '', JSON.stringify(entry.creators || []),
+            entry.year || null, entry.abstractNote || '', JSON.stringify(entry.collectionKeys || []),
+            JSON.stringify(entry.tags || []), entry.itemVersion || null, timestamp, timestamp
+          );
+        }
+        results.push(this.getInboxEntry(actorKey, entryId));
+      }
+    });
+    return results;
+  }
+
+  batchActionInbox(actorKey, { entryIds = [], action, targetWorkspaceIds = [] }) {
+    if (!Array.isArray(entryIds) || !entryIds.length) return { processed: 0, targetWorkspaceIds: [] };
+    const validWorkspaces = [];
+    if (action === 'accept' || action === 'add_to_topics') {
+      if (!Array.isArray(targetWorkspaceIds) || !targetWorkspaceIds.length) {
+        throw new TypeError('targetWorkspaceIds must be a non-empty array for action accept');
+      }
+      for (const wid of targetWorkspaceIds) {
+        validWorkspaces.push(this.requireWorkspace(actorKey, wid));
+      }
+    }
+
+    const timestamp = nowIso();
+    let processedCount = 0;
+    this.transaction(() => {
+      for (const entryId of entryIds) {
+        const entry = this.getInboxEntry(actorKey, entryId);
+        if (!entry) continue;
+
+        if (action === 'accept' || action === 'add_to_topics') {
+          for (const ws of validWorkspaces) {
+            this.addTopicDocument(actorKey, ws.id, {
+              libraryType: entry.libraryType,
+              libraryId: entry.libraryId,
+              itemKey: entry.itemKey,
+              attachmentKey: entry.attachmentKey,
+              status: 'accepted',
+              origin: 'manual',
+              itemVersion: entry.itemVersion,
+              attachmentVersion: entry.attachmentVersion
+            });
+            this.syncTopicDocumentAttachment(actorKey, ws.id, {
+              libraryType: entry.libraryType,
+              libraryId: entry.libraryId,
+              itemKey: entry.itemKey,
+              attachmentKey: entry.attachmentKey,
+              attachmentVersion: entry.attachmentVersion
+            });
+          }
+          this.db.prepare(`UPDATE inbox_entries SET state = 'accepted', updated_at = ? WHERE id = ?`).run(timestamp, entryId);
+          processedCount++;
+        } else if (action === 'defer') {
+          this.db.prepare(`UPDATE inbox_entries SET state = 'deferred', updated_at = ? WHERE id = ?`).run(timestamp, entryId);
+          processedCount++;
+        } else if (action === 'ignore') {
+          this.db.prepare(`UPDATE inbox_entries SET state = 'ignored', updated_at = ? WHERE id = ?`).run(timestamp, entryId);
+          processedCount++;
+        } else if (action === 'reopen') {
+          this.db.prepare(`UPDATE inbox_entries SET state = 'new', updated_at = ? WHERE id = ?`).run(timestamp, entryId);
+          processedCount++;
+        }
+      }
+      for (const ws of validWorkspaces) {
+        this.recordEvent({
+          workspaceId: ws.id, actorKey, type: 'inbox.batch_action',
+          payload: { action, count: processedCount, entryIds }
+        });
+      }
+    });
+
+    return { processed: processedCount, action, targetWorkspaceIds };
+  }
+
+  // --- Jobs ---
+
+  enqueueJob(actorKey, { jobType, resourceType, resourceId, availableAt = nowIso() }) {
+    const jobId = id();
+    const timestamp = nowIso();
+    this.db.prepare(`
+      INSERT INTO jobs
+        (id, owner_key, job_type, resource_type, resource_id, state, attempts, available_at, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, 'queued', 0, ?, ?, ?)
+    `).run(jobId, actorKey, jobType, resourceType, resourceId, availableAt, timestamp, timestamp);
+    return this.getJob(actorKey, jobId);
+  }
+
+  getJob(actorKey, jobId) {
+    return jobRow(this.db.prepare(`
+      SELECT * FROM jobs WHERE id = ? AND owner_key = ?
+    `).get(jobId, actorKey));
+  }
+
+  listJobs(actorKey, { jobType, state, limit = 50 } = {}) {
+    let query = 'SELECT * FROM jobs WHERE owner_key = ?';
+    const params = [actorKey];
+    if (jobType) {
+      query += ' AND job_type = ?';
+      params.push(jobType);
+    }
+    if (state) {
+      query += ' AND state = ?';
+      params.push(state);
+    }
+    query += ' ORDER BY created_at DESC LIMIT ?';
+    params.push(Math.min(200, Math.max(1, limit)));
+    return this.db.prepare(query).all(...params).map(jobRow);
+  }
+
+  updateJobState(jobId, { state, startedAt, finishedAt, errorCode, resultSummary, incrementAttempts = false }) {
+    const timestamp = nowIso();
+    this.db.prepare(`
+      UPDATE jobs SET
+        state = COALESCE(?, state),
+        started_at = COALESCE(?, started_at),
+        finished_at = COALESCE(?, finished_at),
+        error_code = COALESCE(?, error_code),
+        result_summary_json = COALESCE(?, result_summary_json),
+        attempts = attempts + ?,
+        updated_at = ?
+      WHERE id = ?
+    `).run(state || null, startedAt || null, finishedAt || null, errorCode || null,
+           resultSummary ? JSON.stringify(resultSummary) : null, incrementAttempts ? 1 : 0, timestamp, jobId);
+    return jobRow(this.db.prepare('SELECT * FROM jobs WHERE id = ?').get(jobId));
   }
 
   listBoards(actorKey, workspaceId) {
@@ -593,10 +1632,14 @@ export class CanvasStore {
     });
     return {
       node: this.getNode(actorKey, nodeId),
-      source: sourceRow(this.db.prepare(`
-        SELECT * FROM source_refs WHERE id = ? AND owner_key = ?
-      `).get(sourceRefId, actorKey))
+      source: this.getSourceRef(actorKey, sourceRefId)
     };
+  }
+
+  getSourceRef(actorKey, sourceRefId) {
+    return sourceRow(this.db.prepare(`
+      SELECT * FROM source_refs WHERE id = ? AND owner_key = ?
+    `).get(sourceRefId, actorKey));
   }
 
   deleteNode(actorKey, nodeId, version) {
@@ -929,7 +1972,262 @@ export class CanvasStore {
     };
   }
 
+  // --- Document Analyses (Cache & Cross-Topic Reuse) ---
+
+  getDocumentAnalysis(actorKey, { libraryType, libraryId, attachmentKey, attachmentVersion = null, model, promptVersion }) {
+    const v = Number(attachmentVersion);
+    if (!Number.isFinite(v) || v <= 0) {
+      // Without an explicit, positive attachmentVersion from Altero, we cannot guarantee cache freshness against updated PDFs; treat as cache miss.
+      return null;
+    }
+    return documentAnalysisRow(this.db.prepare(`
+      SELECT * FROM document_analyses
+      WHERE owner_key = ? AND library_type = ? AND library_id = ? AND attachment_key = ? AND attachment_version = ? AND model = ? AND prompt_version = ?
+    `).get(actorKey, libraryType, libraryId, attachmentKey, v, model, promptVersion));
+  }
+
+  saveDocumentAnalysis(actorKey, {
+    libraryType, libraryId, itemKey, attachmentKey, attachmentVersion = null,
+    model, promptVersion, status = 'ready', documentTitle = '', pageCount = 1, graph
+  }) {
+    const timestamp = nowIso();
+    const v = Number.isFinite(Number(attachmentVersion)) && Number(attachmentVersion) > 0 ? Number(attachmentVersion) : null;
+    const existing = v !== null
+      ? this.db.prepare(`
+          SELECT * FROM document_analyses
+          WHERE owner_key = ? AND library_type = ? AND library_id = ? AND attachment_key = ? AND attachment_version = ? AND model = ? AND prompt_version = ?
+        `).get(actorKey, libraryType, libraryId, attachmentKey, v, model, promptVersion)
+      : this.db.prepare(`
+          SELECT * FROM document_analyses
+          WHERE owner_key = ? AND library_type = ? AND library_id = ? AND attachment_key = ? AND attachment_version IS NULL AND model = ? AND prompt_version = ?
+        `).get(actorKey, libraryType, libraryId, attachmentKey, model, promptVersion);
+
+    let analysisId;
+    this.transaction(() => {
+      if (existing) {
+        analysisId = existing.id;
+        this.db.prepare(`
+          UPDATE document_analyses SET
+            item_key = ?,
+            attachment_version = ?,
+            status = ?,
+            document_title = ?,
+            page_count = ?,
+            graph_json = ?,
+            updated_at = ?
+          WHERE id = ?
+        `).run(itemKey, v, status, documentTitle, pageCount, JSON.stringify(graph || {}), timestamp, analysisId);
+      } else {
+        analysisId = id();
+        this.db.prepare(`
+          INSERT INTO document_analyses
+            (id, owner_key, library_type, library_id, item_key, attachment_key, attachment_version,
+             model, prompt_version, status, document_title, page_count, graph_json, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(analysisId, actorKey, libraryType, libraryId, itemKey, attachmentKey, v,
+               model, promptVersion, status, documentTitle, pageCount, JSON.stringify(graph || {}), timestamp, timestamp);
+      }
+
+      // Automatically index fine-grained knowledge units from graph
+      if (graph && status === 'ready') {
+        this.syncKnowledgeUnitsForAnalysis(actorKey, analysisId, {
+          libraryType, libraryId, itemKey, attachmentKey, documentTitle, pageCount, graph, timestamp
+        });
+      }
+    });
+    return documentAnalysisRow(this.db.prepare('SELECT * FROM document_analyses WHERE id = ?').get(analysisId));
+  }
+
+  syncKnowledgeUnitsForAnalysis(actorKey, analysisId, {
+    libraryType, libraryId, itemKey, attachmentKey, documentTitle, pageCount, graph, timestamp = nowIso()
+  }) {
+    const oldUnits = this.db.prepare(`
+      SELECT id FROM knowledge_units
+      WHERE owner_key = ? AND (analysis_id = ? OR (library_type = ? AND library_id = ? AND item_key = ? AND attachment_key = ?))
+    `).all(actorKey, analysisId, libraryType, libraryId, itemKey, attachmentKey);
+    if (oldUnits.length) {
+      const oldIds = oldUnits.map(u => u.id);
+      const placeholders = oldIds.map(() => '?').join(',');
+      this.db.prepare(`DELETE FROM knowledge_relations WHERE owner_key = ? AND (source_unit_id IN (${placeholders}) OR target_unit_id IN (${placeholders}))`)
+        .run(actorKey, ...oldIds, ...oldIds);
+      this.db.prepare(`DELETE FROM knowledge_units WHERE owner_key = ? AND id IN (${placeholders})`)
+        .run(actorKey, ...oldIds);
+    }
+
+    const unitsToInsert = [];
+    if (graph.overview) {
+      unitsToInsert.push({
+        type: 'overview',
+        title: `全文概览 · ${graph.title || documentTitle || '研报概览'}`,
+        body: graph.overview,
+        pageStart: 1,
+        pageEnd: pageCount || 1,
+        evidencePage: graph.evidencePage || 1,
+        evidenceQuote: graph.evidenceQuote || ''
+      });
+    }
+
+    for (const sec of (graph.sections || [])) {
+      unitsToInsert.push({
+        type: 'section',
+        title: sec.title || '',
+        body: sec.body || '',
+        pageStart: sec.pageStart || 1,
+        pageEnd: sec.pageEnd || sec.pageStart || 1,
+        evidencePage: sec.evidencePage || sec.pageStart || 1,
+        evidenceQuote: sec.evidenceQuote || ''
+      });
+    }
+
+    for (const concept of (graph.concepts || [])) {
+      unitsToInsert.push({
+        type: 'concept',
+        title: concept.title || '',
+        body: concept.body || '',
+        pageStart: concept.pageStart || 1,
+        pageEnd: concept.pageEnd || concept.pageStart || 1,
+        evidencePage: concept.evidencePage || concept.pageStart || 1,
+        evidenceQuote: concept.evidenceQuote || ''
+      });
+    }
+
+    for (const claim of (graph.claims || [])) {
+      unitsToInsert.push({
+        type: 'claim',
+        title: claim.title || '',
+        body: claim.body || '',
+        pageStart: claim.pageStart || 1,
+        pageEnd: claim.pageEnd || claim.pageStart || 1,
+        evidencePage: claim.evidencePage || claim.pageStart || 1,
+        evidenceQuote: claim.evidenceQuote || ''
+      });
+    }
+
+    for (const u of unitsToInsert) {
+      const unitId = id();
+      this.db.prepare(`
+        INSERT INTO knowledge_units
+          (id, owner_key, analysis_id, type, library_type, library_id, item_key, attachment_key,
+           document_title, title, body, page_start, page_end, evidence_page, evidence_quote, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(unitId, actorKey, analysisId, u.type, libraryType, libraryId, itemKey, attachmentKey,
+             documentTitle || '', u.title, u.body, u.pageStart, u.pageEnd, u.evidencePage, u.evidenceQuote, timestamp, timestamp);
+    }
+  }
+
+  listTopicKnowledgeUnits(actorKey, workspaceId, { excludeFocal = null, type = null } = {}) {
+    this.requireWorkspace(actorKey, workspaceId);
+    let query = `
+      SELECT ku.* FROM knowledge_units ku
+      JOIN topic_documents td ON td.owner_key = ku.owner_key
+        AND td.library_type = ku.library_type
+        AND td.library_id = ku.library_id
+        AND td.item_key = ku.item_key
+        AND (td.attachment_key IS NULL OR ku.attachment_key = td.attachment_key)
+      WHERE td.workspace_id = ? AND td.owner_key = ? AND td.deleted_at IS NULL
+        AND ku.analysis_id = (
+          SELECT da.id FROM document_analyses da
+          WHERE da.owner_key = ku.owner_key
+            AND da.library_type = ku.library_type
+            AND da.library_id = ku.library_id
+            AND da.item_key = ku.item_key
+            AND (td.attachment_key IS NULL OR da.attachment_key = td.attachment_key)
+            AND da.status = 'ready'
+          ORDER BY COALESCE(da.attachment_version, 0) DESC, da.updated_at DESC
+          LIMIT 1
+        )
+    `;
+    const params = [workspaceId, actorKey];
+    if (excludeFocal && excludeFocal.itemKey) {
+      const libType = excludeFocal.libraryType || 'user';
+      const libId = String(excludeFocal.libraryId);
+      const itemKey = String(excludeFocal.itemKey);
+      query += ' AND NOT (ku.library_type = ? AND ku.library_id = ? AND ku.item_key = ?)';
+      params.push(libType, libId, itemKey);
+    }
+    if (type) {
+      query += ' AND ku.type = ?';
+      params.push(type);
+    }
+    query += ' ORDER BY ku.created_at DESC, ku.id DESC';
+    return this.db.prepare(query).all(...params).map(knowledgeUnitRow);
+  }
+
+  getKnowledgeUnit(actorKey, unitId) {
+    return knowledgeUnitRow(this.db.prepare(`
+      SELECT * FROM knowledge_units WHERE id = ? AND owner_key = ?
+    `).get(unitId, actorKey));
+  }
+
+  saveKnowledgeRelation(actorKey, { sourceUnitId, targetUnitId, relationType, confidence = 0.5, reason = '', status = 'suggested' }) {
+    const timestamp = nowIso();
+    const existing = this.db.prepare(`
+      SELECT id FROM knowledge_relations
+      WHERE owner_key = ? AND source_unit_id = ? AND target_unit_id = ? AND relation_type = ?
+    `).get(actorKey, sourceUnitId, targetUnitId, relationType);
+
+    let relId;
+    this.transaction(() => {
+      if (existing) {
+        relId = existing.id;
+        this.db.prepare(`
+          UPDATE knowledge_relations SET
+            confidence = ?,
+            reason = ?,
+            status = ?,
+            updated_at = ?
+          WHERE id = ?
+        `).run(confidence, reason, status, timestamp, relId);
+      } else {
+        relId = id();
+        this.db.prepare(`
+          INSERT INTO knowledge_relations
+            (id, owner_key, source_unit_id, target_unit_id, relation_type, confidence, reason, status, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(relId, actorKey, sourceUnitId, targetUnitId, relationType, confidence, reason, status, timestamp, timestamp);
+      }
+    });
+    return knowledgeRelationRow(this.db.prepare('SELECT * FROM knowledge_relations WHERE id = ?').get(relId));
+  }
+
+  listKnowledgeRelations(actorKey, { unitId = null, relationType = null, status = null } = {}) {
+    let query = 'SELECT * FROM knowledge_relations WHERE owner_key = ?';
+    const params = [actorKey];
+    if (unitId) {
+      query += ' AND (source_unit_id = ? OR target_unit_id = ?)';
+      params.push(unitId, unitId);
+    }
+    if (relationType) {
+      query += ' AND relation_type = ?';
+      params.push(relationType);
+    }
+    if (status) {
+      query += ' AND status = ?';
+      params.push(status);
+    }
+    query += ' ORDER BY updated_at DESC';
+    return this.db.prepare(query).all(...params).map(knowledgeRelationRow);
+  }
+
   createAiDocumentMap(actorKey, boardId, { model, promptVersion, document, graph }) {
+    this.saveDocumentAnalysis(actorKey, {
+      libraryType: document.libraryType,
+      libraryId: document.libraryId,
+      itemKey: document.itemKey,
+      attachmentKey: document.attachmentKey,
+      attachmentVersion: document.attachmentVersion || null,
+      model,
+      promptVersion,
+      status: 'ready',
+      documentTitle: document.title || graph.title || '',
+      pageCount: document.pageCount || 1,
+      graph
+    });
+
+    return this.projectDocumentAnalysisToBoard(actorKey, boardId, { model, promptVersion, document, graph, cached: false });
+  }
+
+  projectDocumentAnalysisToBoard(actorKey, boardId, { model, promptVersion, document, graph, cached = false }) {
     const board = this.requireBoard(actorKey, boardId);
     const timestamp = nowIso();
     const nodeIds = new Map();
@@ -949,40 +2247,46 @@ export class CanvasStore {
 
     // 1. Overview card (wide header)
     const overviewItem = nodes[0];
-    const overviewTextLen = (overviewItem.body || '').length + (overviewItem.evidenceQuote || '').length;
+    const overviewTextLen = (overviewItem.body || '').length;
+    const overviewQuoteLen = (overviewItem.evidenceQuote || '').length;
     const overviewWidth = 640;
-    const overviewHeight = Math.min(540, Math.max(320, 180 + Math.ceil(overviewTextLen / 36) * 22));
+    const extraForOverviewQuote = overviewQuoteLen ? 36 + Math.ceil(overviewQuoteLen / 44) * 16 : 0;
+    const overviewHeight = Math.min(520, Math.max(120, 80 + extraForOverviewQuote + Math.ceil(overviewTextLen / 42) * 18));
     layoutMap.set('overview', { x: 280, y: currentY, width: overviewWidth, height: overviewHeight });
-    currentY += overviewHeight + 60;
+    currentY += overviewHeight + 40;
 
     // 2. Sections, Concepts, Claims lanes
+    let previousColumns = null;
     for (const kind of ['section', 'concept', 'claim']) {
       const kindNodes = nodes.filter(n => n.kind === kind);
       if (!kindNodes.length) continue;
       const count = kindNodes.length;
       const cols = count === 1 ? 1 : (count === 2 ? 2 : 3);
       const cardWidth = count === 1 ? 620 : (count === 2 ? 460 : 380);
-      const colGap = 40;
+      const colGap = 32;
       const startX = count === 1 ? 290 : (count === 2 ? 120 : 40);
 
-      const rows = Math.ceil(count / cols);
-      for (let r = 0; r < rows; r++) {
-        const rowNodes = kindNodes.slice(r * cols, (r + 1) * cols);
-        const rowItemsWithHeight = rowNodes.map(node => {
-          const textLen = (node.body || '').length + (node.evidenceQuote || '').length;
-          const charsPerLine = Math.floor(cardWidth / 14);
-          const extraForQuote = node.evidenceQuote ? 70 : 0;
-          const height = Math.min(480, Math.max(260, 120 + extraForQuote + Math.ceil(textLen / charsPerLine) * 20));
-          return { node, height };
-        });
-        const maxRowHeight = Math.max(...rowItemsWithHeight.map(item => item.height));
-        rowItemsWithHeight.forEach((item, cIndex) => {
-          const x = startX + cIndex * (cardWidth + colGap);
-          layoutMap.set(item.node.key, { x, y: currentY, width: cardWidth, height: item.height });
-        });
-        currentY += maxRowHeight + 50;
-      }
-      currentY += 30;
+      const canContinueColumns = previousColumns
+        && previousColumns.cols === cols
+        && previousColumns.cardWidth === cardWidth
+        && previousColumns.startX === startX;
+      const columnBottoms = canContinueColumns
+        ? previousColumns.bottoms.map(bottom => bottom + 24)
+        : Array(cols).fill(currentY);
+      kindNodes.forEach((node, index) => {
+          const bodyLen = (node.body || '').length;
+          const quoteLen = (node.evidenceQuote || '').length;
+          const charsPerLine = Math.max(16, Math.floor(cardWidth / 14));
+          const extraForQuote = quoteLen ? 36 + Math.ceil(quoteLen / charsPerLine) * 16 : 0;
+          const height = Math.min(460, Math.max(88, 76 + extraForQuote + Math.ceil(bodyLen / charsPerLine) * 18));
+          const columnIndex = index % cols;
+          const x = startX + columnIndex * (cardWidth + colGap);
+          layoutMap.set(node.key, { x, y: columnBottoms[columnIndex], width: cardWidth, height });
+          columnBottoms[columnIndex] += height + 36;
+      });
+      currentY = Math.max(...columnBottoms) - 36;
+      previousColumns = { cols, cardWidth, startX, bottoms: columnBottoms };
+      currentY += 24;
     }
 
     this.transaction(() => {
@@ -1060,17 +2364,90 @@ export class CanvasStore {
         payload: {
           model: model || 'custom', promptVersion: promptVersion || 'unknown',
           itemKey: document.itemKey || null, attachmentKey: document.attachmentKey || null,
-          pageCount: document.pageCount, nodeCount: createdNodeIds.length, edgeCount: createdEdgeIds.length
+          pageCount: document.pageCount, nodeCount: createdNodeIds.length, edgeCount: createdEdgeIds.length,
+          cached: Boolean(cached)
         }
       });
     });
 
     return {
       nodes: createdNodeIds.map(nodeId => this.getNode(actorKey, nodeId)),
-      edges: createdEdgeIds.map(edgeId => this.getEdge(actorKey, edgeId))
+      edges: createdEdgeIds.map(edgeId => this.getEdge(actorKey, edgeId)),
+      cached: Boolean(cached)
     };
+  }
+
+  // --- Document Metas (Clean Title, Institution, Metadata) ---
+
+  getDocumentMeta(actorKey, { libraryType, libraryId, itemKey }) {
+    return documentMetaRow(this.db.prepare(`
+      SELECT * FROM document_metas
+      WHERE owner_key = ? AND library_type = ? AND library_id = ? AND item_key = ?
+    `).get(actorKey, libraryType, libraryId, itemKey));
+  }
+
+  listDocumentMetas(actorKey, { libraryType, libraryId }) {
+    return this.db.prepare(`
+      SELECT * FROM document_metas
+      WHERE owner_key = ? AND library_type = ? AND library_id = ?
+      ORDER BY updated_at DESC
+    `).all(actorKey, libraryType, libraryId).map(documentMetaRow);
+  }
+
+  saveDocumentMeta(actorKey, {
+    libraryType, libraryId, itemKey, attachmentKey = null, attachmentVersion = null,
+    cleanTitle, institution = '', reportTitle = '',
+    subtitle = '', year = '', summary = '', source = 'ai'
+  }) {
+    const timestamp = nowIso();
+    const existing = this.getDocumentMeta(actorKey, { libraryType, libraryId, itemKey });
+    let metaId;
+    this.transaction(() => {
+      if (existing) {
+        metaId = existing.id;
+        this.db.prepare(`
+          UPDATE document_metas SET
+            attachment_key = ?,
+            attachment_version = ?,
+            clean_title = ?,
+            institution = ?,
+            report_title = ?,
+            subtitle = ?,
+            year = ?,
+            summary = ?,
+            source = ?,
+            updated_at = ?
+          WHERE id = ?
+        `).run(attachmentKey !== undefined ? attachmentKey : existing.attachmentKey,
+               attachmentVersion !== undefined ? attachmentVersion : existing.attachmentVersion,
+               cleanTitle, institution, reportTitle, subtitle, year, summary, source, timestamp, metaId);
+      } else {
+        metaId = id();
+        this.db.prepare(`
+          INSERT INTO document_metas
+            (id, owner_key, library_type, library_id, item_key, attachment_key, attachment_version,
+             clean_title, institution, report_title, subtitle, year, summary, source, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(metaId, actorKey, libraryType, libraryId, itemKey, attachmentKey, attachmentVersion,
+               cleanTitle, institution, reportTitle, subtitle, year, summary, source, timestamp, timestamp);
+      }
+      this.db.prepare(`
+        UPDATE inbox_entries SET
+          clean_title = ?,
+          institution = ?,
+          updated_at = ?
+        WHERE owner_key = ? AND library_type = ? AND library_id = ? AND item_key = ?
+      `).run(cleanTitle, institution, timestamp, actorKey, libraryType, libraryId, itemKey);
+    });
+    return documentMetaRow(this.db.prepare('SELECT * FROM document_metas WHERE id = ?').get(metaId));
   }
 }
 
 export const canvasNodeTypes = NODE_TYPES;
 export const canvasEdgeRelations = EDGE_RELATIONS;
+export const canvasTopicDocStatuses = TOPIC_DOC_STATUSES;
+export const canvasTopicAnalysisStatuses = TOPIC_ANALYSIS_STATUSES;
+export const canvasTopicDocOrigins = TOPIC_DOC_ORIGINS;
+export const canvasCollectionBindingModes = COLLECTION_BINDING_MODES;
+export const canvasInboxEntryStates = INBOX_ENTRY_STATES;
+export const canvasJobStates = JOB_STATES;
