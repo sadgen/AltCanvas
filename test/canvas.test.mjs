@@ -6,7 +6,7 @@ import os from 'os';
 import path from 'path';
 import { DatabaseSync } from 'node:sqlite';
 import { CanvasConflictError, CanvasNotFoundError, CanvasStore, canvasActorKey } from '../server/canvas-store.mjs';
-import { createCanvasHandler, fetchAllUpstreamItems } from '../server/canvas-api.mjs';
+import { createCanvasHandler, fetchAllUpstreamItems, recoverQueuedAndRunningJobs } from '../server/canvas-api.mjs';
 import { createSession, destroySession } from '../server/session.mjs';
 
 class MockResponse extends EventEmitter {
@@ -211,8 +211,38 @@ try {
       aiCalls.push(request);
       aiPrivateConfigs.push(privateConfig);
       const system = String(request.messages?.[0]?.content || '');
+      if (system.includes('学术关联')) {
+        const content = String(request.messages?.at(-1)?.content || '');
+        const boardPart = content.split('当前画板已有卡片')[1] || '';
+        const matchExisting = /\[([0-9a-f-]+)\]/i.exec(boardPart);
+        const targetId = matchExisting ? matchExisting[1] : null;
+        if (targetId) {
+          return JSON.stringify([
+            { from: 'section-0', to: `existing:${targetId}`, relation: 'extends', label: '扩展既有卡片' }
+          ]);
+        }
+        return '[]';
+      }
       if (system.includes('空间画板')) {
         if (String(request.messages?.at(-1)?.content || '').includes('文档标题：坏结构')) return 'not-json';
+        if (String(request.messages?.at(-1)?.content || '').includes('文档标题：关联已有节点论文')) {
+          const matchExisting = /\[([0-9a-f-]+)\]/i.exec(String(request.messages?.at(-1)?.content || ''));
+          const targetId = matchExisting ? matchExisting[1] : 'unknown-id';
+          return JSON.stringify({
+            title: '关联已有节点论文',
+            overview: '探讨跨文献关系与扩展。',
+            evidenceQuote: '第一页研究问题和方法。', evidencePage: 1,
+            sections: [{ title: '关联论述', body: '扩展既有卡片的分析方法。', pageStart: 1, pageEnd: 1,
+              evidenceQuote: '第一页研究问题和方法。', evidencePage: 1 }],
+            concepts: [{ title: '扩展概念', body: '在原有基础上发展的新概念。', pageStart: 1, pageEnd: 1,
+              evidenceQuote: '第一页研究问题和方法。', evidencePage: 1 }],
+            claims: [{ title: '实证结果', body: '实验支持该方法。', pageStart: 1, pageEnd: 1,
+              evidenceQuote: '第一页研究问题和方法。', evidencePage: 1 }],
+            relations: [
+              { from: 'section-0', to: `existing:${targetId}`, relation: 'extends', label: '扩展既有卡片' }
+            ]
+          });
+        }
         return JSON.stringify({
           title: '测试论文理解图',
           overview: '研究问题、方法、发现与限制的完整概览。',
@@ -634,19 +664,19 @@ try {
   // Strict unversioned cache isolation: unversioned request must NOT match a versioned cache record
   store.saveDocumentAnalysis(canvasActorKey('https://issuer.example', 'api-subject'), {
     libraryType: 'user', libraryId: '42', itemKey: 'DOC_VERSIONED', attachmentKey: 'PDF_V2_ONLY',
-    attachmentVersion: 2, model: 'mock-model', promptVersion: 'altcanvas-document-map-v1',
+    attachmentVersion: 2, model: 'mock-model', promptVersion: 'altcanvas-document-map-v2',
     status: 'ready', documentTitle: 'Version 2 Only', pageCount: 1, graph: { overview: 'Version 2 Analysis' }
   });
 
   const unversionedLookup = store.getDocumentAnalysis(canvasActorKey('https://issuer.example', 'api-subject'), {
     libraryType: 'user', libraryId: '42', attachmentKey: 'PDF_V2_ONLY', attachmentVersion: null,
-    model: 'mock-model', promptVersion: 'altcanvas-document-map-v1'
+    model: 'mock-model', promptVersion: 'altcanvas-document-map-v2'
   });
   assert.equal(unversionedLookup, null, 'Unversioned lookup must not match versioned cache record');
 
   const mismatchedVersionLookup = store.getDocumentAnalysis(canvasActorKey('https://issuer.example', 'api-subject'), {
     libraryType: 'user', libraryId: '42', attachmentKey: 'PDF_V2_ONLY', attachmentVersion: 3,
-    model: 'mock-model', promptVersion: 'altcanvas-document-map-v1'
+    model: 'mock-model', promptVersion: 'altcanvas-document-map-v2'
   });
   assert.equal(mismatchedVersionLookup, null, 'Version 3 lookup must not match version 2 cache record');
 
@@ -663,6 +693,236 @@ try {
   assert.equal(afterMalformedMap.nodes.length, beforeMalformedMap.nodes.length,
     'malformed AI graph output must not leave a partial document map');
 
+  // --- In-place Update & Deduplication on Same Board ---
+  const board1NodesBeforeRepeat = store.snapshot(canvasActorKey('https://issuer.example', 'api-subject'), apiBoard.id).nodes.length;
+  const repeatMapResponse = await call(handler, `/canvas/boards/${apiBoard.id}/ai/document-map`, {
+    method: 'POST', cookie, body: {
+      title: '测试论文 (Repeat understanding)',
+      document: {
+        libraryType: 'user', libraryId: '42', itemKey: 'DOC1', attachmentKey: 'PDF1', attachmentVersion: 1
+      },
+      pages: [
+        { pageNumber: 1, text: '第一页研究问题和方法。' },
+        { pageNumber: 2, text: '第二页主要发现和限制。' }
+      ]
+    }
+  });
+  assert.equal(repeatMapResponse.statusCode, 201);
+  assert.equal(repeatMapResponse.payload.data.inPlaceUpdated, true, 'Repeat document-map on same board must update in-place without duplicating cards');
+  const board1NodesAfterRepeat = store.snapshot(canvasActorKey('https://issuer.example', 'api-subject'), apiBoard.id).nodes.length;
+  assert.equal(board1NodesAfterRepeat, board1NodesBeforeRepeat, 'Total node count on board must NOT increase on repeated document-map');
+
+  // checkOnly returns alreadyOnBoard: true
+  const checkOnlyOnBoardRes = await call(handler, `/canvas/boards/${apiBoard.id}/ai/document-map`, {
+    method: 'POST', cookie, body: {
+      checkOnly: true,
+      document: { libraryType: 'user', libraryId: '42', itemKey: 'DOC1', attachmentKey: 'PDF1', attachmentVersion: 1 }
+    }
+  });
+  assert.equal(checkOnlyOnBoardRes.statusCode, 200);
+  assert.equal(checkOnlyOnBoardRes.payload.data.cached, true);
+  assert.equal(checkOnlyOnBoardRes.payload.data.alreadyOnBoard, true, 'checkOnly must report alreadyOnBoard = true');
+
+  // --- Context Injection & existing:<nodeId> Edge Generation ---
+  // Create an existing note on boardInTopic2
+  const existingNoteRes = await call(handler, `/canvas/boards/${boardInTopic2.id}/nodes`, {
+    method: 'POST', cookie, body: {
+      type: 'manual_note', x: 100, y: 100, width: 240, height: 100, title: '基准先验观点', body: '先前研究表明推理计算量与效果成正比。'
+    }
+  });
+  assert.equal(existingNoteRes.statusCode, 201);
+  const existingNoteNode = existingNoteRes.payload.data;
+
+  // Run document map for a new document that references existingNoteNode
+  const crossMapResponse = await call(handler, `/canvas/boards/${boardInTopic2.id}/ai/document-map`, {
+    method: 'POST', cookie, body: {
+      title: '关联已有节点论文',
+      document: {
+        libraryType: 'user', libraryId: '42', itemKey: 'DOC_CROSS', attachmentKey: 'PDF_CROSS', attachmentVersion: 1
+      },
+      pages: [
+        { pageNumber: 1, text: '第一页研究问题和方法。' }
+      ]
+    }
+  });
+  assert.equal(crossMapResponse.statusCode, 201);
+  assert.equal(crossMapResponse.payload.data.cached, false);
+  const crossNodes = crossMapResponse.payload.data.nodes;
+
+  // Verify that the prompt sent to AI contained the existing card context
+  const lastAiCall = aiCalls.at(-1);
+  const userContent = String(lastAiCall.messages?.find(m => m.role === 'user')?.content || '');
+  assert.match(userContent, /当前画板已有卡片/, 'Synthesis prompt must inject current board card context');
+  assert.match(userContent, new RegExp(existingNoteNode.id), 'Synthesis prompt must include existing card ID');
+
+  // Verify that an edge connecting to the existing card was saved to SQLite
+  const boardInTopic2Edges = store.snapshot(canvasActorKey('https://issuer.example', 'api-subject'), boardInTopic2.id).edges;
+  const crossEdge = boardInTopic2Edges.find(e => e.targetNodeId === existingNoteNode.id || e.sourceNodeId === existingNoteNode.id);
+  assert.ok(crossEdge, 'existing:<nodeId> must create a real persistent edge in SQLite DB');
+  assert.equal(crossEdge.relation, 'extends', 'Edge relation extends must be preserved');
+  assert.equal(crossEdge.targetNodeId, existingNoteNode.id);
+
+  // --- Repeat Full-text Understanding on boardInTopic2 must NOT accumulate duplicate edges or self-relations ---
+  const edgesCountBeforeRepeat = store.snapshot(canvasActorKey('https://issuer.example', 'api-subject'), boardInTopic2.id).edges.length;
+  const repeatCrossMapResponse = await call(handler, `/canvas/boards/${boardInTopic2.id}/ai/document-map`, {
+    method: 'POST', cookie, body: {
+      title: '关联已有节点论文 (Repeat)',
+      document: { libraryType: 'user', libraryId: '42', itemKey: 'DOC_CROSS', attachmentKey: 'PDF_CROSS', attachmentVersion: 1 }
+    }
+  });
+  assert.equal(repeatCrossMapResponse.statusCode, 201);
+  const edgesCountAfterRepeat = store.snapshot(canvasActorKey('https://issuer.example', 'api-subject'), boardInTopic2.id).edges.length;
+  assert.equal(edgesCountAfterRepeat, edgesCountBeforeRepeat, 'Edge count must NOT increase on repeated document-map (idempotent edge deduplication)');
+
+  // Verify Stage 2 prompt excluded DOC_CROSS's own nodes (no pseudo self-relations)
+  const repeatAiCall = aiCalls.at(-1);
+  const repeatUserPrompt = String(repeatAiCall.messages?.find(m => m.role === 'user')?.content || '');
+  const existingCardsPart = repeatUserPrompt.split('当前画板已有卡片')[1] || '';
+  assert.doesNotMatch(existingCardsPart, /关联已有节点论文/, 'Stage 2 existingNodes must strictly exclude focal document nodes');
+
+  // Verify active edges connect active nodes without dangling endpoints
+  const snapCheck = store.snapshot(canvasActorKey('https://issuer.example', 'api-subject'), boardInTopic2.id);
+  const activeNodeIds = new Set(snapCheck.nodes.map(n => n.id));
+  assert.ok(snapCheck.edges.every(e => activeNodeIds.has(e.sourceNodeId) && activeNodeIds.has(e.targetNodeId)),
+    'All active edges on board must strictly connect existing active nodes without dangling endpoints');
+
+  // --- Test Edge Ownership Protection: Manual user edge must NOT be overwritten by AI Stage 2 ---
+  const crossSectionNode = crossNodes.find(n => n.title.includes('章节'));
+  const crossOverviewInitial = crossNodes.find(n => n.title.includes('全文概览'));
+  assert.ok(crossSectionNode);
+  assert.ok(crossOverviewInitial);
+
+  // 1. External manual edge
+  const userManualEdge = store.createEdge(canvasActorKey('https://issuer.example', 'api-subject'), boardInTopic2.id, {
+    sourceNodeId: crossSectionNode.id,
+    targetNodeId: existingNoteNode.id,
+    relation: 'supports',
+    label: '用户手工核验证据'
+  });
+  assert.equal(userManualEdge.origin, 'manual');
+  assert.equal(userManualEdge.label, '用户手工核验证据');
+  assert.equal(userManualEdge.version, 1);
+
+  // 2. Internal manual edge between document nodes
+  const userInternalManualEdge = store.createEdge(canvasActorKey('https://issuer.example', 'api-subject'), boardInTopic2.id, {
+    sourceNodeId: crossOverviewInitial.id,
+    targetNodeId: crossSectionNode.id,
+    relation: 'cites',
+    label: '用户内部手工批注边'
+  });
+  assert.equal(userInternalManualEdge.origin, 'manual');
+
+  // Re-run document map which outputs relation between crossSectionNode and existingNoteNode
+  await call(handler, `/canvas/boards/${boardInTopic2.id}/ai/document-map`, {
+    method: 'POST', cookie, body: {
+      title: '关联已有节点论文 (Protect Manual Edge)',
+      document: { libraryType: 'user', libraryId: '42', itemKey: 'DOC_CROSS', attachmentKey: 'PDF_CROSS', attachmentVersion: 1 }
+    }
+  });
+
+  const checkedManualEdge = store.getEdge(canvasActorKey('https://issuer.example', 'api-subject'), userManualEdge.id);
+  assert.equal(checkedManualEdge.origin, 'manual', 'Manual edge origin must remain manual');
+  assert.equal(checkedManualEdge.label, '用户手工核验证据', 'Manual edge label must NEVER be overwritten by AI document map');
+  assert.equal(checkedManualEdge.version, 1, 'Manual edge version must not be changed');
+
+  // Verify internal manual edge was preserved during in-place update
+  const checkedInternalManualEdge = store.getEdge(canvasActorKey('https://issuer.example', 'api-subject'), userInternalManualEdge.id);
+  assert.ok(checkedInternalManualEdge, 'Internal manual edge inside document must be preserved during in-place update');
+  assert.equal(checkedInternalManualEdge.origin, 'manual');
+  assert.equal(checkedInternalManualEdge.label, '用户内部手工批注边');
+
+  // --- Test P2 Edge Migration with Manual-Wins Conflict Priority when old nodes are reduced ---
+  // Create a 2nd external note
+  const extNote2 = store.createNode(canvasActorKey('https://issuer.example', 'api-subject'), boardInTopic2.id, {
+    type: 'manual_note', x: 200, y: 500, width: 200, height: 100, title: '外部笔记 2', body: '外部关联观点'
+  });
+  const crossClaimNode = crossNodes.find(n => n.title.includes('论点'));
+  assert.ok(crossClaimNode);
+
+  // Pre-create an AI context edge at (crossOverviewInitial, extNote2) with relation 'related'
+  const preExistingAiEdge = store.createEdge(canvasActorKey('https://issuer.example', 'api-subject'), boardInTopic2.id, {
+    sourceNodeId: crossOverviewInitial.id,
+    targetNodeId: extNote2.id,
+    relation: 'related',
+    label: 'AI 自动关联观点',
+    origin: 'document_map_context'
+  });
+
+  // Create a manual edge from old claim node to extNote2 with same relation 'related'
+  const manualEdgeToClaim = store.createEdge(canvasActorKey('https://issuer.example', 'api-subject'), boardInTopic2.id, {
+    sourceNodeId: crossClaimNode.id,
+    targetNodeId: extNote2.id,
+    relation: 'related',
+    label: '重要人工关联结论',
+    origin: 'manual'
+  });
+  assert.equal(manualEdgeToClaim.version, 1);
+
+  // Now project a reduced analysis for DOC_CROSS with 0 claims (so crossClaimNode is soft-deleted)
+  const reducedAnalysis = store.projectDocumentAnalysisToBoard(canvasActorKey('https://issuer.example', 'api-subject'), boardInTopic2.id, {
+    model: 'mock-model', promptVersion: 'altcanvas-document-map-v2',
+    document: { libraryType: 'user', libraryId: '42', itemKey: 'DOC_CROSS', attachmentKey: 'PDF_CROSS', pageCount: 1 },
+    graph: {
+      title: '关联已有节点论文 (Reduced)', overview: '精简版概览', evidenceQuote: '原文', evidencePage: 1,
+      sections: [{ title: '单一章节', body: '保留章节', pageStart: 1, pageEnd: 1, evidenceQuote: '原文', evidencePage: 1 }],
+      concepts: [], claims: [], relations: []
+    },
+    cached: true
+  });
+
+  // Verify old claim node is soft deleted
+  assert.equal(store.getNode(canvasActorKey('https://issuer.example', 'api-subject'), crossClaimNode.id), null);
+
+  // Manual-wins verification: the AI edge preExistingAiEdge should be replaced/deleted, and the manual edge should survive retargeted to Overview
+  assert.equal(store.getEdge(canvasActorKey('https://issuer.example', 'api-subject'), preExistingAiEdge.id), null,
+    'When manual edge retargets to existing AI edge position, manual edge must win and replace the AI edge');
+
+  const retargetedEdge = store.getEdge(canvasActorKey('https://issuer.example', 'api-subject'), manualEdgeToClaim.id);
+  assert.ok(retargetedEdge, 'Retargeted manual edge must survive');
+  const crossOverviewNode = reducedAnalysis.nodes.find(n => n.title.includes('全文概览'));
+  assert.equal(retargetedEdge.sourceNodeId, crossOverviewNode.id, 'Edge source must be retargeted to Overview');
+  assert.equal(retargetedEdge.targetNodeId, extNote2.id);
+  assert.equal(retargetedEdge.origin, 'manual', 'Retargeted edge origin must remain manual');
+  assert.equal(retargetedEdge.label, '重要人工关联结论', 'Retargeted edge must preserve user label');
+  assert.equal(retargetedEdge.version, 2, 'Retargeted edge version must increment');
+
+  // Verify provenance event was recorded
+  const provEvents = store.listProvenanceEvents(canvasActorKey('https://issuer.example', 'api-subject'), { boardId: boardInTopic2.id });
+  const retargetEvent = provEvents.find(p => p.type === 'edge.retargeted' && p.payload?.edgeId === manualEdgeToClaim.id);
+  assert.ok(retargetEvent, 'edge.retargeted provenance event must be recorded');
+  assert.equal(retargetEvent.payload.oldNodeId, crossClaimNode.id);
+  assert.equal(retargetEvent.payload.retargetedNodeId, crossOverviewNode.id);
+
+  // Verify global document analysis cache is NOT polluted with board-specific existing:<nodeId> relations
+  const globalAnalysis = store.getDocumentAnalysis(canvasActorKey('https://issuer.example', 'api-subject'), {
+    libraryType: 'user', libraryId: '42', attachmentKey: 'PDF_CROSS', attachmentVersion: 1,
+    model: 'mock-model', promptVersion: 'altcanvas-document-map-v2'
+  });
+  assert.ok(globalAnalysis);
+  assert.ok(globalAnalysis.graph.relations.every(r => !String(r.from || '').startsWith('existing:') && !String(r.to || '').startsWith('existing:')),
+    'Global document analysis cache must strictly decouple from board context and NOT contain existing:<nodeId> relations');
+
+  // Verify projecting from cache to a 3rd board works cleanly without passing pages
+  const topic3WsRes = await call(handler, '/canvas/workspaces', {
+    method: 'POST', cookie, body: { name: 'Topic 3' }
+  });
+  const boardInTopic3Res = await call(handler, `/canvas/workspaces/${topic3WsRes.payload.data.id}/boards`, {
+    method: 'POST', cookie, body: { name: 'Board in Topic 3' }
+  });
+  const boardInTopic3 = boardInTopic3Res.payload.data;
+  const cacheProjectRes = await call(handler, `/canvas/boards/${boardInTopic3.id}/ai/document-map`, {
+    method: 'POST', cookie, body: {
+      title: 'Topic 3 Cached Projection',
+      document: { libraryType: 'user', libraryId: '42', itemKey: 'DOC_CROSS', attachmentKey: 'PDF_CROSS', attachmentVersion: 1 }
+    }
+  });
+  assert.equal(cacheProjectRes.statusCode, 201);
+  assert.equal(cacheProjectRes.payload.data.cached, true);
+  assert.equal(cacheProjectRes.payload.data.nodes.length, 4);
+
+  // Non-overlapping placement: newly created nodes must be offset from existing cards
+  assert.ok(crossNodes.every(n => n.x >= 300), 'New document map nodes must be positioned with positive X offset from existing cards');
+
   const aiApiRes = await call(handler, `/canvas/boards/${apiBoard.id}/ai/generate`, {
     method: 'POST',
     cookie,
@@ -677,6 +937,7 @@ try {
   assert.equal(aiApiRes.payload.data.node.type, 'ai_output');
   assert.match(aiApiRes.payload.data.node.body, /【学术分析】/);
   assert.equal(aiApiRes.payload.data.edges.length, 2);
+  assert.ok(aiApiRes.payload.data.edges.every(e => e.origin === 'ai_synthesis'), 'AI synthesis edges must have origin ai_synthesis');
   assert.ok(aiCalls.at(-1).messages.length >= 2);
   assert.equal(aiPrivateConfigs.at(-1).model, 'personal-model');
   assert.equal('endpoint' in aiCalls.at(-1), false, 'browser endpoint must never reach the AI client');
@@ -832,7 +1093,7 @@ try {
 
     const migratedStore = new CanvasStore(v2DbPath);
     const maxV = migratedStore.db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v;
-    assert.equal(maxV, 9, 'Database must be upgraded to schema v9');
+    assert.equal(maxV, 11, 'Database must be upgraded to schema v11');
 
     // Verify document_metas table and methods
     const savedMeta = migratedStore.saveDocumentMeta(actor, {
@@ -977,7 +1238,7 @@ try {
 
     const migratedV5Store = new CanvasStore(v5DbPath);
     const maxV = migratedV5Store.db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v;
-    assert.equal(maxV, 9, 'Database must be upgraded from v5 to v9');
+    assert.equal(maxV, 11, 'Database must be upgraded from v5 to v11');
 
     const v5Analysis = migratedV5Store.getDocumentAnalysis(actor, {
       libraryType: 'user', libraryId: '42', attachmentKey: 'ATT_V5', attachmentVersion: 1, model: 'gpt-4o', promptVersion: 'v1'
@@ -1060,7 +1321,7 @@ try {
 
     const migratedV7Store = new CanvasStore(v7DbPath);
     const maxV = migratedV7Store.db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v;
-    assert.equal(maxV, 9, 'Database must be upgraded from v7 to v9');
+    assert.equal(maxV, 11, 'Database must be upgraded from v7 to v11');
 
     // Assert existing knowledge relations were 100% preserved
     const rels = migratedV7Store.listKnowledgeRelations(actor);
@@ -1083,9 +1344,66 @@ try {
     fs.rmSync(v7Dir, { recursive: true, force: true });
   }
 
-  // --- Schema v9: Topics, Topic Documents, Collection Bindings, Inbox, Jobs, Document Analyses, Document Metas, Knowledge Units & Relations ---
+  // --- Schema v10 -> v11 Migration Test (edges origin and projection_key backfill) ---
+  const v10Dir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-v10-migration-test-'));
+  const v10DbPath = path.join(v10Dir, 'canvas-v10.sqlite');
+  try {
+    const rawV10 = new DatabaseSync(v10DbPath);
+    rawV10.exec(`
+      CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL) STRICT;
+      INSERT INTO schema_migrations (version, applied_at) VALUES (1, '2026-08-30T00:00:00.000Z');
+      INSERT INTO schema_migrations (version, applied_at) VALUES (10, '2026-08-31T00:00:00.000Z');
+
+      CREATE TABLE workspaces (id TEXT PRIMARY KEY, owner_key TEXT NOT NULL, name TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT) STRICT;
+      CREATE TABLE boards (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, name TEXT NOT NULL, viewport_x REAL NOT NULL DEFAULT 0, viewport_y REAL NOT NULL DEFAULT 0, viewport_zoom REAL NOT NULL DEFAULT 1, version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT) STRICT;
+      CREATE TABLE nodes (id TEXT PRIMARY KEY, board_id TEXT NOT NULL, node_type TEXT NOT NULL, x REAL NOT NULL, y REAL NOT NULL, width REAL NOT NULL, height REAL NOT NULL, z_index INTEGER NOT NULL DEFAULT 0, title TEXT NOT NULL DEFAULT '', body TEXT NOT NULL DEFAULT '', color TEXT, source_ref_id TEXT, version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT) STRICT;
+      CREATE TABLE edges (id TEXT PRIMARY KEY, board_id TEXT NOT NULL, source_node_id TEXT NOT NULL, target_node_id TEXT NOT NULL, relation TEXT NOT NULL, label TEXT NOT NULL DEFAULT '', version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT) STRICT;
+
+      INSERT INTO workspaces (id, owner_key, name, created_at, updated_at) VALUES ('ws-v10', '${actor}', 'V10 Workspace', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
+      INSERT INTO boards (id, workspace_id, name, created_at, updated_at) VALUES ('board-v10', 'ws-v10', 'V10 Board', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
+      INSERT INTO nodes (id, board_id, node_type, x, y, width, height, created_at, updated_at) VALUES ('n1', 'board-v10', 'manual_note', 0, 0, 100, 100, '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
+      INSERT INTO nodes (id, board_id, node_type, x, y, width, height, created_at, updated_at) VALUES ('n2', 'board-v10', 'manual_note', 200, 0, 100, 100, '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
+      INSERT INTO edges (id, board_id, source_node_id, target_node_id, relation, label, created_at, updated_at) VALUES ('e-v10-1', 'board-v10', 'n1', 'n2', 'supports', 'Legacy Edge', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
+    `);
+    rawV10.close();
+
+    const migratedV10Store = new CanvasStore(v10DbPath);
+    const maxV10 = migratedV10Store.db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v;
+    assert.equal(maxV10, 11, 'Database must be upgraded from v10 to v11');
+
+    const migratedEdge = migratedV10Store.getEdge(actor, 'e-v10-1');
+    assert.ok(migratedEdge);
+    assert.equal(migratedEdge.origin, 'manual', 'Legacy edges must default to origin manual');
+    assert.equal(migratedEdge.projectionKey, null);
+    assert.equal(migratedEdge.label, 'Legacy Edge');
+
+    // Verify sqlite_master contains origin CHECK constraint
+    const tableSql = migratedV10Store.db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='edges'").get().sql;
+    assert.match(tableSql, /CHECK \(origin IN \('manual', 'document_map_internal', 'document_map_context', 't3_expand', 'ai_synthesis'\)\)/);
+
+    // Verify Store method rejects illegal origin
+    assert.throws(() => {
+      migratedV10Store.createEdge(actor, 'board-v10', {
+        sourceNodeId: 'n1', targetNodeId: 'n2', relation: 'supports', origin: 'bogus_origin'
+      });
+    }, /invalid edge origin/);
+
+    // Verify SQLite directly rejects illegal origin with CHECK constraint failure
+    assert.throws(() => {
+      migratedV10Store.db.prepare(`
+        INSERT INTO edges (id, board_id, source_node_id, target_node_id, relation, origin, created_at, updated_at)
+        VALUES ('e-illegal', 'board-v10', 'n1', 'n2', 'supports', 'illegal_raw_origin', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z')
+      `).run();
+    }, /CHECK constraint failed/);
+
+    migratedV10Store.close();
+  } finally {
+    fs.rmSync(v10Dir, { recursive: true, force: true });
+  }
+
+  // --- Schema v11: Topics, Topic Documents, Collection Bindings, Inbox, Jobs, Document Analyses, Document Metas, Knowledge Units & Relations, Edge Origins ---
   const currentMigration = store.db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v;
-  assert.equal(currentMigration, 9, 'Schema migration version 9 must be applied');
+  assert.equal(currentMigration, 11, 'Schema migration version 11 must be applied');
 
   // Topic workspace with metadata
   const topic1 = store.createWorkspace(actor, {
@@ -1534,7 +1852,7 @@ try {
 
   store.saveDocumentAnalysis(canvasActorKey('https://issuer.example', 'api-subject'), {
     libraryType: 'user', libraryId: '42', itemKey: 'DOC_A', attachmentKey: 'PDF_A', attachmentVersion: 1,
-    model: 'mock-model', promptVersion: 'altcanvas-document-map-v1', status: 'ready',
+    model: 'mock-model', promptVersion: 'altcanvas-document-map-v2', status: 'ready',
     documentTitle: 'DeepSeek-V3 架构解析', pageCount: 10,
     graph: {
       title: 'DeepSeek-V3 架构解析', overview: 'MoE 架构与 MLA 注意力机制。', evidenceQuote: 'MLA 注意力大幅减少 KV 缓存。', evidencePage: 3,
@@ -1547,7 +1865,7 @@ try {
 
   store.saveDocumentAnalysis(canvasActorKey('https://issuer.example', 'api-subject'), {
     libraryType: 'user', libraryId: '42', itemKey: 'DOC_B', attachmentKey: 'PDF_B', attachmentVersion: 1,
-    model: 'mock-model', promptVersion: 'altcanvas-document-map-v1', status: 'ready',
+    model: 'mock-model', promptVersion: 'altcanvas-document-map-v2', status: 'ready',
     documentTitle: 'Kimi k1.5 强化学习技术报告', pageCount: 12,
     graph: {
       title: 'Kimi k1.5 强化学习技术报告', overview: '长上下文强化学习与推理扩展。', evidenceQuote: 'RL 驱动长链推理。', evidencePage: 2,
@@ -1596,6 +1914,8 @@ try {
   const expandedNode = expandRes.payload.data.createdNodes[0];
   assert.match(expandedNode.title, /Kimi k1\.5/);
   assert.equal(expandRes.payload.data.createdEdges[0].relation, 'supports');
+  assert.equal(expandRes.payload.data.createdEdges[0].origin, 't3_expand', 'T3 expand edge must have origin t3_expand');
+  assert.equal(expandRes.payload.data.createdEdges[0].projectionKey, `t3:${focalCard.id}`, 'T3 expand edge must have projectionKey');
 
   // Progressive Collapse: Remove expanded related cards
   const collapseRes = await call(handler, `/canvas/boards/${topicBoard.id}/collapse-related`, {
@@ -1614,7 +1934,7 @@ try {
   assert.doesNotThrow(() => {
     store.saveDocumentAnalysis(canvasActorKey('https://issuer.example', 'api-subject'), {
       libraryType: 'user', libraryId: '42', itemKey: 'DOC_A', attachmentKey: 'PDF_A', attachmentVersion: 1,
-      model: 'mock-model', promptVersion: 'altcanvas-document-map-v1', status: 'ready',
+      model: 'mock-model', promptVersion: 'altcanvas-document-map-v2', status: 'ready',
       documentTitle: 'DeepSeek-V3 架构解析（刷新分析）', pageCount: 10,
       graph: {
         title: 'DeepSeek-V3 架构解析（刷新分析）', overview: '刷新后的 MoE 概览。', evidenceQuote: 'MLA 创新说明。', evidencePage: 4,
@@ -1629,7 +1949,7 @@ try {
   });
   store.saveDocumentAnalysis(canvasActorKey('https://issuer.example', 'api-subject'), {
     libraryType: 'group', libraryId: '7', itemKey: 'DOC_A', attachmentKey: 'PDF_GROUP_A', attachmentVersion: 1,
-    model: 'mock-model', promptVersion: 'altcanvas-document-map-v1', status: 'ready',
+    model: 'mock-model', promptVersion: 'altcanvas-document-map-v2', status: 'ready',
     documentTitle: 'Group 7 内部研报 DOC_A', pageCount: 5,
     graph: {
       title: 'Group 7 内部研报 DOC_A', overview: '组文库独有报告内容。', evidenceQuote: '组文库证据。', evidencePage: 2,
@@ -1725,7 +2045,7 @@ try {
   });
   store.saveDocumentAnalysis(canvasActorKey('https://issuer.example', 'api-subject'), {
     libraryType: 'user', libraryId: '42', itemKey: 'DOC_OTHER_WS', attachmentKey: 'ATT_OTHER_WS', attachmentVersion: 1,
-    model: 'mock-model', promptVersion: 'altcanvas-document-map-v1', status: 'ready', documentTitle: 'Other WS Doc',
+    model: 'mock-model', promptVersion: 'altcanvas-document-map-v2', status: 'ready', documentTitle: 'Other WS Doc',
     pageCount: 3, graph: { overview: 'Other WS Overview', claims: [{ title: 'Other Claim', body: 'Other Body' }] }
   });
   const otherWsUnits = store.listTopicKnowledgeUnits(canvasActorKey('https://issuer.example', 'api-subject'), otherTopicWs.id);
@@ -1743,7 +2063,7 @@ try {
   // Stale attachment/analysis focalUnitId rejection (when doc attachment has updated and old unit is inactive)
   const supersededAnalysis = store.saveDocumentAnalysis(canvasActorKey('https://issuer.example', 'api-subject'), {
     libraryType: 'user', libraryId: '42', itemKey: 'DOC_STALE_ATTACH_TEST', attachmentKey: 'ATT_SUPERSEDED', attachmentVersion: 1,
-    model: 'mock-model', promptVersion: 'altcanvas-document-map-v1', status: 'ready', documentTitle: 'Old Version Doc',
+    model: 'mock-model', promptVersion: 'altcanvas-document-map-v2', status: 'ready', documentTitle: 'Old Version Doc',
     pageCount: 2, graph: { overview: 'Old Overview' }
   });
   const supersededUnit = store.db.prepare('SELECT * FROM knowledge_units WHERE analysis_id = ?').get(supersededAnalysis.id);
@@ -1754,7 +2074,7 @@ try {
   });
   store.saveDocumentAnalysis(canvasActorKey('https://issuer.example', 'api-subject'), {
     libraryType: 'user', libraryId: '42', itemKey: 'DOC_STALE_ATTACH_TEST', attachmentKey: 'ATT_ACTIVE_NEW', attachmentVersion: 2,
-    model: 'mock-model', promptVersion: 'altcanvas-document-map-v1', status: 'ready', documentTitle: 'New Version Doc',
+    model: 'mock-model', promptVersion: 'altcanvas-document-map-v2', status: 'ready', documentTitle: 'New Version Doc',
     pageCount: 2, graph: { overview: 'New Active Overview' }
   });
   const staleUnitRecallRes = await call(handler, `/canvas/workspaces/${otherTopicWs.id}/related-knowledge`, {
@@ -1809,7 +2129,7 @@ try {
 
   store.saveDocumentAnalysis(canvasActorKey('https://issuer.example', 'api-subject'), {
     libraryType: 'user', libraryId: '42', itemKey: 'DOC_SWITCH', attachmentKey: 'PDF_OLD', attachmentVersion: 10,
-    model: 'mock-model', promptVersion: 'altcanvas-document-map-v1', status: 'ready',
+    model: 'mock-model', promptVersion: 'altcanvas-document-map-v2', status: 'ready',
     documentTitle: '旧附件研报', pageCount: 5,
     graph: { title: '旧附件研报', overview: '旧附件内容。', evidenceQuote: '旧证据。', evidencePage: 1, sections: [], concepts: [], claims: [], relations: [] }
   });
@@ -1825,7 +2145,7 @@ try {
 
   store.saveDocumentAnalysis(canvasActorKey('https://issuer.example', 'api-subject'), {
     libraryType: 'user', libraryId: '42', itemKey: 'DOC_SWITCH', attachmentKey: 'PDF_NEW', attachmentVersion: 1,
-    model: 'mock-model', promptVersion: 'altcanvas-document-map-v1', status: 'ready',
+    model: 'mock-model', promptVersion: 'altcanvas-document-map-v2', status: 'ready',
     documentTitle: '新附件研报', pageCount: 8,
     graph: { title: '新附件研报', overview: '新附件全新内容。', evidenceQuote: '新证据。', evidencePage: 2, sections: [], concepts: [], claims: [], relations: [] }
   });
@@ -1840,7 +2160,7 @@ try {
   // 9. Version upgrade invalidates older knowledge units in topic recall
   store.saveDocumentAnalysis(canvasActorKey('https://issuer.example', 'api-subject'), {
     libraryType: 'user', libraryId: '42', itemKey: 'DOC_B', attachmentKey: 'PDF_B', attachmentVersion: 2, // Upgrade to version 2
-    model: 'mock-model', promptVersion: 'altcanvas-document-map-v1', status: 'ready',
+    model: 'mock-model', promptVersion: 'altcanvas-document-map-v2', status: 'ready',
     documentTitle: 'Kimi k1.5 强化学习技术报告 (V2)', pageCount: 15,
     graph: {
       title: 'Kimi k1.5 强化学习技术报告 (V2)', overview: 'V2 全新长链强化学习与推理扩展。', evidenceQuote: 'V2 证据。', evidencePage: 5,
@@ -2470,18 +2790,107 @@ try {
   assert.equal(getJobRes.statusCode, 200);
   assert.equal(getJobRes.payload.data.id, createdJobId);
 
-  // Job retry on failed job test
-  const failedJob = store.enqueueJob(canvasActorKey('https://issuer.example', 'api-subject'), {
+  // Job retry on failed job test with payload execution
+  const failedJobWithPayload = store.enqueueJob(canvasActorKey('https://issuer.example', 'api-subject'), {
     jobType: 'import_document',
     resourceType: 'inbox_entry',
-    resourceId: 'fail-test'
+    resourceId: 'pending',
+    payload: {
+      resolved: {
+        sourceType: 'doi',
+        title: 'Retried Paper Title',
+        creators: [{ name: 'Test Author' }],
+        year: 2024,
+        abstractNote: 'Retried abstract',
+        doi: '10.1000/retry-test'
+      },
+      targetWorkspaceId: apiTopic.id
+    }
   });
-  store.updateJobState(failedJob.id, { state: 'failed', errorCode: 'network_timeout' });
+  store.updateJobState(failedJobWithPayload.id, { state: 'failed', errorCode: 'network_timeout' });
 
-  const retryJobRes = await call(handler, `/canvas/imports/${failedJob.id}/retry`, { method: 'POST', cookie });
+  const retryJobRes = await call(handler, `/canvas/imports/${failedJobWithPayload.id}/retry`, { method: 'POST', cookie });
   assert.equal(retryJobRes.statusCode, 200);
   assert.equal(retryJobRes.payload.data.state, 'queued');
   assert.equal(retryJobRes.payload.data.attempts, 1);
+
+  // Wait brief tick for async retry runner
+  await new Promise(resolve => setTimeout(resolve, 50));
+  const completedRetriedJob = store.getJob(canvasActorKey('https://issuer.example', 'api-subject'), failedJobWithPayload.id);
+  assert.equal(completedRetriedJob.state, 'completed');
+  assert.ok(completedRetriedJob.resultSummary?.entryId);
+
+  // Verify DOI persistence in inbox entry
+  const retriedInboxEntry = store.getInboxEntry(canvasActorKey('https://issuer.example', 'api-subject'), completedRetriedJob.resultSummary.entryId);
+  assert.equal(retriedInboxEntry.doi, '10.1000/retry-test', 'Inbox entry must persist DOI column');
+
+  // Verify DOI duplicate candidate search
+  const doiDupCandidates = findDuplicateCandidates(store, canvasActorKey('https://issuer.example', 'api-subject'), {
+    title: 'Different Title',
+    doi: '10.1000/retry-test'
+  });
+  assert.ok(doiDupCandidates.length > 0, 'findDuplicateCandidates must match by persisted DOI column');
+  assert.equal(doiDupCandidates[0].doi, '10.1000/retry-test');
+
+  // Verify DOI in document_metas
+  const metaWithDoi = store.saveDocumentMeta(canvasActorKey('https://issuer.example', 'api-subject'), {
+    libraryType: 'user', libraryId: '42', itemKey: 'META_DOI_TEST',
+    doi: '10.2000/meta-doi-test', cleanTitle: 'Meta DOI Report'
+  });
+  assert.equal(metaWithDoi.doi, '10.2000/meta-doi-test');
+  const metaDupCandidates = findDuplicateCandidates(store, canvasActorKey('https://issuer.example', 'api-subject'), {
+    title: 'Random Title',
+    doi: '10.2000/meta-doi-test'
+  });
+  assert.ok(metaDupCandidates.some(c => c.targetType === 'document_meta' && c.doi === '10.2000/meta-doi-test'));
+
+  // --- Test recoverQueuedAndRunningJobs without active session ---
+  const orphanJob = store.enqueueJob(canvasActorKey('https://issuer.example', 'api-subject'), {
+    jobType: 'import_document',
+    resourceType: 'inbox_entry',
+    resourceId: 'pending',
+    payload: {
+      resolved: {
+        sourceType: 'doi',
+        title: 'Crash Recovery Paper',
+        creators: [{ name: 'Crash Author' }],
+        year: 2026,
+        doi: '10.9999/crash-recovery-test'
+      },
+      targetWorkspaceId: apiTopic.id,
+      libraryType: 'user',
+      libraryId: '42'
+    }
+  });
+  store.updateJobState(orphanJob.id, { state: 'running' }); // left in running by process crash
+
+  // Trigger cold startup recovery
+  recoverQueuedAndRunningJobs(store);
+  await new Promise(resolve => setTimeout(resolve, 60));
+
+  const recoveredJob = store.getJob(canvasActorKey('https://issuer.example', 'api-subject'), orphanJob.id);
+  assert.equal(recoveredJob.state, 'completed', 'Cold-started job recovery must finish successfully');
+  const recoveredEntry = store.getInboxEntry(canvasActorKey('https://issuer.example', 'api-subject'), recoveredJob.resultSummary.entryId);
+  assert.equal(recoveredEntry.libraryId, '42', 'Recovered import entry must be written to the authentic user libraryId, not 0');
+  assert.equal(recoveredEntry.doi, '10.9999/crash-recovery-test');
+
+  // --- Edge & Knowledge Relations extended types: extends, same_method, context_differs ---
+  const activeKUs = store.listTopicKnowledgeUnits(canvasActorKey('https://issuer.example', 'api-subject'), apiTopic.id);
+  assert.ok(activeKUs.length >= 3, 'Must have active knowledge units');
+  const savedExtendsRel = store.saveKnowledgeRelation(canvasActorKey('https://issuer.example', 'api-subject'), {
+    sourceUnitId: activeKUs[0].id, targetUnitId: activeKUs[1].id, relationType: 'extends', confidence: 0.88, reason: '扩展了核心方法'
+  });
+  assert.equal(savedExtendsRel.relationType, 'extends');
+
+  const savedSameMethodRel = store.saveKnowledgeRelation(canvasActorKey('https://issuer.example', 'api-subject'), {
+    sourceUnitId: activeKUs[1].id, targetUnitId: activeKUs[2].id, relationType: 'same_method', confidence: 0.92, reason: '使用相同基线'
+  });
+  assert.equal(savedSameMethodRel.relationType, 'same_method');
+
+  const savedContextDiffRel = store.saveKnowledgeRelation(canvasActorKey('https://issuer.example', 'api-subject'), {
+    sourceUnitId: activeKUs[0].id, targetUnitId: activeKUs[2].id, relationType: 'context_differs', confidence: 0.75, reason: '语境不同'
+  });
+  assert.equal(savedContextDiffRel.relationType, 'context_differs');
 
   const clearedAiConfigResponse = await call(handler, '/canvas/ai/config', { method: 'DELETE', cookie });
   assert.equal(clearedAiConfigResponse.statusCode, 200);

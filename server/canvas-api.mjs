@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import {
   CanvasConflictError,
   CanvasNotFoundError,
@@ -86,6 +87,19 @@ function parseAiJson(text) {
   catch { throw new Error('AI 返回的画板结构不是有效 JSON'); }
 }
 
+function parseAiJsonArray(text) {
+  const raw = String(text || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+  const start = raw.indexOf('[');
+  const end = raw.lastIndexOf(']');
+  if (start < 0 || end <= start) return [];
+  try {
+    const parsed = JSON.parse(raw.slice(start, end + 1));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
 function saveClassificationDocumentMetas(store, actorKey, entries, parsed) {
   const rawMap = parsed?.documentMetadata || parsed?.documentMetas || parsed?.titles || {};
   const saved = [];
@@ -121,6 +135,99 @@ function saveClassificationDocumentMetas(store, actorKey, entries, parsed) {
   }
 
   return saved;
+}
+
+async function executeImportJob(store, actorKey, job, session = null) {
+  if (!job || job.jobType !== 'import_document') return null;
+  store.updateJobState(job.id, { state: 'running', startedAt: new Date().toISOString() });
+
+  try {
+    const payload = job.payload || {};
+    let resolved = payload.resolved;
+    if (!resolved && (payload.input || payload.url || payload.identifier)) {
+      resolved = await resolveImportInput(payload.input || payload.url || payload.identifier);
+    }
+    if (!resolved) {
+      throw new Error('No import metadata could be resolved');
+    }
+
+    const deterministicHash = crypto.createHash('sha256').update(job.id).digest('hex').slice(0, 10).toUpperCase();
+    const itemKey = payload.itemKey || job.resultSummary?.itemKey || `IMP_${deterministicHash}`;
+    const tags = [resolved.sourceType, resolved.doi ? 'doi' : '', resolved.arxivId ? 'arxiv' : ''].filter(Boolean);
+
+    const libraryType = payload.libraryType || (session ? 'user' : null);
+    const libraryId = payload.libraryId || (session ? String(session.userId) : null);
+    if (!libraryType || !libraryId) {
+      throw new Error('Import job is missing libraryType/libraryId context');
+    }
+
+    const entryInput = {
+      libraryType,
+      libraryId,
+      itemKey,
+      detectedFrom: 'import',
+      title: string(resolved.title || '未命名导入文献', 'title', { max: 500 }),
+      creators: Array.isArray(resolved.creators) ? resolved.creators : [],
+      year: resolved.year ? Number(resolved.year) : null,
+      abstractNote: string(resolved.abstractNote || '', 'abstractNote', { max: 20_000 }),
+      tags,
+      doi: resolved.doi ? String(resolved.doi).trim() : null
+    };
+
+    const upserted = store.upsertInboxEntries(actorKey, [entryInput]);
+    const entry = upserted[0];
+
+    let topicDocument = null;
+    if (payload.targetWorkspaceId && entry) {
+      topicDocument = store.addTopicDocument(actorKey, payload.targetWorkspaceId, {
+        libraryType: entry.libraryType,
+        libraryId: entry.libraryId,
+        itemKey: entry.itemKey,
+        status: 'accepted',
+        origin: 'canvas_import'
+      });
+    }
+
+    const updatedJob = store.updateJobState(job.id, {
+      state: 'completed',
+      finishedAt: new Date().toISOString(),
+      errorCode: null,
+      resultSummary: {
+        entryId: entry?.id,
+        itemKey,
+        targetWorkspaceId: payload.targetWorkspaceId || null,
+        topicDocumentId: topicDocument?.id || null
+      }
+    });
+
+    return { job: updatedJob, entry, topicDocument };
+  } catch (err) {
+    const failedJob = store.updateJobState(job.id, {
+      state: 'failed',
+      finishedAt: new Date().toISOString(),
+      errorCode: 'import_failed',
+      resultSummary: { error: err.message }
+    });
+    return { job: failedJob, error: err.message };
+  }
+}
+
+export function recoverQueuedAndRunningJobs(store) {
+  if (!store?.db) return;
+  try {
+    const pendingJobs = store.db.prepare(`
+      SELECT * FROM jobs WHERE state IN ('queued', 'running') ORDER BY created_at ASC
+    `).all();
+    for (const rawJob of pendingJobs) {
+      const actorKey = rawJob.owner_key;
+      const job = store.getJob(actorKey, rawJob.id);
+      if (job && job.jobType === 'import_document' && job.payload) {
+        setImmediate(() => {
+          executeImportJob(store, actorKey, job).catch(() => {});
+        });
+      }
+    }
+  } catch {}
 }
 
 function searchableText(value) {
@@ -860,6 +967,8 @@ export function createCanvasHandler(store, {
   aiEndpointValidator = validateAiEndpoint,
   fetchAltero = defaultFetchAltero,
 } = {}) {
+  recoverQueuedAndRunningJobs(store);
+
   return async function handleCanvasApi(req, res, url) {
     const actor = actorFromRequest(req);
     if (!actor) {
@@ -1011,56 +1120,30 @@ export function createCanvasHandler(store, {
         const importJob = store.enqueueJob(actor.actorKey, {
           jobType: 'import_document',
           resourceType: 'inbox_entry',
-          resourceId: 'pending'
-        });
-
-        store.updateJobState(importJob.id, { state: 'running', startedAt: new Date().toISOString() });
-
-        const itemKey = `IMP_${Date.now().toString(36).toUpperCase()}_${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
-        const tags = [resolved.sourceType, resolved.doi ? 'doi' : '', resolved.arxivId ? 'arxiv' : ''].filter(Boolean);
-
-        const entryInput = {
-          libraryType: 'user',
-          libraryId: String(actor.session.userId),
-          itemKey,
-          detectedFrom: 'import',
-          title: string(resolved.title || '未命名导入文献', 'title', { max: 500 }),
-          creators: Array.isArray(resolved.creators) ? resolved.creators : [],
-          year: resolved.year ? Number(resolved.year) : null,
-          abstractNote: string(resolved.abstractNote || '', 'abstractNote', { max: 20_000 }),
-          tags
-        };
-
-        const upserted = store.upsertInboxEntries(actor.actorKey, [entryInput]);
-        const entry = upserted[0];
-
-        let topicDocument = null;
-        if (targetWorkspaceId && entry) {
-          topicDocument = store.addTopicDocument(actor.actorKey, targetWorkspaceId, {
-            libraryType: entry.libraryType,
-            libraryId: entry.libraryId,
-            itemKey: entry.itemKey,
-            status: 'accepted',
-            origin: 'canvas_import'
-          });
-        }
-
-        const updatedJob = store.updateJobState(importJob.id, {
-          state: 'completed',
-          finishedAt: new Date().toISOString(),
-          resultSummary: {
-            entryId: entry?.id,
-            itemKey,
+          resourceId: 'pending',
+          payload: {
+            input: body.input,
+            url: body.url,
+            identifier: body.identifier,
+            resolved,
             targetWorkspaceId: targetWorkspaceId || null,
-            topicDocumentId: topicDocument?.id || null
+            autoAccept: Boolean(body.autoAccept),
+            libraryType: 'user',
+            libraryId: String(actor.session.userId)
           }
         });
 
+        const execResult = await executeImportJob(store, actor.actorKey, importJob, actor.session);
+        if (execResult.error && !execResult.entry) {
+          json(res, 500, { error: { code: 'import_failed', message: execResult.error }, data: { job: execResult.job } });
+          return;
+        }
+
         json(res, 201, {
           data: {
-            job: updatedJob,
-            entry,
-            topicDocument
+            job: execResult.job,
+            entry: execResult.entry,
+            topicDocument: execResult.topicDocument
           }
         });
         return;
@@ -1080,6 +1163,11 @@ export function createCanvasHandler(store, {
           errorCode: null,
           incrementAttempts: true
         });
+        if (job.payload) {
+          setImmediate(() => {
+            executeImportJob(store, actor.actorKey, retried, actor.session).catch(() => {});
+          });
+        }
         json(res, 200, { data: retried });
         return;
       }
@@ -1650,7 +1738,7 @@ ${textSnippet.slice(0, 8000) || '无'}`;
           return;
         }
 
-        const promptVersion = 'altcanvas-document-map-v1';
+        const promptVersion = 'altcanvas-document-map-v2';
         const cachedAnalysis = store.getDocumentAnalysis(actor.actorKey, {
           libraryType: documentSource.libraryType,
           libraryId: documentSource.libraryId,
@@ -1660,92 +1748,182 @@ ${textSnippet.slice(0, 8000) || '无'}`;
           promptVersion
         });
 
-        if (cachedAnalysis && cachedAnalysis.status === 'ready' && cachedAnalysis.graph) {
-          const result = store.projectDocumentAnalysisToBoard(actor.actorKey, boardId, {
-            model: publicConfig.model,
-            promptVersion,
-            document: { ...documentSource, title, pageCount: cachedAnalysis.pageCount || body.pages?.length || 1 },
-            graph: cachedAnalysis.graph,
-            cached: true
-          });
-          json(res, 201, { data: { ...result, cached: true } });
-          return;
-        }
+        const focalSourceRefs = new Set(
+          store.db.prepare(`
+            SELECT id FROM source_refs
+            WHERE owner_key = ? AND library_type = ? AND library_id = ? AND item_key = ?
+              AND (? IS NULL OR attachment_key = ?)
+          `).all(actor.actorKey, documentSource.libraryType, String(documentSource.libraryId), documentSource.itemKey,
+                 documentSource.attachmentKey || null, documentSource.attachmentKey || null).map(r => r.id)
+        );
+
+        const currentSnapshot = store.snapshot(actor.actorKey, boardId);
+        const existingNodes = (currentSnapshot.nodes || [])
+          .filter(n => !focalSourceRefs.has(n.sourceRefId))
+          .map(n => ({
+            id: n.id,
+            type: n.type,
+            title: n.title,
+            body: (n.body || '').slice(0, 300)
+          }));
+        const existingNodeIds = existingNodes.map(n => n.id);
 
         if (body.checkOnly) {
-          json(res, 200, { data: { cached: false } });
+          const alreadyOnBoard = store.hasDocumentOnBoard(actor.actorKey, boardId, documentSource);
+          json(res, 200, { data: { cached: Boolean(cachedAnalysis && cachedAnalysis.status === 'ready' && cachedAnalysis.graph), alreadyOnBoard } });
           return;
         }
 
-        if (!Array.isArray(body.pages) || body.pages.length < 1 || body.pages.length > 500) {
-          throw new TypeError('pages must contain between 1 and 500 PDF pages');
-        }
-        let textChars = 0;
-        const pages = body.pages.map((item, index) => {
-          if (!item || typeof item !== 'object' || Array.isArray(item)) throw new TypeError('page is invalid');
-          const pageNumber = number(item.pageNumber, 'page.pageNumber', { min: 1, max: 5000, integer: true });
-          const pageText = string(item.text || '', 'page.text', { max: 80_000 });
-          textChars += pageText.length;
-          return { pageNumber, text: pageText, index };
-        }).filter(item => item.text);
-        if (!pages.length) throw new TypeError('PDF 没有可提取的文本');
-        if (textChars > MAX_DOCUMENT_TEXT_CHARS) {
-          const limitError = new Error(`PDF 可提取文本超过当前全文分析上限（${MAX_DOCUMENT_TEXT_CHARS} 字符）`);
-          limitError.status = 413;
-          throw limitError;
+        let baseGraph = null;
+        let pageCount = 1;
+        let isCached = false;
+
+        if (cachedAnalysis && cachedAnalysis.status === 'ready' && cachedAnalysis.graph) {
+          baseGraph = cachedAnalysis.graph;
+          pageCount = cachedAnalysis.pageCount || body.pages?.length || 1;
+          isCached = true;
+        } else {
+          if (!Array.isArray(body.pages) || body.pages.length < 1 || body.pages.length > 500) {
+            throw new TypeError('pages must contain between 1 and 500 PDF pages');
+          }
+          let textChars = 0;
+          const pages = body.pages.map((item, index) => {
+            if (!item || typeof item !== 'object' || Array.isArray(item)) throw new TypeError('page is invalid');
+            const pageNumber = number(item.pageNumber, 'page.pageNumber', { min: 1, max: 5000, integer: true });
+            const pageText = string(item.text || '', 'page.text', { max: 80_000 });
+            textChars += pageText.length;
+            return { pageNumber, text: pageText, index };
+          }).filter(item => item.text);
+          if (!pages.length) throw new TypeError('PDF 没有可提取的文本');
+          if (textChars > MAX_DOCUMENT_TEXT_CHARS) {
+            const limitError = new Error(`PDF 可提取文本超过当前全文分析上限（${MAX_DOCUMENT_TEXT_CHARS} 字符）`);
+            limitError.status = 413;
+            throw limitError;
+          }
+
+          try {
+            const chunks = documentChunks(pages);
+            const chunkSummaries = await mapWithConcurrency(chunks, 3, (chunk, index) => aiCompletion({
+              messages: [
+                { role: 'system', content: [
+                  '你是学术论文阅读助手。完整阅读所给页段并做结构化中间笔记。',
+                  '保留章节结构、关键概念定义、主要论点、方法、数据/证据、结论、限制，以及准确页码。',
+                  '每项重要发现都附带一段来自所给正文的逐字原文短引用（不要改写）及其页码，供后续核验。',
+                  '不要写泛泛评价，不要遗漏相互矛盾或限定性的内容。这是内部合成材料。'
+                ].join('\n') },
+                { role: 'user', content: `文档《${title}》第 ${index + 1}/${chunks.length} 个页段：\n\n${chunk}` }
+              ],
+              temperature: 0.2
+            }, privateConfig));
+
+            // Stage 1: Pure document synthesis (topic-agnostic base graph)
+            const synthesis = await aiCompletion({
+              messages: [
+                { role: 'system', content: [
+                  '你要把一篇 PDF 的逐段阅读笔记组织成帮助读者快速理解全文的空间画板。',
+                  '只输出一个 JSON 对象，不要 Markdown 代码围栏。内容必须使用简体中文。',
+                  'JSON schema:',
+                  '{"title":"...","overview":"完整全文概览","evidenceQuote":"逐字原文","evidencePage":1,',
+                  '"sections":[{"title":"...","body":"章节作用和内容","pageStart":1,"pageEnd":3,"evidenceQuote":"逐字原文","evidencePage":2}],',
+                  '"concepts":[{"title":"...","body":"定义、意义与上下文","pageStart":2,"pageEnd":2,"evidenceQuote":"逐字原文","evidencePage":2}],',
+                  '"claims":[{"title":"...","body":"论点及证据/方法/限制","pageStart":4,"pageEnd":6,"evidenceQuote":"逐字原文","evidencePage":5}],',
+                  '"relations":[{"from":"section-0","to":"concept-0","relation":"supports","label":"使用"}]}',
+                  '节点 ID 必须严格使用数组下标形成 section-N、concept-N、claim-N，或 overview。',
+                  'relation 只能是 related/supports/contradicts/causes/cites/extends/same_method/context_differs/custom。',
+                  '生成 3–10 个 sections、3–10 个 concepts、3–10 个 claims；页码必须来自笔记。',
+                  'overview 必须按“研究问题 / 方法 / 核心发现 / 贡献 / 限制”五项组织，能独立帮助读者理解全文。',
+                  '每个 section.body 必须说明本节作用、关键内容及其在全文论证中的位置。',
+                  '每个 concept.body 必须给出文中定义、作用和使用语境，不能只写名词解释。',
+                  '每个 claim.body 必须同时写清论点、对应证据或方法、适用条件/限制。',
+                  '每张卡片只覆盖其 pageStart–pageEnd 页内有依据的内容；不要把全文页码填给局部卡片。',
+                  '每个 evidenceQuote 必须逐字复制自对应 evidencePage 的原文，不得翻译、改写或自行补全。'
+                ].join('\n') },
+                { role: 'user', content: `文档标题：${title}\n总页数：${body.pages.length}\n\n${chunkSummaries.map((summary, index) => `【页段 ${index + 1}】\n${summary}`).join('\n\n')}` }
+              ],
+              temperature: 0.25
+            }, privateConfig);
+
+            baseGraph = normalizeDocumentGraph(parseAiJson(synthesis), buildEvidenceIndex(pages), body.pages.length, title);
+            pageCount = body.pages.length;
+
+            // Cache pure base graph into document_analyses
+            store.saveDocumentAnalysis(actor.actorKey, {
+              libraryType: documentSource.libraryType,
+              libraryId: documentSource.libraryId,
+              itemKey: documentSource.itemKey,
+              attachmentKey: documentSource.attachmentKey,
+              attachmentVersion: documentSource.attachmentVersion || null,
+              model: publicConfig.model,
+              promptVersion,
+              status: 'ready',
+              documentTitle: documentSource.title || title || baseGraph.title || '',
+              pageCount,
+              graph: baseGraph
+            });
+          } catch (aiError) {
+            error(res, aiError?.name === 'AbortError' ? 504 : 502, 'ai_gateway_error', aiError.message);
+            return;
+          }
         }
 
-        try {
-          const chunks = documentChunks(pages);
-          const chunkSummaries = await mapWithConcurrency(chunks, 3, (chunk, index) => aiCompletion({
-            messages: [
-              { role: 'system', content: [
-                '你是学术论文阅读助手。完整阅读所给页段并做结构化中间笔记。',
-                '保留章节结构、关键概念定义、主要论点、方法、数据/证据、结论、限制，以及准确页码。',
-                '每项重要发现都附带一段来自所给正文的逐字原文短引用（不要改写）及其页码，供后续核验。',
-                '不要写泛泛评价，不要遗漏相互矛盾或限定性的内容。这是内部合成材料。'
-              ].join('\n') },
-              { role: 'user', content: `文档《${title}》第 ${index + 1}/${chunks.length} 个页段：\n\n${chunk}` }
-            ],
-            temperature: 0.2
-          }, privateConfig));
+        // Stage 2: Board-Specific Relation Synthesis (runs for both fresh analysis and cache hit)
+        let boardRelations = [];
+        if (existingNodes.length > 0) {
+          try {
+            const cardsBrief = [
+              ...(baseGraph.sections || []).map(s => `[${s.id}] (章节) ${s.title}: ${s.body.slice(0, 100)}`),
+              ...(baseGraph.concepts || []).map(c => `[${c.id}] (概念) ${c.title}: ${c.body.slice(0, 100)}`),
+              ...(baseGraph.claims || []).map(cl => `[${cl.id}] (论点) ${cl.title}: ${cl.body.slice(0, 100)}`)
+            ].join('\n');
 
-          const synthesis = await aiCompletion({
-            messages: [
-              { role: 'system', content: [
-                '你要把一篇 PDF 的逐段阅读笔记组织成帮助读者快速理解全文的空间画板。',
-                '只输出一个 JSON 对象，不要 Markdown 代码围栏。内容必须使用简体中文。',
-                'JSON schema:',
-                '{"title":"...","overview":"完整全文概览","evidenceQuote":"逐字原文","evidencePage":1,',
-                '"sections":[{"title":"...","body":"章节作用和内容","pageStart":1,"pageEnd":3,"evidenceQuote":"逐字原文","evidencePage":2}],',
-                '"concepts":[{"title":"...","body":"定义、意义与上下文","pageStart":2,"pageEnd":2,"evidenceQuote":"逐字原文","evidencePage":2}],',
-                '"claims":[{"title":"...","body":"论点及证据/方法/限制","pageStart":4,"pageEnd":6,"evidenceQuote":"逐字原文","evidencePage":5}],',
-                '"relations":[{"from":"section-0","to":"concept-0","relation":"supports","label":"使用"}]}',
-                '节点 ID 必须严格使用数组下标形成 section-N、concept-N、claim-N，或 overview。',
-                'relation 只能是 related/supports/contradicts/causes/cites/custom。',
-                '生成 3–10 个 sections、3–10 个 concepts、3–10 个 claims；页码必须来自笔记。',
-                'overview 必须按“研究问题 / 方法 / 核心发现 / 贡献 / 限制”五项组织，能独立帮助读者理解全文。',
-                '每个 section.body 必须说明本节作用、关键内容及其在全文论证中的位置。',
-                '每个 concept.body 必须给出文中定义、作用和使用语境，不能只写名词解释。',
-                '每个 claim.body 必须同时写清论点、对应证据或方法、适用条件/限制。',
-                '每张卡片只覆盖其 pageStart–pageEnd 页内有依据的内容；不要把全文页码填给局部卡片。',
-                '每个 evidenceQuote 必须逐字复制自对应 evidencePage 的原文，不得翻译、改写或自行补全。'
-              ].join('\n') },
-              { role: 'user', content: `文档标题：${title}\n总页数：${body.pages.length}\n\n${chunkSummaries.map((summary, index) => `【页段 ${index + 1}】\n${summary}`).join('\n\n')}` }
-            ],
-            temperature: 0.25
-          }, privateConfig);
-          const graph = normalizeDocumentGraph(parseAiJson(synthesis), buildEvidenceIndex(pages), body.pages.length, title);
-          const result = store.createAiDocumentMap(actor.actorKey, boardId, {
-            model: publicConfig.model,
-            promptVersion: 'altcanvas-document-map-v1',
-            document: { ...documentSource, title, pageCount: body.pages.length },
-            graph
-          });
-          json(res, 201, { data: result });
-        } catch (aiError) {
-          error(res, aiError?.name === 'AbortError' ? 504 : 502, 'ai_gateway_error', aiError.message);
+            const boardContextText = existingNodes.map(n => `- [${n.id}] (${n.type}) ${n.title}: ${n.body}`).join('\n');
+
+            const boardRelationAiRes = await aiCompletion({
+              messages: [
+                { role: 'system', content: [
+                  '你是学术研究助手，负责在新文献卡片与当前画板已有卡片之间发现关键学术关联。',
+                  '只输出一个 JSON 数组，不要 Markdown 代码围栏。若无明显关联返回 []。',
+                  '格式：[{"from":"section-0","to":"existing:<已有卡片ID>","relation":"supports|contradicts|extends|same_method|context_differs|related","label":"简短标签"}]',
+                  'from 必须是新文献卡片 ID（overview/section-N/concept-N/claim-N），to 必须是 existing:<已有卡片ID>。',
+                  'relation 必须是 related/supports/contradicts/causes/cites/extends/same_method/context_differs/custom。'
+                ].join('\n') },
+                { role: 'user', content: `新文献《${title}》概览：${baseGraph.overview}\n\n新文献卡片：\n${cardsBrief}\n\n当前画板已有卡片：\n${boardContextText}` }
+              ],
+              temperature: 0.2
+            }, privateConfig);
+
+            const parsedBoardRelations = parseAiJsonArray(boardRelationAiRes);
+            const validExistingSet = new Set(existingNodeIds);
+            const validNewIds = new Set(['overview', ...(baseGraph.sections || []).map(s => s.id), ...(baseGraph.concepts || []).map(c => c.id), ...(baseGraph.claims || []).map(cl => cl.id)]);
+            boardRelations = parsedBoardRelations.slice(0, 30).flatMap(item => {
+              const from = String(item?.from || '');
+              const to = String(item?.to || '');
+              const normTo = to.startsWith('existing:') ? to : (validExistingSet.has(to) ? `existing:${to}` : null);
+              if (!validNewIds.has(from) || !normTo) return [];
+              const rawToId = normTo.slice('existing:'.length);
+              if (!validExistingSet.has(rawToId)) return [];
+              const relation = canvasEdgeRelations.has(item?.relation) ? item.relation : 'related';
+              return [{ from, to: normTo, relation, label: string(item?.label || '', 'boardRelation.label', { max: 120 }) }];
+            });
+          } catch (boardAiErr) {
+            // Gracefully ignore board relation inference error; base graph still projects cleanly
+          }
         }
+
+        const finalGraph = {
+          ...baseGraph,
+          relations: [...(baseGraph.relations || []), ...boardRelations]
+        };
+
+        const result = store.projectDocumentAnalysisToBoard(actor.actorKey, boardId, {
+          model: publicConfig.model,
+          promptVersion,
+          document: { ...documentSource, title, pageCount },
+          graph: finalGraph,
+          cached: isCached
+        });
+
+        json(res, 201, { data: { ...result, cached: isCached } });
         return;
       }
 
@@ -2023,9 +2201,9 @@ ${textSnippet.slice(0, 8000) || '无'}`;
             const edgeId = crypto.randomUUID();
             store.db.prepare(`
               INSERT INTO edges
-                (id, board_id, source_node_id, target_node_id, relation, label, created_at, updated_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            `).run(edgeId, boardId, focalNode.id, nodeId, relationType, reason, timestamp, timestamp);
+                (id, board_id, source_node_id, target_node_id, relation, label, origin, projection_key, created_at, updated_at)
+              VALUES (?, ?, ?, ?, ?, ?, 't3_expand', ?, ?, ?)
+            `).run(edgeId, boardId, focalNode.id, nodeId, relationType, reason, `t3:${focalNode.id}`, timestamp, timestamp);
 
             createdNodes.push(store.getNode(actor.actorKey, nodeId));
             createdEdges.push(store.getEdge(actor.actorKey, edgeId));

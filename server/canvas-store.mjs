@@ -7,7 +7,10 @@ const NODE_TYPES = new Set([
   'annotation', 'manual_note', 'zotero_item', 'attachment', 'image', 'ai_output', 'group'
 ]);
 const EDGE_RELATIONS = new Set([
-  'related', 'supports', 'contradicts', 'causes', 'cites', 'custom'
+  'related', 'supports', 'contradicts', 'causes', 'cites', 'extends', 'same_method', 'context_differs', 'custom'
+]);
+const EDGE_ORIGINS = new Set([
+  'manual', 'document_map_internal', 'document_map_context', 't3_expand', 'ai_synthesis'
 ]);
 const TOPIC_DOC_STATUSES = new Set([
   'inbox', 'accepted', 'deferred', 'ignored', 'removed'
@@ -177,7 +180,9 @@ function edgeRow(row) {
     sourceNodeId: row.source_node_id,
     targetNodeId: row.target_node_id,
     relation: row.relation,
-    label: row.label,
+    label: row.label || '',
+    origin: row.origin || 'manual',
+    projectionKey: row.projection_key || null,
     version: row.version,
     createdAt: row.created_at,
     updatedAt: row.updated_at
@@ -247,6 +252,7 @@ function inboxEntryRow(row) {
     itemKey: row.item_key,
     attachmentKey: row.attachment_key,
     attachmentVersion: row.attachment_version !== undefined && row.attachment_version !== null ? row.attachment_version : null,
+    doi: row.doi || null,
     detectedFrom: row.detected_from,
     title: row.title || '',
     cleanTitle: row.clean_title || null,
@@ -272,6 +278,7 @@ function documentMetaRow(row) {
     itemKey: row.item_key,
     attachmentKey: row.attachment_key || null,
     attachmentVersion: row.attachment_version ?? null,
+    doi: row.doi || null,
     cleanTitle: row.clean_title,
     institution: row.institution || '',
     reportTitle: row.report_title || '',
@@ -291,6 +298,7 @@ function jobRow(row) {
     jobType: row.job_type,
     resourceType: row.resource_type,
     resourceId: row.resource_id,
+    payload: parseJson(row.payload_json),
     state: row.state,
     attempts: row.attempts,
     availableAt: row.available_at,
@@ -461,6 +469,8 @@ export class CanvasStore {
             target_node_id TEXT NOT NULL REFERENCES nodes(id),
             relation TEXT NOT NULL,
             label TEXT NOT NULL DEFAULT '',
+            origin TEXT NOT NULL DEFAULT 'manual' CHECK (origin IN ('manual', 'document_map_internal', 'document_map_context', 't3_expand', 'ai_synthesis')),
+            projection_key TEXT,
             version INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
@@ -828,7 +838,72 @@ export class CanvasStore {
         this.db.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(9, nowIso());
       });
     }
-    if (current > 9) throw new Error(`Canvas database schema ${current} is newer than this server supports`);
+    if (current < 10) {
+      this.transaction(() => {
+        const hasJobs = this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='jobs'").get();
+        if (hasJobs) {
+          const jobCols = this.db.prepare('PRAGMA table_info(jobs)').all().map(c => c.name);
+          if (!jobCols.includes('payload_json')) {
+            this.db.exec("ALTER TABLE jobs ADD COLUMN payload_json TEXT");
+          }
+        }
+        const hasInbox = this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='inbox_entries'").get();
+        if (hasInbox) {
+          const inboxCols = this.db.prepare('PRAGMA table_info(inbox_entries)').all().map(c => c.name);
+          if (!inboxCols.includes('doi')) {
+            this.db.exec("ALTER TABLE inbox_entries ADD COLUMN doi TEXT");
+          }
+        }
+        const hasDocMetas = this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='document_metas'").get();
+        if (hasDocMetas) {
+          const metaCols = this.db.prepare('PRAGMA table_info(document_metas)').all().map(c => c.name);
+          if (!metaCols.includes('doi')) {
+            this.db.exec("ALTER TABLE document_metas ADD COLUMN doi TEXT");
+          }
+        }
+        this.db.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(10, nowIso());
+      });
+    }
+    if (current < 11) {
+      this.transaction(() => {
+        const hasEdges = this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='edges'").get();
+        if (hasEdges) {
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS edges_v11 (
+              id TEXT PRIMARY KEY,
+              board_id TEXT NOT NULL REFERENCES boards(id),
+              source_node_id TEXT NOT NULL REFERENCES nodes(id),
+              target_node_id TEXT NOT NULL REFERENCES nodes(id),
+              relation TEXT NOT NULL,
+              label TEXT NOT NULL DEFAULT '',
+              origin TEXT NOT NULL DEFAULT 'manual' CHECK (origin IN ('manual', 'document_map_internal', 'document_map_context', 't3_expand', 'ai_synthesis')),
+              projection_key TEXT,
+              version INTEGER NOT NULL DEFAULT 1,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              deleted_at TEXT,
+              CHECK (source_node_id <> target_node_id)
+            ) STRICT;
+          `);
+          const edgeCols = this.db.prepare('PRAGMA table_info(edges)').all().map(c => c.name);
+          const originExpr = edgeCols.includes('origin') ? "COALESCE(origin, 'manual')" : "'manual'";
+          const projExpr = edgeCols.includes('projection_key') ? "projection_key" : "NULL";
+
+          this.db.exec(`
+            INSERT INTO edges_v11 (id, board_id, source_node_id, target_node_id, relation, label, origin, projection_key, version, created_at, updated_at, deleted_at)
+              SELECT id, board_id, source_node_id, target_node_id, relation, label,
+                     ${originExpr}, ${projExpr}, version, created_at, updated_at, deleted_at
+              FROM edges;
+            DROP TABLE edges;
+            ALTER TABLE edges_v11 RENAME TO edges;
+            CREATE INDEX IF NOT EXISTS edges_board_idx ON edges(board_id, deleted_at);
+            CREATE INDEX IF NOT EXISTS edges_projection_idx ON edges(board_id, projection_key, origin) WHERE deleted_at IS NULL;
+          `);
+        }
+        this.db.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(11, nowIso());
+      });
+    }
+    if (current > 11) throw new Error(`Canvas database schema ${current} is newer than this server supports`);
   }
 
   transaction(callback) {
@@ -1301,10 +1376,13 @@ export class CanvasStore {
             ? (entry.attachmentVersion !== undefined ? entry.attachmentVersion : null)
             : existing.attachment_version;
 
+          const nextDoi = entry.doi !== undefined ? (entry.doi || null) : (existing.doi || null);
+
           this.db.prepare(`
             UPDATE inbox_entries SET
               attachment_key = ?,
               attachment_version = ?,
+              doi = ?,
               title = ?,
               creators_json = ?,
               year = ?,
@@ -1318,6 +1396,7 @@ export class CanvasStore {
           `).run(
             nextAttachmentKey || null,
             nextAttachmentVersion,
+            nextDoi,
             entry.title || '',
             JSON.stringify(entry.creators || []),
             entry.year || null,
@@ -1332,13 +1411,14 @@ export class CanvasStore {
           entryId = id();
           this.db.prepare(`
             INSERT INTO inbox_entries
-              (id, owner_key, library_type, library_id, item_key, attachment_key, attachment_version, detected_from,
+              (id, owner_key, library_type, library_id, item_key, attachment_key, attachment_version, doi, detected_from,
                title, creators_json, year, abstract_note, collection_keys_json, tags_json, item_version,
                state, first_seen_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?)
           `).run(
             entryId, actorKey, entry.libraryType, entry.libraryId, entry.itemKey, entry.attachmentKey || null,
             entry.attachmentVersion !== undefined ? entry.attachmentVersion : null,
+            entry.doi || null,
             entry.detectedFrom || 'scan', entry.title || '', JSON.stringify(entry.creators || []),
             entry.year || null, entry.abstractNote || '', JSON.stringify(entry.collectionKeys || []),
             JSON.stringify(entry.tags || []), entry.itemVersion || null, timestamp, timestamp
@@ -1415,14 +1495,14 @@ export class CanvasStore {
 
   // --- Jobs ---
 
-  enqueueJob(actorKey, { jobType, resourceType, resourceId, availableAt = nowIso() }) {
+  enqueueJob(actorKey, { jobType, resourceType, resourceId, payload = null, availableAt = nowIso() }) {
     const jobId = id();
     const timestamp = nowIso();
     this.db.prepare(`
       INSERT INTO jobs
-        (id, owner_key, job_type, resource_type, resource_id, state, attempts, available_at, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, 'queued', 0, ?, ?, ?)
-    `).run(jobId, actorKey, jobType, resourceType, resourceId, availableAt, timestamp, timestamp);
+        (id, owner_key, job_type, resource_type, resource_id, payload_json, state, attempts, available_at, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?, ?)
+    `).run(jobId, actorKey, jobType, resourceType, resourceId, payload ? JSON.stringify(payload) : null, availableAt, timestamp, timestamp);
     return this.getJob(actorKey, jobId);
   }
 
@@ -1450,18 +1530,29 @@ export class CanvasStore {
 
   updateJobState(jobId, { state, startedAt, finishedAt, errorCode, resultSummary, incrementAttempts = false }) {
     const timestamp = nowIso();
+    const existing = this.db.prepare('SELECT * FROM jobs WHERE id = ?').get(jobId);
+    if (!existing) return null;
+
+    const nextState = state !== undefined ? state : existing.state;
+    const nextStartedAt = startedAt !== undefined ? startedAt : existing.started_at;
+    const nextFinishedAt = finishedAt !== undefined ? finishedAt : existing.finished_at;
+    const nextErrorCode = errorCode !== undefined ? errorCode : existing.error_code;
+    const nextResultSummary = resultSummary !== undefined
+      ? (resultSummary ? JSON.stringify(resultSummary) : null)
+      : existing.result_summary_json;
+    const attemptsDelta = incrementAttempts ? 1 : 0;
+
     this.db.prepare(`
       UPDATE jobs SET
-        state = COALESCE(?, state),
-        started_at = COALESCE(?, started_at),
-        finished_at = COALESCE(?, finished_at),
-        error_code = COALESCE(?, error_code),
-        result_summary_json = COALESCE(?, result_summary_json),
+        state = ?,
+        started_at = ?,
+        finished_at = ?,
+        error_code = ?,
+        result_summary_json = ?,
         attempts = attempts + ?,
         updated_at = ?
       WHERE id = ?
-    `).run(state || null, startedAt || null, finishedAt || null, errorCode || null,
-           resultSummary ? JSON.stringify(resultSummary) : null, incrementAttempts ? 1 : 0, timestamp, jobId);
+    `).run(nextState, nextStartedAt, nextFinishedAt, nextErrorCode, nextResultSummary, attemptsDelta, timestamp, jobId);
     return jobRow(this.db.prepare('SELECT * FROM jobs WHERE id = ?').get(jobId));
   }
 
@@ -1696,6 +1787,8 @@ export class CanvasStore {
 
   createEdge(actorKey, boardId, input) {
     if (!EDGE_RELATIONS.has(input.relation)) throw new TypeError('invalid edge relation');
+    const origin = input.origin || 'manual';
+    if (!EDGE_ORIGINS.has(origin)) throw new TypeError('invalid edge origin');
     const board = this.requireBoard(actorKey, boardId);
     const source = this.getNode(actorKey, input.sourceNodeId);
     const target = this.getNode(actorKey, input.targetNodeId);
@@ -1704,13 +1797,14 @@ export class CanvasStore {
     }
     const edgeId = id();
     const timestamp = nowIso();
+    const projectionKey = input.projectionKey || null;
     this.transaction(() => {
       this.db.prepare(`
         INSERT INTO edges
-          (id, board_id, source_node_id, target_node_id, relation, label, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(edgeId, boardId, source.id, target.id, input.relation, input.label || '', timestamp, timestamp);
-      this.recordEvent({ workspaceId: board.workspaceId, boardId, actorKey, type: 'edge.created', payload: { edgeId } });
+          (id, board_id, source_node_id, target_node_id, relation, label, origin, projection_key, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(edgeId, boardId, source.id, target.id, input.relation, input.label || '', origin, projectionKey, timestamp, timestamp);
+      this.recordEvent({ workspaceId: board.workspaceId, boardId, actorKey, type: 'edge.created', payload: { edgeId, origin } });
     });
     return this.getEdge(actorKey, edgeId);
   }
@@ -1729,13 +1823,15 @@ export class CanvasStore {
     if (!edge) throw new CanvasNotFoundError('edge not found');
     const relation = changes.relation ?? edge.relation;
     if (!EDGE_RELATIONS.has(relation)) throw new TypeError('invalid edge relation');
+    const origin = changes.origin !== undefined ? changes.origin : edge.origin;
+    if (!EDGE_ORIGINS.has(origin)) throw new TypeError('invalid edge origin');
     const label = changes.label ?? edge.label;
     const board = this.requireBoard(actorKey, edge.boardId);
     this.transaction(() => {
       const result = this.db.prepare(`
-        UPDATE edges SET relation = ?, label = ?, version = version + 1, updated_at = ?
+        UPDATE edges SET relation = ?, label = ?, origin = ?, version = version + 1, updated_at = ?
         WHERE id = ? AND version = ? AND deleted_at IS NULL
-      `).run(relation, label, nowIso(), edgeId, version);
+      `).run(relation, label, origin, nowIso(), edgeId, version);
       if (!result.changes) throw new CanvasConflictError('edge version conflict');
       this.recordEvent({ workspaceId: board.workspaceId, boardId: edge.boardId, actorKey, type: 'edge.updated', payload: { edgeId, ...changes } });
     });
@@ -1944,8 +2040,8 @@ export class CanvasStore {
         const relation = task === 'translate' ? 'cites' : task === 'compare' ? 'related' : 'supports';
         this.db.prepare(`
           INSERT INTO edges
-            (id, board_id, source_node_id, target_node_id, relation, label, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (id, board_id, source_node_id, target_node_id, relation, label, origin, projection_key, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, 'ai_synthesis', NULL, ?, ?)
         `).run(edgeId, boardId, inputNode.id, nodeId, relation, task === 'translate' ? '译自' : '分析', timestamp, timestamp);
         createdEdges.push(edgeId);
       }
@@ -2209,7 +2305,33 @@ export class CanvasStore {
     return this.db.prepare(query).all(...params).map(knowledgeRelationRow);
   }
 
+  hasDocumentOnBoard(actorKey, boardId, { libraryType, libraryId, itemKey, attachmentKey }) {
+    this.requireBoard(actorKey, boardId);
+    let query = `
+      SELECT 1 FROM nodes n
+      JOIN source_refs s ON n.source_ref_id = s.id
+      WHERE n.board_id = ? AND n.deleted_at IS NULL
+        AND s.owner_key = ? AND s.library_type = ? AND s.library_id = ? AND s.item_key = ?
+    `;
+    const params = [boardId, actorKey, libraryType, String(libraryId), itemKey];
+    if (attachmentKey) {
+      query += ' AND s.attachment_key = ?';
+      params.push(attachmentKey);
+    }
+    query += ' LIMIT 1';
+    return Boolean(this.db.prepare(query).get(...params));
+  }
+
   createAiDocumentMap(actorKey, boardId, { model, promptVersion, document, graph }) {
+    // Decouple global document_analyses caching from board-level context:
+    // Pure document analysis cache must not contain board-specific existing:<nodeId> relations
+    const pureGraph = {
+      ...graph,
+      relations: (Array.isArray(graph?.relations) ? graph.relations : []).filter(
+        r => !String(r.from || '').startsWith('existing:') && !String(r.to || '').startsWith('existing:')
+      )
+    };
+
     this.saveDocumentAnalysis(actorKey, {
       libraryType: document.libraryType,
       libraryId: document.libraryId,
@@ -2221,7 +2343,7 @@ export class CanvasStore {
       status: 'ready',
       documentTitle: document.title || graph.title || '',
       pageCount: document.pageCount || 1,
-      graph
+      graph: pureGraph
     });
 
     return this.projectDocumentAnalysisToBoard(actorKey, boardId, { model, promptVersion, document, graph, cached: false });
@@ -2241,6 +2363,37 @@ export class CanvasStore {
       ...graph.claims.map((item, index) => ({ ...item, title: `论点 · ${item.title}`, key: `claim-${index}`, kind: 'claim' }))
     ];
 
+    const projKey = `${document.libraryType}:${document.libraryId}:${document.itemKey}:${document.attachmentKey || ''}`;
+
+    // Check if ai_output nodes for this document are already on the board
+    const existingDocNodes = this.db.prepare(`
+      SELECT n.*, s.quote_snapshot, s.page_label, s.position_json
+      FROM nodes n
+      JOIN source_refs s ON n.source_ref_id = s.id
+      WHERE n.board_id = ? AND n.deleted_at IS NULL AND n.node_type = 'ai_output'
+        AND s.owner_key = ? AND s.library_type = ? AND s.library_id = ? AND s.item_key = ?
+        AND (? IS NULL OR s.attachment_key = ?)
+        AND (n.color IN ('#7c3aed', '#2563eb', '#0891b2', '#d97706')
+             OR n.title LIKE '全文概览%' OR n.title LIKE '章节 ·%' OR n.title LIKE '概念 ·%' OR n.title LIKE '论点 ·%')
+      ORDER BY n.z_index ASC, n.rowid ASC
+    `).all(boardId, actorKey, document.libraryType, String(document.libraryId), document.itemKey,
+           document.attachmentKey || null, document.attachmentKey || null);
+
+    const isUpdateInPlace = existingDocNodes.length > 0;
+
+    // Check existing nodes on the board for calculating layout offset if placing a new document
+    const existingBoardNodes = this.db.prepare(`
+      SELECT x, y, width, height FROM nodes WHERE board_id = ? AND deleted_at IS NULL
+    `).all(boardId);
+
+    let startOffsetX = 0;
+    if (!isUpdateInPlace && existingBoardNodes.length > 0) {
+      const maxX = Math.max(...existingBoardNodes.map(n => n.x + n.width));
+      if (maxX > 0) {
+        startOffsetX = maxX + 80;
+      }
+    }
+
     // Compute adaptive card dimensions and non-overlapping layout
     const layoutMap = new Map();
     let currentY = 30;
@@ -2252,7 +2405,7 @@ export class CanvasStore {
     const overviewWidth = 640;
     const extraForOverviewQuote = overviewQuoteLen ? 36 + Math.ceil(overviewQuoteLen / 44) * 16 : 0;
     const overviewHeight = Math.min(520, Math.max(120, 80 + extraForOverviewQuote + Math.ceil(overviewTextLen / 42) * 18));
-    layoutMap.set('overview', { x: 280, y: currentY, width: overviewWidth, height: overviewHeight });
+    layoutMap.set('overview', { x: 280 + startOffsetX, y: currentY, width: overviewWidth, height: overviewHeight });
     currentY += overviewHeight + 40;
 
     // 2. Sections, Concepts, Claims lanes
@@ -2264,7 +2417,7 @@ export class CanvasStore {
       const cols = count === 1 ? 1 : (count === 2 ? 2 : 3);
       const cardWidth = count === 1 ? 620 : (count === 2 ? 460 : 380);
       const colGap = 32;
-      const startX = count === 1 ? 290 : (count === 2 ? 120 : 40);
+      const startX = (count === 1 ? 290 : (count === 2 ? 120 : 40)) + startOffsetX;
 
       const canContinueColumns = previousColumns
         && previousColumns.cols === cols
@@ -2289,37 +2442,215 @@ export class CanvasStore {
       currentY += 24;
     }
 
+    const colors = { overview: '#7c3aed', section: '#2563eb', concept: '#0891b2', claim: '#d97706' };
+
     this.transaction(() => {
-      for (let index = 0; index < nodes.length; index++) {
-        const item = nodes[index];
-        const nodeId = id();
-        const sourceRefId = this.createSourceRef(actorKey, {
-          libraryType: document.libraryType,
-          libraryId: document.libraryId,
-          itemKey: document.itemKey,
-          attachmentKey: document.attachmentKey,
-          annotationKey: null,
-          annotationVersion: null,
-          pageLabel: String(item.evidencePage),
-          position: {
-            pageIndex: Math.max(0, item.evidencePage - 1),
-            pageStart: item.pageStart,
-            pageEnd: item.pageEnd,
-            textQuote: item.evidenceQuote
-          },
-          quoteSnapshot: item.evidenceQuote
-        });
-        const layout = layoutMap.get(item.key) || { x: 40, y: 40, width: 380, height: 260 };
-        const colors = { overview: '#7c3aed', section: '#2563eb', concept: '#0891b2', claim: '#d97706' };
+      const reusedNodeIds = new Set();
+
+      if (isUpdateInPlace) {
+        // Find existing nodes bucketed by kind
+        const existingOverview = existingDocNodes.find(n => n.color === '#7c3aed' || n.title?.includes('全文概览'));
+        const existingSections = existingDocNodes.filter(n => n.color === '#2563eb' || n.title?.startsWith('章节 · '));
+        const existingConcepts = existingDocNodes.filter(n => n.color === '#0891b2' || n.title?.startsWith('概念 · '));
+        const existingClaims = existingDocNodes.filter(n => n.color === '#d97706' || n.title?.startsWith('论点 · '));
+
+        const getExistingSlot = (kind, index) => {
+          if (kind === 'overview') return existingOverview;
+          if (kind === 'section') return existingSections[index];
+          if (kind === 'concept') return existingConcepts[index];
+          if (kind === 'claim') return existingClaims[index];
+          return null;
+        };
+
+        for (let index = 0; index < nodes.length; index++) {
+          const item = nodes[index];
+          const kindIndex = item.key.includes('-') ? Number(item.key.split('-')[1]) : 0;
+          const existingSlot = getExistingSlot(item.kind, kindIndex);
+
+          if (existingSlot) {
+            // Update node in place
+            const layout = layoutMap.get(item.key) || { width: 380, height: 260 };
+            const finalHeight = layout.height || existingSlot.height;
+            this.db.prepare(`
+              UPDATE nodes SET
+                title = ?,
+                body = ?,
+                height = ?,
+                color = ?,
+                version = version + 1,
+                updated_at = ?
+              WHERE id = ?
+            `).run(item.title || item.kind, item.body, finalHeight, colors[item.kind], timestamp, existingSlot.id);
+
+            // Update source ref
+            if (existingSlot.source_ref_id) {
+              this.db.prepare(`
+                UPDATE source_refs SET
+                  page_label = ?,
+                  quote_snapshot = ?,
+                  position_json = ?,
+                  updated_at = ?
+                WHERE id = ?
+              `).run(String(item.evidencePage), item.evidenceQuote || '',
+                     JSON.stringify({
+                       pageIndex: Math.max(0, item.evidencePage - 1),
+                       pageStart: item.pageStart,
+                       pageEnd: item.pageEnd,
+                       textQuote: item.evidenceQuote
+                     }), timestamp, existingSlot.source_ref_id);
+            }
+
+            nodeIds.set(item.key, existingSlot.id);
+            createdNodeIds.push(existingSlot.id);
+            reusedNodeIds.add(existingSlot.id);
+          } else {
+            // Create new node if analysis has more items than previous
+            const nodeId = id();
+            const sourceRefId = this.createSourceRef(actorKey, {
+              libraryType: document.libraryType,
+              libraryId: document.libraryId,
+              itemKey: document.itemKey,
+              attachmentKey: document.attachmentKey,
+              annotationKey: null,
+              annotationVersion: null,
+              pageLabel: String(item.evidencePage),
+              position: {
+                pageIndex: Math.max(0, item.evidencePage - 1),
+                pageStart: item.pageStart,
+                pageEnd: item.pageEnd,
+                textQuote: item.evidenceQuote
+              },
+              quoteSnapshot: item.evidenceQuote
+            });
+            const layout = layoutMap.get(item.key) || { x: 40 + startOffsetX, y: 40, width: 380, height: 260 };
+            this.db.prepare(`
+              INSERT INTO nodes
+                (id, board_id, node_type, x, y, width, height, z_index, title, body, color, source_ref_id, created_at, updated_at)
+              VALUES (?, ?, 'ai_output', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `).run(nodeId, boardId, layout.x, layout.y, layout.width, layout.height, index + 1, item.title || item.kind, item.body, colors[item.kind], sourceRefId, timestamp, timestamp);
+            nodeIds.set(item.key, nodeId);
+            createdNodeIds.push(nodeId);
+          }
+        }
+
+        const overviewNodeId = nodeIds.get('overview');
+        // Soft delete leftover old nodes, migrating external user edges to document overview
+        for (const oldNode of existingDocNodes) {
+          if (!reusedNodeIds.has(oldNode.id)) {
+            if (overviewNodeId && overviewNodeId !== oldNode.id) {
+              const touchingEdges = this.db.prepare(`
+                SELECT * FROM edges WHERE board_id = ? AND (source_node_id = ? OR target_node_id = ?) AND deleted_at IS NULL
+              `).all(boardId, oldNode.id, oldNode.id);
+
+              for (const e of touchingEdges) {
+                const isSource = e.source_node_id === oldNode.id;
+                const newSource = isSource ? overviewNodeId : e.source_node_id;
+                const newTarget = isSource ? e.target_node_id : overviewNodeId;
+
+                // Self-loop elimination: if both ends become overviewNodeId, delete the self-loop edge
+                if (newSource === newTarget) {
+                  this.db.prepare(`DELETE FROM edges WHERE id = ?`).run(e.id);
+                  continue;
+                }
+
+                // Deduplicate against existing signature on the board
+                const existingDup = this.db.prepare(`
+                  SELECT * FROM edges
+                  WHERE board_id = ? AND source_node_id = ? AND target_node_id = ? AND relation = ? AND id <> ? AND deleted_at IS NULL
+                `).get(boardId, newSource, newTarget, e.relation, e.id);
+
+                if (existingDup) {
+                  if (e.origin === 'manual' && existingDup.origin !== 'manual') {
+                    // Manual edge wins: delete the AI edge, retarget and keep the manual edge
+                    this.db.prepare(`DELETE FROM edges WHERE id = ?`).run(existingDup.id);
+                    this.db.prepare(`
+                      UPDATE edges SET source_node_id = ?, target_node_id = ?, version = version + 1, updated_at = ?
+                      WHERE id = ?
+                    `).run(newSource, newTarget, timestamp, e.id);
+
+                    this.recordEvent({
+                      workspaceId: board.workspaceId,
+                      boardId,
+                      nodeId: overviewNodeId,
+                      actorKey,
+                      type: 'edge.retargeted',
+                      payload: { edgeId: e.id, oldNodeId: oldNode.id, retargetedNodeId: overviewNodeId, relation: e.relation, replacedEdgeId: existingDup.id }
+                    });
+                  } else {
+                    // Either existingDup is manual, or both are AI edges: delete e and keep existingDup
+                    this.db.prepare(`DELETE FROM edges WHERE id = ?`).run(e.id);
+                  }
+                } else {
+                  this.db.prepare(`
+                    UPDATE edges SET source_node_id = ?, target_node_id = ?, version = version + 1, updated_at = ?
+                    WHERE id = ?
+                  `).run(newSource, newTarget, timestamp, e.id);
+
+                  this.recordEvent({
+                    workspaceId: board.workspaceId,
+                    boardId,
+                    nodeId: overviewNodeId,
+                    actorKey,
+                    type: 'edge.retargeted',
+                    payload: { edgeId: e.id, oldNodeId: oldNode.id, retargetedNodeId: overviewNodeId, relation: e.relation }
+                  });
+                }
+              }
+            }
+            this.db.prepare(`UPDATE nodes SET deleted_at = ?, updated_at = ? WHERE id = ?`).run(timestamp, timestamp, oldNode.id);
+          }
+        }
+
+        // Remove old internal AI document-map edges (preserve manual user edges connecting within document nodes)
+        const docNodeIdSet = new Set(existingDocNodes.map(n => n.id));
+        const allDocNodePlaceholders = Array.from(docNodeIdSet).map(() => '?').join(',');
+        if (allDocNodePlaceholders) {
+          this.db.prepare(`
+            DELETE FROM edges
+            WHERE board_id = ?
+              AND origin = 'document_map_internal'
+              AND (projection_key = ? OR (source_node_id IN (${allDocNodePlaceholders}) AND target_node_id IN (${allDocNodePlaceholders})))
+          `).run(boardId, projKey, ...docNodeIdSet, ...docNodeIdSet);
+        }
+
+        // Clean up old Stage 2 context edges for this projection
         this.db.prepare(`
-          INSERT INTO nodes
-            (id, board_id, node_type, x, y, width, height, z_index, title, body, color, source_ref_id, created_at, updated_at)
-          VALUES (?, ?, 'ai_output', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(nodeId, boardId, layout.x, layout.y, layout.width, layout.height, index + 1, item.title || item.kind, item.body, colors[item.kind], sourceRefId, timestamp, timestamp);
-        nodeIds.set(item.key, nodeId);
-        createdNodeIds.push(nodeId);
+          DELETE FROM edges
+          WHERE board_id = ? AND projection_key = ? AND origin = 'document_map_context'
+        `).run(boardId, projKey);
+      } else {
+        // First-time projection to this board
+        for (let index = 0; index < nodes.length; index++) {
+          const item = nodes[index];
+          const nodeId = id();
+          const sourceRefId = this.createSourceRef(actorKey, {
+            libraryType: document.libraryType,
+            libraryId: document.libraryId,
+            itemKey: document.itemKey,
+            attachmentKey: document.attachmentKey,
+            annotationKey: null,
+            annotationVersion: null,
+            pageLabel: String(item.evidencePage),
+            position: {
+              pageIndex: Math.max(0, item.evidencePage - 1),
+              pageStart: item.pageStart,
+              pageEnd: item.pageEnd,
+              textQuote: item.evidenceQuote
+            },
+            quoteSnapshot: item.evidenceQuote
+          });
+          const layout = layoutMap.get(item.key) || { x: 40 + startOffsetX, y: 40, width: 380, height: 260 };
+          this.db.prepare(`
+            INSERT INTO nodes
+              (id, board_id, node_type, x, y, width, height, z_index, title, body, color, source_ref_id, created_at, updated_at)
+            VALUES (?, ?, 'ai_output', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(nodeId, boardId, layout.x, layout.y, layout.width, layout.height, index + 1, item.title || item.kind, item.body, colors[item.kind], sourceRefId, timestamp, timestamp);
+          nodeIds.set(item.key, nodeId);
+          createdNodeIds.push(nodeId);
+        }
       }
 
+      // Build edges
       const edgeInputs = [];
       for (const section of nodes.filter(item => item.kind === 'section')) {
         edgeInputs.push({ from: 'overview', to: section.key, relation: 'related', label: '章节脉络' });
@@ -2340,19 +2671,54 @@ export class CanvasStore {
       edgeInputs.push(...graph.relations);
       const seenEdges = new Set();
       for (const edge of edgeInputs) {
-        const sourceNodeId = nodeIds.get(edge.from);
-        const targetNodeId = nodeIds.get(edge.to);
+        let sourceNodeId = nodeIds.get(edge.from);
+        if (!sourceNodeId && typeof edge.from === 'string' && edge.from.startsWith('existing:')) {
+          const rawId = edge.from.slice('existing:'.length);
+          const existingNode = this.getNode(actorKey, rawId);
+          if (existingNode && existingNode.boardId === boardId) {
+            sourceNodeId = existingNode.id;
+          }
+        }
+        let targetNodeId = nodeIds.get(edge.to);
+        if (!targetNodeId && typeof edge.to === 'string' && edge.to.startsWith('existing:')) {
+          const rawId = edge.to.slice('existing:'.length);
+          const existingNode = this.getNode(actorKey, rawId);
+          if (existingNode && existingNode.boardId === boardId) {
+            targetNodeId = existingNode.id;
+          }
+        }
         const signature = `${sourceNodeId}:${targetNodeId}:${edge.relation}`;
         if (!sourceNodeId || !targetNodeId || sourceNodeId === targetNodeId || seenEdges.has(signature)) continue;
         seenEdges.add(signature);
-        const edgeId = id();
-        this.db.prepare(`
-          INSERT INTO edges
-            (id, board_id, source_node_id, target_node_id, relation, label, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(edgeId, boardId, sourceNodeId, targetNodeId,
-          EDGE_RELATIONS.has(edge.relation) ? edge.relation : 'related', edge.label || '', timestamp, timestamp);
-        createdEdgeIds.push(edgeId);
+
+        const edgeRelation = EDGE_RELATIONS.has(edge.relation) ? edge.relation : 'related';
+        const isStage2Context = (typeof edge.to === 'string' && edge.to.startsWith('existing:')) || (typeof edge.from === 'string' && edge.from.startsWith('existing:'));
+        const edgeOrigin = isStage2Context ? 'document_map_context' : 'document_map_internal';
+
+        const existingDbEdge = this.db.prepare(`
+          SELECT * FROM edges
+          WHERE board_id = ? AND source_node_id = ? AND target_node_id = ? AND relation = ? AND deleted_at IS NULL
+        `).get(boardId, sourceNodeId, targetNodeId, edgeRelation);
+
+        if (existingDbEdge) {
+          if (existingDbEdge.origin === 'manual') {
+            // DO NOT overwrite manual user edge label, version, or ownership
+            createdEdgeIds.push(existingDbEdge.id);
+          } else {
+            this.db.prepare(`
+              UPDATE edges SET label = ?, updated_at = ? WHERE id = ?
+            `).run(edge.label || '', timestamp, existingDbEdge.id);
+            createdEdgeIds.push(existingDbEdge.id);
+          }
+        } else {
+          const edgeId = id();
+          this.db.prepare(`
+            INSERT INTO edges
+              (id, board_id, source_node_id, target_node_id, relation, label, origin, projection_key, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(edgeId, boardId, sourceNodeId, targetNodeId, edgeRelation, edge.label || '', edgeOrigin, projKey, timestamp, timestamp);
+          createdEdgeIds.push(edgeId);
+        }
       }
 
       this.recordEvent({
@@ -2365,7 +2731,7 @@ export class CanvasStore {
           model: model || 'custom', promptVersion: promptVersion || 'unknown',
           itemKey: document.itemKey || null, attachmentKey: document.attachmentKey || null,
           pageCount: document.pageCount, nodeCount: createdNodeIds.length, edgeCount: createdEdgeIds.length,
-          cached: Boolean(cached)
+          cached: Boolean(cached), inPlaceUpdated: isUpdateInPlace
         }
       });
     });
@@ -2373,7 +2739,8 @@ export class CanvasStore {
     return {
       nodes: createdNodeIds.map(nodeId => this.getNode(actorKey, nodeId)),
       edges: createdEdgeIds.map(edgeId => this.getEdge(actorKey, edgeId)),
-      cached: Boolean(cached)
+      cached: Boolean(cached),
+      inPlaceUpdated: isUpdateInPlace
     };
   }
 
@@ -2396,7 +2763,7 @@ export class CanvasStore {
 
   saveDocumentMeta(actorKey, {
     libraryType, libraryId, itemKey, attachmentKey = null, attachmentVersion = null,
-    cleanTitle, institution = '', reportTitle = '',
+    doi = null, cleanTitle, institution = '', reportTitle = '',
     subtitle = '', year = '', summary = '', source = 'ai'
   }) {
     const timestamp = nowIso();
@@ -2409,6 +2776,7 @@ export class CanvasStore {
           UPDATE document_metas SET
             attachment_key = ?,
             attachment_version = ?,
+            doi = ?,
             clean_title = ?,
             institution = ?,
             report_title = ?,
@@ -2420,16 +2788,17 @@ export class CanvasStore {
           WHERE id = ?
         `).run(attachmentKey !== undefined ? attachmentKey : existing.attachmentKey,
                attachmentVersion !== undefined ? attachmentVersion : existing.attachmentVersion,
+               doi !== undefined ? doi : existing.doi,
                cleanTitle, institution, reportTitle, subtitle, year, summary, source, timestamp, metaId);
       } else {
         metaId = id();
         this.db.prepare(`
           INSERT INTO document_metas
             (id, owner_key, library_type, library_id, item_key, attachment_key, attachment_version,
-             clean_title, institution, report_title, subtitle, year, summary, source, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             doi, clean_title, institution, report_title, subtitle, year, summary, source, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(metaId, actorKey, libraryType, libraryId, itemKey, attachmentKey, attachmentVersion,
-               cleanTitle, institution, reportTitle, subtitle, year, summary, source, timestamp, timestamp);
+               doi || null, cleanTitle, institution, reportTitle, subtitle, year, summary, source, timestamp, timestamp);
       }
       this.db.prepare(`
         UPDATE inbox_entries SET
@@ -2445,6 +2814,7 @@ export class CanvasStore {
 
 export const canvasNodeTypes = NODE_TYPES;
 export const canvasEdgeRelations = EDGE_RELATIONS;
+export const canvasEdgeOrigins = EDGE_ORIGINS;
 export const canvasTopicDocStatuses = TOPIC_DOC_STATUSES;
 export const canvasTopicAnalysisStatuses = TOPIC_ANALYSIS_STATUSES;
 export const canvasTopicDocOrigins = TOPIC_DOC_ORIGINS;
