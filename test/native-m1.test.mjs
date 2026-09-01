@@ -654,7 +654,59 @@ try {
     body: truncatedFieldBody
   });
   assert.equal(truncFieldRes.statusCode, 400, 'Multipart truncated during FIELD_DATA must be rejected with 400');
-  assert.match(truncFieldRes.payload.error.message, /truncated/);
+  assert.match(truncFieldRes.payload.error.message, /truncated|closing/i);
+
+  // Case C: [Audit Regression] Complete file followed by intermediate boundary with \r\n, but no final -- or next part
+  const missingClosingBoundaryBody = Buffer.from(
+    `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="ok2.pdf"\r\nContent-Type: application/pdf\r\n\r\n` +
+    '%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF' +
+    `\r\n--${boundary}\r\n` // Intermediate boundary without closing --
+  );
+  const missingClosingRes = await call(handler, '/canvas/native/upload', {
+    method: 'POST',
+    cookie: newCookie,
+    headers: {
+      'content-type': `multipart/form-data; boundary=${boundary}`
+    },
+    body: missingClosingBoundaryBody
+  });
+  assert.equal(missingClosingRes.statusCode, 400, 'Multipart missing closing boundary -- must be rejected with 400');
+  assert.match(missingClosingRes.payload.error.message, /truncated|closing/i);
+
+  // Case D: [Audit Regression] Complete file followed by partial header of next part (stopping in HEADERS), EOF
+  const partialNextHeaderBody = Buffer.from(
+    `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="ok3.pdf"\r\nContent-Type: application/pdf\r\n\r\n` +
+    '%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF' +
+    `\r\n--${boundary}\r\nContent-Disposition: form-data; name="tar` // Partial header
+  );
+  const partialNextHeaderRes = await call(handler, '/canvas/native/upload', {
+    method: 'POST',
+    cookie: newCookie,
+    headers: {
+      'content-type': `multipart/form-data; boundary=${boundary}`
+    },
+    body: partialNextHeaderBody
+  });
+  assert.equal(partialNextHeaderRes.statusCode, 400, 'Multipart truncated during HEADERS state must be rejected with 400');
+  assert.match(partialNextHeaderRes.payload.error.message, /truncated|closing/i);
+
+  // Case E: [Audit Regression] Complete file and text field, but boundary at end missing closing --
+  const missingClosingAfterFieldBody = Buffer.from(
+    `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="ok4.pdf"\r\nContent-Type: application/pdf\r\n\r\n` +
+    '%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF' +
+    `\r\n--${boundary}\r\nContent-Disposition: form-data; name="targetWorkspaceId"\r\n\r\n${thirdTopic.id}\r\n` +
+    `--${boundary}\r\n` // Not closing boundary (--boundary--)
+  );
+  const missingClosingAfterFieldRes = await call(handler, '/canvas/native/upload', {
+    method: 'POST',
+    cookie: newCookie,
+    headers: {
+      'content-type': `multipart/form-data; boundary=${boundary}`
+    },
+    body: missingClosingAfterFieldBody
+  });
+  assert.equal(missingClosingAfterFieldRes.statusCode, 400, 'Multipart missing closing -- after fields must be rejected with 400');
+  assert.match(missingClosingAfterFieldRes.payload.error.message, /truncated|closing/i);
 
   // 10. Persistence across Store & Process Restart & [P1 Regression] Blob Reference Count on Delete
   store.close();

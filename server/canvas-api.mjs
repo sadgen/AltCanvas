@@ -93,6 +93,7 @@ async function streamUploadToFile(req, targetDir, maxBytes = MAX_UPLOAD_BYTES) {
       let buffer = Buffer.alloc(0);
       let currentFieldName = null;
       let hasCompletedFile = false;
+      let sawClosingBoundary = false;
 
       for await (const chunk of req) {
         totalBytes += chunk.length;
@@ -113,8 +114,23 @@ async function streamUploadToFile(req, targetDir, maxBytes = MAX_UPLOAD_BYTES) {
               }
               break;
             }
-            buffer = buffer.slice(idx + boundaryBuffer.length);
-            state = 'HEADERS';
+            if (buffer.length < idx + boundaryBuffer.length + 2) {
+              // Wait for at least 2 bytes after boundary to check for closing '--' vs '\r\n'
+              break;
+            }
+            const tail = buffer.slice(idx + boundaryBuffer.length, idx + boundaryBuffer.length + 2).toString('ascii');
+            if (tail === '--') {
+              sawClosingBoundary = true;
+              buffer = buffer.slice(idx + boundaryBuffer.length + 2);
+              state = 'CLOSED';
+              break;
+            } else if (tail === '\r\n') {
+              buffer = buffer.slice(idx + boundaryBuffer.length + 2);
+              state = 'HEADERS';
+            } else {
+              buffer = buffer.slice(idx + boundaryBuffer.length);
+              state = 'HEADERS';
+            }
           } else if (state === 'HEADERS') {
             const idx = buffer.indexOf(doubleCrlf);
             if (idx === -1) break;
@@ -143,8 +159,8 @@ async function streamUploadToFile(req, targetDir, maxBytes = MAX_UPLOAD_BYTES) {
               const fieldValue = buffer.slice(0, Math.max(0, nextBoundaryIdx - 2)).toString('utf8');
               if (currentFieldName === 'targetWorkspaceId') targetWorkspaceId = fieldValue.trim();
               if (currentFieldName === 'forceNew') forceNew = fieldValue.trim() === 'true';
-              buffer = buffer.slice(nextBoundaryIdx + boundaryBuffer.length);
-              state = 'HEADERS';
+              buffer = buffer.slice(nextBoundaryIdx);
+              state = 'SEEK_BOUNDARY';
             }
           } else if (state === 'FILE_DATA') {
             const nextBoundaryIdx = buffer.indexOf(boundaryBuffer);
@@ -164,15 +180,17 @@ async function streamUploadToFile(req, targetDir, maxBytes = MAX_UPLOAD_BYTES) {
               hash.update(fileData);
               await safeWrite(fileData);
               hasCompletedFile = true;
-              buffer = buffer.slice(nextBoundaryIdx + boundaryBuffer.length);
-              state = 'HEADERS';
+              buffer = buffer.slice(nextBoundaryIdx);
+              state = 'SEEK_BOUNDARY';
             }
+          } else if (state === 'CLOSED') {
+            break;
           }
         }
       }
 
-      if (!hasCompletedFile || state === 'FILE_DATA' || state === 'FIELD_DATA') {
-        const err = new Error('Multipart payload was truncated or ended prematurely before completing file stream');
+      if (!hasCompletedFile || !sawClosingBoundary || state !== 'CLOSED') {
+        const err = new Error('Multipart payload was truncated or ended prematurely without valid closing boundary');
         err.status = 400;
         throw err;
       }

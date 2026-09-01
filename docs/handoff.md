@@ -662,8 +662,8 @@
 - ✅ 15. [P1 回归] `reloadAndSyncReaderAnnotations` 请求失败时抛错保留当前批注状态（绝不误清空），并增加 `currentAttachment` 切换竞态保护（防止旧批注写回新文献 Reader）；
 - ✅ 16. [P1 回归] `importNativeUploadedDocument` 在重复上传命中查重时幂等执行目标主题关联，支持多主题跨上传归类，并在响应中返回 `topicDocument`；
 - ✅ 17. [P2 回归] `streamUploadToFile` 安全解码 `x-filename`（防畸变编码崩溃），并在 `safeWrite` 背压等待触发 `close` 时明确 reject，杜绝写入提前终止被误判为成功；
-- ✅ 18. [P1 回归] `streamUploadToFile` 引入独立 `FIELD_DATA` 状态机与 64KB 字段安全上限，并增加 `hasCompletedFile` 与流结束状态校验，截断上传或提前断开严格返回 400 Bad Request 并清理临时文件；
-- ✅ 19. [P1 回归] `openItem` 批注拉取在遇到非 2xx（如 500）或无附件时显式抛错并原子重置文献/批注/侧栏状态，杜绝跨文献混合状态与伪“0 批注”；
+- ✅ 18. [P1 回归] `streamUploadToFile` 引入显式 `--boundary--` 关闭状态机解析与 64KB 字段上限，在 EOF 时强制校验 `sawClosingBoundary === true`，彻底拦截缺少最终关闭符、残缺 Header 或未闭合字段的各类截断请求（返回 400 Bad Request 并清理临时文件）；
+- ✅ 19. [P1 回归] `openItem` 统一通过 `resetCurrentDocumentState()` 在失败或无附件时原子重置 `currentDocumentLibrary`、`currentItem`、`currentAttachment`、批注映射及侧栏状态，杜绝跨文献残留混合；
 - ✅ 20. [P1 回归] 上传事务失败补偿：若因非法主题或其他 DB 异常导致事务失败，自动回滚并删除新移动的 Blob 文件，杜绝孤儿文件残留；
 - ✅ 21. 全文 AI 图谱（`document-map`）基于原生 PDF 成功生成并实例化画板节点；
 - ✅ 22. 数据库关闭并重开后，用户、文献、附件、Blob、批注数据 100% 保真恢复。
@@ -686,7 +686,7 @@
 | 里程碑 | 状态 | 说明 |
 |---|---|---|
 | M1 原生 PDF 基础单文献闭环 | **PASS (完成)** | 独立 local 认证、原生流式上传、去重、Range 文件流服务、Reader 批注持久化、全文理解与证据转批注 |
-| M1 审计整改与深层防御闭环 | **PASS (完成)** | P0 认证隔离、P0 原生打开链路贯通、原子重置防跨文献混合、截断 Multipart 400 拦截、孤儿 Blob 回滚补偿、背压错误生命周期、重复上传主题关联全覆盖 |
+| M1 审计整改与深层防御闭环 | **PASS (完成)** | P0 认证隔离、P0 原生打开链路贯通、resetCurrentDocumentState 原子清空、严格 closing boundary 截断拦截、孤儿 Blob 回滚补偿、背压错误生命周期、重复上传主题关联全覆盖 |
 | M2 统一导入管线 | `PENDING` | 下一阶段目标：规范化多源导入（DOI/arXiv/URL/PDF/RIS/BibTeX）与合并策略 |
 | M3 Translation Server 集成 | `PENDING` | 下一阶段目标：内部解析组件集成与 SSRF 安全隔离 |
 | M4 Altero/Zotero 外部迁移器 | `PENDING` | 幂等一次性迁移 |

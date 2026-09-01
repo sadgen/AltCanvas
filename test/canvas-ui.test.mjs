@@ -433,12 +433,15 @@ assert.match(html, /throw new Error\('Native library does not support Zotero API
   const openItemFnMatch = html.match(/async function openItem\(item, libraryContext = null\) \{([\s\S]*?)\n    \}/);
   assert.ok(openItemFnMatch, 'openItem definition must exist');
 
+  const resetFnMatch = html.match(/function resetCurrentDocumentState\(\) \{([\s\S]*?)\n    \}/);
+  assert.ok(resetFnMatch, 'resetCurrentDocumentState definition must exist');
+
   const openItemRunner = new Function(
     'openRequestId', 'documentController', 'currentItem', 'currentReaderInstance', 'updateCanvasAiToolbar',
     'currentDocumentLibrary', 'normalizeLibraryContext', 'libraryApiPrefix', 'renderItems', 'mobileMedia', 'setMobilePane',
     'config', 'documentMetas', 'docMetaKey', 'document', 'fetch', 'getApiUrl', 'getHeaders', 'showToast',
     'currentAttachment', 'currentAnnotationsMap', 'clientAnnotationIdMap', 'getAnnotationPosition', 'getAnnotationPageIndex',
-    'cleanAnnotationText', 'renderAnnotationCards', 'initReaderEngine', 'reportApplicationError', 'errorMessage',
+    'cleanAnnotationText', 'renderAnnotationCards', 'initReaderEngine', 'reportApplicationError', 'errorMessage', 'resetCurrentDocumentState',
     'item', 'libraryContext',
     `return (async () => { ${openItemFnMatch[1]} })();`
   );
@@ -446,6 +449,13 @@ assert.match(html, /throw new Error\('Native library does not support Zotero API
   // Document A already had annotations in memory
   const docAAnnotations = new Map([['doc-A-ann', { version: 1, data: { text: 'Doc A Note' } }]]);
   const docAClientMap = new Map([['client-A', 'doc-A-ann']]);
+  let currentDocLibrary = { libraryType: 'user', libraryId: '42' };
+
+  const mockReset = () => {
+    docAAnnotations.clear();
+    docAClientMap.clear();
+    currentDocLibrary = null;
+  };
 
   await openItemRunner(
     0, null, { key: 'doc-A' }, null, () => {},
@@ -458,7 +468,7 @@ assert.match(html, /throw new Error\('Native library does not support Zotero API
     },
     s => s, () => ({}), (msg) => { toastErrorShown = msg; },
     { key: 'att-A' }, docAAnnotations, docAClientMap, () => ({}), () => 0,
-    s => s, () => {}, async () => {}, () => {}, err => err.message,
+    s => s, () => {}, async () => {}, () => {}, err => err.message, mockReset,
     { key: 'doc-B', isNative: true, children: [{ key: 'att-B', data: { contentType: 'application/pdf' }, isNative: true }] },
     { libraryType: 'native', libraryId: 'local' }
   );
@@ -467,7 +477,13 @@ assert.match(html, /throw new Error\('Native library does not support Zotero API
   assert.match(toastErrorShown, /500/, 'Toast must report actual error status');
   assert.equal(docAAnnotations.size, 0, 'Opening doc B failure must clear doc A annotations to prevent cross-doc mixed state');
   assert.equal(docAClientMap.size, 0, 'Opening doc B failure must clear client annotation mapping');
+  assert.equal(currentDocLibrary, null, 'Opening doc B failure must reset currentDocumentLibrary to null');
 }
+
+assert.match(html, /function resetCurrentDocumentState\(\)/,
+  'UI must provide unified resetCurrentDocumentState function');
+assert.match(html, /currentDocumentLibrary = null;/,
+  'resetCurrentDocumentState must reset currentDocumentLibrary to null on failure');
 
 assert.match(html, /function isSameLibrary\(/,
   'cross-library source matching must include the library identity');
