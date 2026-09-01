@@ -517,6 +517,18 @@ assert.match(html, /拖拽调整大小，双击自适应内容高度/,
 assert.match(html, /id="canvas-evidence-popover"/,
   'evidence verification popover must be present in DOM');
 assert.match(html, /function openQuickEvidencePopover\(/);
+
+// --- Capabilities-Driven UI Tests ---
+assert.match(html, /function applyCapabilitiesUI\(\)/,
+  'UI must define applyCapabilitiesUI to control capability-driven views');
+assert.match(html, /config\.capabilities = data\.capabilities/,
+  'checkSession must store capabilities');
+assert.match(html, /btnScan\.classList\.toggle\('hidden', !caps\.upstreamSync\)/,
+  'inbox scan button must toggle based on upstreamSync capability');
+assert.match(html, /collectionsContainer\.classList\.toggle\('hidden', !caps\.collections\)/,
+  'collections container must toggle based on collections capability');
+assert.match(html, /bindingsTab\.classList\.toggle\('hidden', !caps\.collections\)/,
+  'collection bindings tab must toggle based on collections capability');
 assert.match(html, /function openQuickImportModal\(/);
 assert.match(html, /async function resolveQuickImport\(\)/);
 

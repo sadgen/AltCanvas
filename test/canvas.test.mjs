@@ -1401,7 +1401,7 @@ try {
     fs.rmSync(v10Dir, { recursive: true, force: true });
   }
 
-  // --- Lineage Test 2: Current v11 DB -> v12 ---
+  // --- Lineage Test 2: Genuine Mainline Schema v11 DB -> v12 ---
   const v11LineageDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-v11-lineage-test-'));
   const v11LineageDbPath = path.join(v11LineageDir, 'canvas-v11.sqlite');
   try {
@@ -1420,40 +1420,274 @@ try {
       INSERT INTO schema_migrations (version, applied_at) VALUES (10, '2026-08-31T07:00:00.000Z');
       INSERT INTO schema_migrations (version, applied_at) VALUES (11, '2026-08-31T08:00:00.000Z');
 
-      CREATE TABLE workspaces (id TEXT PRIMARY KEY, owner_key TEXT NOT NULL, name TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 1, description TEXT NOT NULL DEFAULT '', research_question TEXT NOT NULL DEFAULT '', inclusion_rules TEXT NOT NULL DEFAULT '', exclusion_rules TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT) STRICT;
-      CREATE TABLE boards (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES workspaces(id), name TEXT NOT NULL, viewport_x REAL NOT NULL DEFAULT 0, viewport_y REAL NOT NULL DEFAULT 0, viewport_zoom REAL NOT NULL DEFAULT 1, version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT) STRICT;
-      CREATE TABLE source_refs (id TEXT PRIMARY KEY, board_id TEXT NOT NULL REFERENCES boards(id), library_type TEXT NOT NULL CHECK (library_type IN ('user', 'group', 'native')), library_id TEXT NOT NULL, item_key TEXT, attachment_key TEXT, attachment_version INTEGER, annotation_key TEXT, annotation_version INTEGER, page_label TEXT, position_json TEXT, quote_snapshot TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL) STRICT;
-      CREATE TABLE nodes (id TEXT PRIMARY KEY, board_id TEXT NOT NULL REFERENCES boards(id), node_type TEXT NOT NULL, x REAL NOT NULL, y REAL NOT NULL, width REAL NOT NULL, height REAL NOT NULL, z_index INTEGER NOT NULL DEFAULT 0, title TEXT NOT NULL DEFAULT '', body TEXT NOT NULL DEFAULT '', color TEXT, source_ref_id TEXT REFERENCES source_refs(id), version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT) STRICT;
-      CREATE TABLE edges (id TEXT PRIMARY KEY, board_id TEXT NOT NULL REFERENCES boards(id), source_node_id TEXT NOT NULL REFERENCES nodes(id), target_node_id TEXT NOT NULL REFERENCES nodes(id), relation TEXT NOT NULL, label TEXT NOT NULL DEFAULT '', origin TEXT NOT NULL DEFAULT 'manual' CHECK (origin IN ('manual', 'document_map_internal', 'document_map_context', 't3_expand', 'ai_synthesis')), projection_key TEXT, version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT, CHECK (source_node_id <> target_node_id)) STRICT;
-      CREATE TABLE jobs (id TEXT PRIMARY KEY, owner_key TEXT NOT NULL, job_type TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'queued', progress INTEGER NOT NULL DEFAULT 0, total INTEGER NOT NULL DEFAULT 0, payload_json TEXT, result_json TEXT, error_code TEXT, error_message TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, started_at TEXT, completed_at TEXT) STRICT;
-      CREATE TABLE inbox_entries (id TEXT PRIMARY KEY, owner_key TEXT NOT NULL, library_type TEXT NOT NULL, library_id TEXT NOT NULL, item_key TEXT NOT NULL, attachment_key TEXT, attachment_version INTEGER, detected_from TEXT NOT NULL DEFAULT 'scan', title TEXT NOT NULL, clean_title TEXT, institution TEXT, doi TEXT, year TEXT, creators_json TEXT NOT NULL DEFAULT '[]', abstract_note TEXT NOT NULL DEFAULT '', tags_json TEXT NOT NULL DEFAULT '[]', state TEXT NOT NULL DEFAULT 'unread', created_at TEXT NOT NULL, updated_at TEXT NOT NULL) STRICT;
+      CREATE TABLE ai_settings (
+        owner_key TEXT PRIMARY KEY,
+        base_url TEXT NOT NULL,
+        model TEXT NOT NULL,
+        api_key_encrypted TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      ) STRICT;
 
+      CREATE TABLE provenance_events (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        board_id TEXT,
+        node_id TEXT,
+        actor_key TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL
+      ) STRICT;
+      CREATE INDEX provenance_workspace_idx ON provenance_events(workspace_id, created_at);
+
+      -- Genuine v11 tables with strict ('user', 'group') library_type constraints
+      CREATE TABLE workspaces (
+        id TEXT PRIMARY KEY, owner_key TEXT NOT NULL, name TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 1,
+        description TEXT NOT NULL DEFAULT '', research_question TEXT NOT NULL DEFAULT '',
+        inclusion_rules TEXT NOT NULL DEFAULT '', exclusion_rules TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT
+      ) STRICT;
+      CREATE INDEX workspaces_owner_idx ON workspaces(owner_key, deleted_at, updated_at);
+
+      CREATE TABLE boards (
+        id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES workspaces(id), name TEXT NOT NULL,
+        viewport_x REAL NOT NULL DEFAULT 0, viewport_y REAL NOT NULL DEFAULT 0, viewport_zoom REAL NOT NULL DEFAULT 1,
+        version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT
+      ) STRICT;
+      CREATE INDEX boards_workspace_idx ON boards(workspace_id, deleted_at, updated_at);
+
+      CREATE TABLE source_refs (
+        id TEXT PRIMARY KEY, owner_key TEXT NOT NULL,
+        library_type TEXT NOT NULL CHECK (library_type IN ('user', 'group')),
+        library_id TEXT NOT NULL, item_key TEXT, attachment_key TEXT, attachment_version INTEGER,
+        annotation_key TEXT, annotation_version INTEGER, page_label TEXT, position_json TEXT,
+        quote_snapshot TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      ) STRICT;
+      CREATE INDEX source_refs_owner_idx ON source_refs(owner_key, library_type, library_id);
+      CREATE INDEX source_refs_target_idx ON source_refs(library_type, library_id, item_key, annotation_key);
+
+      CREATE TABLE nodes (
+        id TEXT PRIMARY KEY, board_id TEXT NOT NULL REFERENCES boards(id), node_type TEXT NOT NULL,
+        x REAL NOT NULL, y REAL NOT NULL, width REAL NOT NULL, height REAL NOT NULL, z_index INTEGER NOT NULL DEFAULT 0,
+        title TEXT NOT NULL DEFAULT '', body TEXT NOT NULL DEFAULT '', color TEXT,
+        source_ref_id TEXT REFERENCES source_refs(id), version INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT
+      ) STRICT;
+      CREATE INDEX nodes_board_idx ON nodes(board_id, deleted_at, z_index);
+
+      CREATE TABLE edges (
+        id TEXT PRIMARY KEY, board_id TEXT NOT NULL REFERENCES boards(id),
+        source_node_id TEXT NOT NULL REFERENCES nodes(id), target_node_id TEXT NOT NULL REFERENCES nodes(id),
+        relation TEXT NOT NULL, label TEXT NOT NULL DEFAULT '',
+        origin TEXT NOT NULL DEFAULT 'manual' CHECK (origin IN ('manual', 'document_map_internal', 'document_map_context', 't3_expand', 'ai_synthesis')),
+        projection_key TEXT, version INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT,
+        CHECK (source_node_id <> target_node_id)
+      ) STRICT;
+      CREATE INDEX edges_board_idx ON edges(board_id, deleted_at);
+      CREATE INDEX edges_projection_idx ON edges(board_id, projection_key, origin) WHERE deleted_at IS NULL;
+
+      CREATE TABLE topic_documents (
+        id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES workspaces(id), owner_key TEXT NOT NULL,
+        library_type TEXT NOT NULL CHECK (library_type IN ('user', 'group')), library_id TEXT NOT NULL, item_key TEXT NOT NULL,
+        attachment_key TEXT, status TEXT NOT NULL DEFAULT 'inbox' CHECK (status IN ('inbox', 'accepted', 'deferred', 'ignored', 'removed')),
+        analysis_status TEXT NOT NULL DEFAULT 'not_started' CHECK (analysis_status IN ('not_started', 'queued', 'running', 'ready', 'failed', 'stale')),
+        origin TEXT NOT NULL DEFAULT 'manual' CHECK (origin IN ('collection_sync', 'canvas_import', 'manual', 'ai_suggestion')),
+        classification_confidence REAL, classification_reason TEXT, item_version INTEGER, attachment_version INTEGER,
+        version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT
+      ) STRICT;
+      CREATE UNIQUE INDEX topic_documents_unique_idx ON topic_documents(workspace_id, library_type, library_id, item_key);
+      CREATE INDEX topic_documents_owner_idx ON topic_documents(owner_key, deleted_at, updated_at);
+      CREATE INDEX topic_documents_lookup_idx ON topic_documents(library_type, library_id, item_key);
+
+      CREATE TABLE collection_bindings (
+        id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES workspaces(id), owner_key TEXT NOT NULL,
+        library_type TEXT NOT NULL CHECK (library_type IN ('user', 'group')), library_id TEXT NOT NULL,
+        collection_key TEXT NOT NULL,
+        mode TEXT NOT NULL DEFAULT 'inbound' CHECK (mode IN ('inbound', 'confirm_both')),
+        last_library_version INTEGER NOT NULL DEFAULT 0, last_synced_at TEXT, enabled INTEGER NOT NULL DEFAULT 1,
+        version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT
+      ) STRICT;
+      CREATE UNIQUE INDEX collection_bindings_unique_idx ON collection_bindings(workspace_id, library_type, library_id, collection_key);
+      CREATE INDEX collection_bindings_owner_idx ON collection_bindings(owner_key, deleted_at, updated_at);
+
+      CREATE TABLE inbox_entries (
+        id TEXT PRIMARY KEY, owner_key TEXT NOT NULL,
+        library_type TEXT NOT NULL CHECK (library_type IN ('user', 'group')), library_id TEXT NOT NULL, item_key TEXT NOT NULL,
+        attachment_key TEXT, attachment_version INTEGER, detected_from TEXT NOT NULL DEFAULT 'scan',
+        title TEXT NOT NULL, clean_title TEXT, institution TEXT, doi TEXT, year TEXT,
+        creators_json TEXT NOT NULL DEFAULT '[]', abstract_note TEXT NOT NULL DEFAULT '', tags_json TEXT NOT NULL DEFAULT '[]',
+        state TEXT NOT NULL DEFAULT 'unread' CHECK (state IN ('unread', 'processed', 'dismissed')),
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      ) STRICT;
+      CREATE UNIQUE INDEX inbox_entries_unique_idx ON inbox_entries(owner_key, library_type, library_id, item_key);
+      CREATE INDEX inbox_entries_owner_state_idx ON inbox_entries(owner_key, state, updated_at);
+
+      CREATE TABLE jobs (
+        id TEXT PRIMARY KEY, owner_key TEXT NOT NULL, job_type TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'queued' CHECK (state IN ('queued', 'running', 'completed', 'failed')),
+        progress INTEGER NOT NULL DEFAULT 0, total INTEGER NOT NULL DEFAULT 0,
+        payload_json TEXT, result_json TEXT, error_code TEXT, error_message TEXT,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL, started_at TEXT, completed_at TEXT
+      ) STRICT;
+      CREATE INDEX jobs_owner_idx ON jobs(owner_key, state, updated_at);
+
+      CREATE TABLE document_analyses (
+        id TEXT PRIMARY KEY, owner_key TEXT NOT NULL,
+        library_type TEXT NOT NULL CHECK (library_type IN ('user', 'group')), library_id TEXT NOT NULL, item_key TEXT NOT NULL,
+        attachment_key TEXT NOT NULL, attachment_version INTEGER, model TEXT NOT NULL, prompt_version TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'ready' CHECK (status IN ('queued', 'running', 'ready', 'failed', 'stale')),
+        document_title TEXT NOT NULL DEFAULT '', page_count INTEGER NOT NULL DEFAULT 1, graph_json TEXT NOT NULL,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      ) STRICT;
+      CREATE UNIQUE INDEX document_analyses_unique_cache_idx ON document_analyses(owner_key, library_type, library_id, attachment_key, COALESCE(attachment_version, 0), model, prompt_version);
+      CREATE INDEX document_analyses_lookup_idx ON document_analyses(owner_key, library_type, library_id, item_key, status);
+
+      CREATE TABLE document_metas (
+        id TEXT PRIMARY KEY, owner_key TEXT NOT NULL,
+        library_type TEXT NOT NULL CHECK (library_type IN ('user', 'group')), library_id TEXT NOT NULL, item_key TEXT NOT NULL,
+        attachment_key TEXT, attachment_version INTEGER, clean_title TEXT NOT NULL, institution TEXT,
+        report_title TEXT, subtitle TEXT, year TEXT, doi TEXT, summary TEXT, source TEXT NOT NULL DEFAULT 'ai',
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      ) STRICT;
+      CREATE UNIQUE INDEX document_metas_unique_idx ON document_metas(owner_key, library_type, library_id, item_key);
+      CREATE INDEX document_metas_owner_idx ON document_metas(owner_key, library_type, library_id);
+
+      CREATE TABLE knowledge_units (
+        id TEXT PRIMARY KEY, owner_key TEXT NOT NULL, analysis_id TEXT NOT NULL REFERENCES document_analyses(id),
+        type TEXT NOT NULL CHECK (type IN ('overview', 'section', 'concept', 'claim')),
+        library_type TEXT NOT NULL CHECK (library_type IN ('user', 'group')), library_id TEXT NOT NULL, item_key TEXT NOT NULL,
+        attachment_key TEXT, document_title TEXT NOT NULL DEFAULT '', title TEXT NOT NULL DEFAULT '', body TEXT NOT NULL DEFAULT '',
+        page_start INTEGER NOT NULL DEFAULT 1, page_end INTEGER NOT NULL DEFAULT 1, evidence_page INTEGER NOT NULL DEFAULT 1,
+        evidence_quote TEXT NOT NULL DEFAULT '', position_json TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      ) STRICT;
+      CREATE INDEX knowledge_units_owner_item_idx ON knowledge_units(owner_key, library_type, library_id, item_key);
+      CREATE INDEX knowledge_units_analysis_idx ON knowledge_units(owner_key, analysis_id);
+
+      CREATE TABLE knowledge_relations (
+        id TEXT PRIMARY KEY, owner_key TEXT NOT NULL,
+        source_unit_id TEXT NOT NULL REFERENCES knowledge_units(id) ON DELETE CASCADE,
+        target_unit_id TEXT NOT NULL REFERENCES knowledge_units(id) ON DELETE CASCADE,
+        relation_type TEXT NOT NULL CHECK (relation_type IN ('supports', 'contradicts', 'extends', 'context_difference')),
+        confidence REAL NOT NULL DEFAULT 1.0, reason TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'suggested' CHECK (status IN ('suggested', 'accepted', 'rejected', 'dismissed')),
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      ) STRICT;
+      CREATE UNIQUE INDEX knowledge_relations_pair_idx ON knowledge_relations(source_unit_id, target_unit_id, relation_type);
+      CREATE INDEX knowledge_relations_owner_idx ON knowledge_relations(owner_key, status, updated_at);
+
+      -- Insert representative baseline v11 data
       INSERT INTO workspaces (id, owner_key, name, created_at, updated_at) VALUES ('ws-v11', '${actor}', 'V11 Workspace', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
       INSERT INTO boards (id, workspace_id, name, created_at, updated_at) VALUES ('board-v11', 'ws-v11', 'V11 Board', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
-      INSERT INTO nodes (id, board_id, node_type, x, y, width, height, created_at, updated_at) VALUES ('n1-v11', 'board-v11', 'manual_note', 0, 0, 100, 100, '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
-      INSERT INTO nodes (id, board_id, node_type, x, y, width, height, created_at, updated_at) VALUES ('n2-v11', 'board-v11', 'manual_note', 200, 0, 100, 100, '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
+      INSERT INTO source_refs (id, owner_key, library_type, library_id, item_key, attachment_key, attachment_version, created_at, updated_at) VALUES ('sr-v11-1', '${actor}', 'user', '42', 'ITEM_V11', 'ATT_V11', 1, '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
+      INSERT INTO nodes (id, board_id, node_type, x, y, width, height, source_ref_id, created_at, updated_at) VALUES ('n1-v11', 'board-v11', 'manual_note', 0, 0, 100, 100, 'sr-v11-1', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
+      INSERT INTO nodes (id, board_id, node_type, x, y, width, height, source_ref_id, created_at, updated_at) VALUES ('n2-v11', 'board-v11', 'manual_note', 200, 0, 100, 100, NULL, '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
       INSERT INTO edges (id, board_id, source_node_id, target_node_id, relation, origin, created_at, updated_at) VALUES ('e1-v11', 'board-v11', 'n1-v11', 'n2-v11', 'supports', 'manual', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
+      INSERT INTO topic_documents (id, workspace_id, owner_key, library_type, library_id, item_key, status, origin, created_at, updated_at) VALUES ('td-v11-1', 'ws-v11', '${actor}', 'user', '42', 'ITEM_V11', 'accepted', 'manual', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
+      INSERT INTO collection_bindings (id, workspace_id, owner_key, library_type, library_id, collection_key, mode, created_at, updated_at) VALUES ('cb-v11-1', 'ws-v11', '${actor}', 'user', '42', 'COL_V11', 'inbound', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
+      INSERT INTO inbox_entries (id, owner_key, library_type, library_id, item_key, title, clean_title, doi, created_at, updated_at) VALUES ('inbox-v11-1', '${actor}', 'user', '42', 'ITEM_V11', 'Raw Paper Title', 'Clean Title V11', '10.1000/v11doi', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
       INSERT INTO jobs (id, owner_key, job_type, payload_json, created_at, updated_at) VALUES ('job-v11', '${actor}', 'import_document', '{"libraryType":"user","libraryId":"42"}', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
+      INSERT INTO document_analyses (id, owner_key, library_type, library_id, item_key, attachment_key, attachment_version, model, prompt_version, document_title, graph_json, created_at, updated_at) VALUES ('ana-v11-1', '${actor}', 'user', '42', 'ITEM_V11', 'ATT_V11', 1, 'gpt-4o', 'v1', 'Paper Analysis', '{"overview":{"title":"Overview","body":"Text"}}', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
+      INSERT INTO document_metas (id, owner_key, library_type, library_id, item_key, clean_title, doi, created_at, updated_at) VALUES ('meta-v11-1', '${actor}', 'user', '42', 'ITEM_V11', 'Clean Title V11', '10.1000/v11doi', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
+      INSERT INTO knowledge_units (id, owner_key, analysis_id, type, library_type, library_id, item_key, title, evidence_page, created_at, updated_at) VALUES ('ku-v11-1', '${actor}', 'ana-v11-1', 'overview', 'user', '42', 'ITEM_V11', 'Overview Unit', 3, '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
+      INSERT INTO knowledge_units (id, owner_key, analysis_id, type, library_type, library_id, item_key, title, evidence_page, created_at, updated_at) VALUES ('ku-v11-2', '${actor}', 'ana-v11-1', 'claim', 'user', '42', 'ITEM_V11', 'Claim Unit', 4, '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
+      INSERT INTO knowledge_relations (id, owner_key, source_unit_id, target_unit_id, relation_type, created_at, updated_at) VALUES ('kr-v11-1', '${actor}', 'ku-v11-1', 'ku-v11-2', 'supports', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
     `);
     rawV11.close();
 
     const migratedV11Store = new CanvasStore(v11LineageDbPath);
     const maxV11 = migratedV11Store.db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v;
-    assert.equal(maxV11, 12, 'V11 DB must upgrade to schema v12');
+    assert.equal(maxV11, 12, 'Genuine V11 DB must upgrade to schema v12');
 
-    // Verify existing v11 data preserved
+    // 1. Assert foreign key consistency across entire migrated schema
+    const fkCheck = migratedV11Store.db.prepare('PRAGMA foreign_key_check').all();
+    assert.equal(fkCheck.length, 0, 'No foreign key violations must exist after migration');
+
+    // 2. Assert ALL critical business indexes exist and were not dropped
+    const indexRows = migratedV11Store.db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND sql IS NOT NULL").all().map(r => r.name);
+    const expectedIndexes = [
+      'topic_documents_unique_idx', 'topic_documents_owner_idx', 'topic_documents_lookup_idx',
+      'collection_bindings_unique_idx', 'collection_bindings_owner_idx',
+      'inbox_entries_unique_idx', 'inbox_entries_owner_state_idx',
+      'document_analyses_unique_cache_idx', 'document_analyses_lookup_idx',
+      'document_metas_unique_idx', 'document_metas_owner_idx',
+      'knowledge_units_owner_item_idx', 'knowledge_units_analysis_idx',
+      'knowledge_relations_pair_idx', 'knowledge_relations_owner_idx',
+      'source_refs_owner_idx', 'source_refs_target_idx',
+      'edges_board_idx', 'edges_projection_idx',
+      'users_username_idx', 'documents_owner_idx', 'attachments_doc_idx', 'annotations_attachment_idx'
+    ];
+    for (const expectedIdx of expectedIndexes) {
+      assert.ok(indexRows.includes(expectedIdx), `Index ${expectedIdx} must be preserved in migrated v12 database`);
+    }
+
+    // 3. Assert full data fidelity for all entities
     assert.equal(migratedV11Store.getWorkspace(actor, 'ws-v11').name, 'V11 Workspace');
     assert.equal(migratedV11Store.getEdge(actor, 'e1-v11').origin, 'manual');
-    const job = migratedV11Store.getJob(actor, 'job-v11');
-    assert.equal(job.payload.libraryType, 'user');
+    assert.equal(migratedV11Store.getTopicDocument(actor, 'td-v11-1').status, 'accepted');
+    assert.equal(migratedV11Store.getCollectionBinding(actor, 'cb-v11-1').collectionKey, 'COL_V11');
+    assert.equal(migratedV11Store.getInboxEntry(actor, 'inbox-v11-1').doi, '10.1000/v11doi');
+    assert.equal(migratedV11Store.getDocumentMeta(actor, { libraryType: 'user', libraryId: '42', itemKey: 'ITEM_V11' }).cleanTitle, 'Clean Title V11');
+    assert.equal(migratedV11Store.getKnowledgeUnit(actor, 'ku-v11-1').evidencePage, 3);
+    assert.equal(migratedV11Store.getJob(actor, 'job-v11').payload.libraryType, 'user');
 
-    // Verify native tables created and usable
+    // 4. Assert unique constraint behavior is preserved
+    assert.throws(() => {
+      migratedV11Store.db.prepare(`
+        INSERT INTO topic_documents (id, workspace_id, owner_key, library_type, library_id, item_key, created_at, updated_at)
+        VALUES ('td-dup', 'ws-v11', '${actor}', 'user', '42', 'ITEM_V11', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z')
+      `).run();
+    }, /UNIQUE constraint failed/, 'topic_documents unique constraint must block duplicate insertion');
+
+    // 5. Assert native tables and native library types work on the upgraded database
     const nativeDoc = migratedV11Store.createDocument(actor, { title: 'Native Doc in Migrated V11' });
     assert.equal(nativeDoc.title, 'Native Doc in Migrated V11');
+    const nativeTopicDoc = migratedV11Store.addTopicDocument(actor, 'ws-v11', {
+      libraryType: 'native',
+      libraryId: 'local',
+      itemKey: nativeDoc.id,
+      status: 'accepted',
+      origin: 'native_upload'
+    });
+    assert.equal(nativeTopicDoc.origin, 'native_upload');
 
+    // 6. Assert reopening is completely idempotent
     migratedV11Store.close();
+    const reopenedV11Store = new CanvasStore(v11LineageDbPath);
+    const reopenedMaxV = reopenedV11Store.db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v;
+    assert.equal(reopenedMaxV, 12, 'Reopening must maintain version 12');
+    reopenedV11Store.close();
   } finally {
     fs.rmSync(v11LineageDir, { recursive: true, force: true });
+  }
+
+  // --- Lineage Test 2b: Future Schema v13 DB must be rejected BEFORE any modifications ---
+  const v13Dir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-v13-future-test-'));
+  const v13DbPath = path.join(v13Dir, 'canvas-v13.sqlite');
+  try {
+    const rawV13 = new DatabaseSync(v13DbPath);
+    rawV13.exec(`
+      CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL) STRICT;
+      INSERT INTO schema_migrations (version, applied_at) VALUES (1, '2026-08-30T00:00:00.000Z');
+      INSERT INTO schema_migrations (version, applied_at) VALUES (13, '2026-09-02T00:00:00.000Z');
+      CREATE TABLE custom_future_table (id TEXT PRIMARY KEY) STRICT;
+    `);
+    rawV13.close();
+
+    // CanvasStore must reject without executing DDL
+    assert.throws(() => {
+      new CanvasStore(v13DbPath);
+    }, /Canvas database schema 13 is newer than this server supports/);
+
+    // Verify DB was NOT modified
+    const inspectV13 = new DatabaseSync(v13DbPath);
+    const tablesAfter = inspectV13.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(r => r.name);
+    assert.ok(!tablesAfter.includes('users'), 'Future schema DB must not have native users table added');
+    assert.ok(!tablesAfter.includes('documents'), 'Future schema DB must not have native documents table added');
+    inspectV13.close();
+  } finally {
+    fs.rmSync(v13Dir, { recursive: true, force: true });
   }
 
   // --- Lineage Test 3: Native v10 DB -> v12 ---

@@ -210,15 +210,24 @@ console.log('✅ OIDC signature, claims, nonce, and identity mapping passed');
 
 // 7. Test BFF authorization boundaries and CSRF origin checks
 const authorizationSession = {
+  authMode: 'altero',
   userId: '42',
   groupIds: ['7'],
   scopes: ['library.read', 'files.read']
+};
+const localAuthSession = {
+  authMode: 'local',
+  userId: '42',
+  groupIds: ['7'],
+  scopes: ['*']
 };
 assert.equal(isAllowedApiPath('/api/users/42/items/top', authorizationSession), true);
 assert.equal(isAllowedApiPath('/api/users/43/items/top', authorizationSession), false);
 assert.equal(isAllowedApiPath('/api/groups/7/items/top', authorizationSession), true);
 assert.equal(isAllowedApiPath('/api/groups/8/items/top', authorizationSession), false);
 assert.equal(isAllowedApiPath('/api/keys/current', authorizationSession), false);
+assert.equal(isAllowedApiPath('/api/users/42/items/top', localAuthSession), false, 'Local auth mode must strictly reject Altero API paths');
+assert.equal(isAllowedApiPath('/api/groups/7/items/top', localAuthSession), false, 'Local auth mode must strictly reject Altero group paths');
 assert.equal(hasScope(authorizationSession, 'library.read'), true);
 assert.equal(hasScope(authorizationSession, 'library.write'), false);
 assert.equal(isSameOriginRequest({ headers: { origin: 'https://canvas.example.org' } }, 'https://canvas.example.org'), true);

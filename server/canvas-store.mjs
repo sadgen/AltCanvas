@@ -598,6 +598,7 @@ function ensureNativeLibraryTypeSupport(db) {
         changed = true;
       }
       if (changed) {
+        const existingIndexes = db.prepare("SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name = ? AND sql IS NOT NULL").all(tbl);
         const openParenIdx = newSql.indexOf('(');
         const colsDef = newSql.slice(openParenIdx);
         db.exec(`
@@ -606,6 +607,11 @@ function ensureNativeLibraryTypeSupport(db) {
           DROP TABLE ${tbl};
           ALTER TABLE ${tbl}_new RENAME TO ${tbl};
         `);
+        for (const idx of existingIndexes) {
+          if (idx.sql) {
+            try { db.exec(idx.sql); } catch {}
+          }
+        }
       }
     }
   }
@@ -724,19 +730,110 @@ function ensureNativeCoreTables(db) {
   `);
 }
 
-function ensureNativeIndexes(db) {
-  db.exec(`
-    CREATE INDEX IF NOT EXISTS users_username_idx ON users(username);
-    CREATE INDEX IF NOT EXISTS documents_owner_idx ON documents(owner_key, deleted_at, updated_at);
-    CREATE INDEX IF NOT EXISTS documents_doi_idx ON documents(owner_key, doi) WHERE deleted_at IS NULL;
-    CREATE INDEX IF NOT EXISTS documents_year_idx ON documents(owner_key, year) WHERE deleted_at IS NULL;
-    CREATE INDEX IF NOT EXISTS doc_creators_doc_idx ON document_creators(document_id, position);
-    CREATE INDEX IF NOT EXISTS attachments_doc_idx ON attachments(document_id, deleted_at);
-    CREATE INDEX IF NOT EXISTS attachments_blob_idx ON attachments(blob_hash);
-    CREATE INDEX IF NOT EXISTS annotations_attachment_idx ON annotations(attachment_id, deleted_at, sort_index);
-    CREATE INDEX IF NOT EXISTS external_refs_owner_idx ON external_refs(owner_key, provider, external_item_id);
-    CREATE INDEX IF NOT EXISTS import_jobs_owner_idx ON import_jobs(owner_key, state, created_at);
-  `);
+function ensureAllIndexes(db) {
+  const tableExists = (name) => Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name));
+
+  if (tableExists('workspaces')) {
+    db.exec("CREATE INDEX IF NOT EXISTS workspaces_owner_idx ON workspaces(owner_key, deleted_at, updated_at);");
+  }
+  if (tableExists('boards')) {
+    db.exec("CREATE INDEX IF NOT EXISTS boards_workspace_idx ON boards(workspace_id, deleted_at, updated_at);");
+  }
+  if (tableExists('source_refs')) {
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS source_refs_owner_idx ON source_refs(owner_key, library_type, library_id);
+      CREATE INDEX IF NOT EXISTS source_refs_target_idx ON source_refs(library_type, library_id, item_key, annotation_key);
+    `);
+  }
+  if (tableExists('nodes')) {
+    db.exec("CREATE INDEX IF NOT EXISTS nodes_board_idx ON nodes(board_id, deleted_at, z_index);");
+  }
+  if (tableExists('edges')) {
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS edges_board_idx ON edges(board_id, deleted_at);
+      CREATE INDEX IF NOT EXISTS edges_projection_idx ON edges(board_id, projection_key, origin) WHERE deleted_at IS NULL;
+    `);
+  }
+  if (tableExists('topic_documents')) {
+    db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS topic_documents_unique_idx ON topic_documents(workspace_id, library_type, library_id, item_key);
+      CREATE INDEX IF NOT EXISTS topic_documents_owner_idx ON topic_documents(owner_key, deleted_at, updated_at);
+      CREATE INDEX IF NOT EXISTS topic_documents_lookup_idx ON topic_documents(library_type, library_id, item_key);
+    `);
+  }
+  if (tableExists('collection_bindings')) {
+    db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS collection_bindings_unique_idx ON collection_bindings(workspace_id, library_type, library_id, collection_key);
+      CREATE INDEX IF NOT EXISTS collection_bindings_owner_idx ON collection_bindings(owner_key, deleted_at, updated_at);
+    `);
+  }
+  if (tableExists('inbox_entries')) {
+    db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS inbox_entries_unique_idx ON inbox_entries(owner_key, library_type, library_id, item_key);
+      CREATE INDEX IF NOT EXISTS inbox_entries_owner_state_idx ON inbox_entries(owner_key, state, updated_at);
+    `);
+  }
+  if (tableExists('jobs')) {
+    db.exec("CREATE INDEX IF NOT EXISTS jobs_owner_idx ON jobs(owner_key, state, updated_at);");
+  }
+  if (tableExists('document_analyses')) {
+    db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS document_analyses_unique_cache_idx ON document_analyses(owner_key, library_type, library_id, attachment_key, COALESCE(attachment_version, 0), model, prompt_version);
+      CREATE INDEX IF NOT EXISTS document_analyses_lookup_idx ON document_analyses(owner_key, library_type, library_id, item_key, status);
+    `);
+  }
+  if (tableExists('document_metas')) {
+    db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS document_metas_unique_idx ON document_metas(owner_key, library_type, library_id, item_key);
+      CREATE INDEX IF NOT EXISTS document_metas_owner_idx ON document_metas(owner_key, library_type, library_id);
+    `);
+  }
+  if (tableExists('knowledge_units')) {
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS knowledge_units_owner_item_idx ON knowledge_units(owner_key, library_type, library_id, item_key);
+      CREATE INDEX IF NOT EXISTS knowledge_units_analysis_idx ON knowledge_units(owner_key, analysis_id);
+    `);
+  }
+  if (tableExists('knowledge_relations')) {
+    db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS knowledge_relations_pair_idx ON knowledge_relations(source_unit_id, target_unit_id, relation_type);
+      CREATE INDEX IF NOT EXISTS knowledge_relations_owner_idx ON knowledge_relations(owner_key, status, updated_at);
+    `);
+  }
+  if (tableExists('provenance_events')) {
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS provenance_workspace_idx ON provenance_events(workspace_id, created_at);
+      CREATE INDEX IF NOT EXISTS provenance_board_idx ON provenance_events(board_id, created_at);
+    `);
+  }
+  if (tableExists('users')) {
+    db.exec("CREATE INDEX IF NOT EXISTS users_username_idx ON users(username);");
+  }
+  if (tableExists('documents')) {
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS documents_owner_idx ON documents(owner_key, deleted_at, updated_at);
+      CREATE INDEX IF NOT EXISTS documents_doi_idx ON documents(owner_key, doi) WHERE deleted_at IS NULL;
+      CREATE INDEX IF NOT EXISTS documents_year_idx ON documents(owner_key, year) WHERE deleted_at IS NULL;
+    `);
+  }
+  if (tableExists('document_creators')) {
+    db.exec("CREATE INDEX IF NOT EXISTS doc_creators_doc_idx ON document_creators(document_id, position);");
+  }
+  if (tableExists('attachments')) {
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS attachments_doc_idx ON attachments(document_id, deleted_at);
+      CREATE INDEX IF NOT EXISTS attachments_blob_idx ON attachments(blob_hash);
+    `);
+  }
+  if (tableExists('annotations')) {
+    db.exec("CREATE INDEX IF NOT EXISTS annotations_attachment_idx ON annotations(attachment_id, deleted_at, sort_index);");
+  }
+  if (tableExists('external_refs')) {
+    db.exec("CREATE INDEX IF NOT EXISTS external_refs_owner_idx ON external_refs(owner_key, provider, external_item_id);");
+  }
+  if (tableExists('import_jobs')) {
+    db.exec("CREATE INDEX IF NOT EXISTS import_jobs_owner_idx ON import_jobs(owner_key, state, created_at);");
+  }
 }
 
 export class CanvasStore {
@@ -768,6 +865,9 @@ export class CanvasStore {
       ) STRICT;
     `);
     const current = this.db.prepare('SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations').get().version;
+    if (current > 12) {
+      throw new Error(`Canvas database schema ${current} is newer than this server supports`);
+    }
     if (current < 1) {
       this.transaction(() => {
         this.db.exec(`
@@ -1280,19 +1380,10 @@ export class CanvasStore {
         ensureEdgeV11Features(this.db);
         ensureNativeCoreTables(this.db);
         ensureNativeLibraryTypeSupport(this.db);
-        ensureNativeIndexes(this.db);
+        ensureAllIndexes(this.db);
         this.db.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(12, nowIso());
       });
     }
-
-    // Probing idempotency check for existing DBs
-    ensureCurrentV10Features(this.db);
-    ensureEdgeV11Features(this.db);
-    ensureNativeCoreTables(this.db);
-    ensureNativeLibraryTypeSupport(this.db);
-    ensureNativeIndexes(this.db);
-
-    if (current > 12) throw new Error(`Canvas database schema ${current} is newer than this server supports`);
   }
 
   transaction(callback) {
@@ -1742,7 +1833,7 @@ export class CanvasStore {
 
   getInboxEntry(actorKey, entryId) {
     return inboxEntryRow(this.db.prepare(`
-      SELECT * FROM inbox_entries WHERE id = ? AND owner_key = ? AND deleted_at IS NULL
+      SELECT * FROM inbox_entries WHERE id = ? AND owner_key = ?
     `).get(entryId, actorKey));
   }
 

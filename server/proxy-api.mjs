@@ -12,6 +12,7 @@ const refreshPromises = new Map();
  * Check if the target route path matches our strict allowlist
  */
 export function isAllowedApiPath(pathname, session) {
+  if (!session || session.authMode !== 'altero') return false;
   const parts = pathname.split('/').filter(Boolean); // e.g. ['api', 'users', '1', 'items', 'top']
   if (parts[0] !== 'api') return false;
 
@@ -110,6 +111,15 @@ export async function handleApiProxy(req, res, url) {
       'Cache-Control': 'no-store'
     });
     res.end(JSON.stringify({ error: 'unauthorized', message: '未授权或会话已过期，请重新登录' }));
+    return;
+  }
+
+  if (session.authMode !== 'altero') {
+    res.writeHead(403, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store'
+    });
+    res.end(JSON.stringify({ error: 'external_library_disabled', message: '当前本地认证模式未启用 Altero 外部文库代理' }));
     return;
   }
 

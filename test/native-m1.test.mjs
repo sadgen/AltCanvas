@@ -8,6 +8,8 @@ import { CanvasConflictError, CanvasNotFoundError, CanvasStore, canvasActorKey }
 import { createCanvasHandler } from '../server/canvas-api.mjs';
 import { createSession, getSessionIdFromRequest } from '../server/session.mjs';
 import { getAuthMode, isLocalAuthAllowed, handleLocalSetup, handleLocalLogin, handleSession, handleLogout } from '../server/auth.mjs';
+import { handleApiProxy } from '../server/proxy-api.mjs';
+import { handleFilesProxy } from '../server/proxy-files.mjs';
 
 class MockResponse extends EventEmitter {
   constructor() {
@@ -840,6 +842,38 @@ try {
   });
   assert.equal(scanRes.statusCode, 200);
   assert.equal(scanRes.payload.data.scanned, 0);
+
+  // 13. Proxy isolation in local mode & Zero Altero fetch call guarantee
+  let upstreamFetchCount = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (...args) => {
+    upstreamFetchCount++;
+    return originalFetch(...args);
+  };
+
+  try {
+    const apiProxyRes = new MockResponse();
+    await handleApiProxy(
+      request({ cookie: newCookie, method: 'GET' }),
+      apiProxyRes,
+      new URL('/api/users/local-admin/items', 'http://127.0.0.1:8088')
+    );
+    assert.equal(apiProxyRes.statusCode, 403, 'handleApiProxy in local auth mode must return 403');
+    assert.equal(apiProxyRes.payload.error, 'external_library_disabled');
+
+    const filesProxyRes = new MockResponse();
+    await handleFilesProxy(
+      request({ cookie: newCookie, method: 'GET' }),
+      filesProxyRes,
+      new URL('/files/users/local-admin/items/ATT_KEY', 'http://127.0.0.1:8088')
+    );
+    assert.equal(filesProxyRes.statusCode, 403, 'handleFilesProxy in local auth mode must return 403');
+    assert.match(filesProxyRes.text, /external_library_disabled|未启用/);
+
+    assert.equal(upstreamFetchCount, 0, 'Local mode proxy attempts must make 0 upstream fetch calls');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 
   reopenedStore.close();
 

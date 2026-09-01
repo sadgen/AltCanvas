@@ -19,6 +19,11 @@ export async function handleFilesProxy(req, res, url) {
     res.end('401 Unauthorized: 请先登录以阅读文档附件');
     return;
   }
+  if (session.authMode !== 'altero') {
+    res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('403 Forbidden: 当前本地认证模式未启用 Altero 外部文件代理');
+    return;
+  }
   if (!hasScope(session, 'files.read')) {
     res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('403 Forbidden: 当前会话缺少 files.read 权限');

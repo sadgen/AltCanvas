@@ -262,11 +262,27 @@ const server = http.createServer(async (req, res) => {
 
   // --- BFF Router: API Proxy ---
   if (pathname.startsWith('/api/')) {
+    if (currentAuthMode !== 'altero') {
+      res.writeHead(403, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'no-store'
+      });
+      res.end(JSON.stringify({ error: 'external_library_disabled', message: 'Altero API 代理在本地模式下已禁用' }));
+      return;
+    }
     return await handleApiProxy(req, res, url);
   }
 
   // --- BFF Router: Streaming Files Proxy ---
   if (pathname.startsWith('/files/')) {
+    if (currentAuthMode !== 'altero') {
+      res.writeHead(403, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'no-store'
+      });
+      res.end(JSON.stringify({ error: 'external_library_disabled', message: 'Altero 文件代理在本地模式下已禁用' }));
+      return;
+    }
     return await handleFilesProxy(req, res, url);
   }
 

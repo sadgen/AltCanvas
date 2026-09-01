@@ -1397,7 +1397,48 @@
       return headers;
     }
 
+    function applyCapabilitiesUI() {
+      const caps = config.capabilities || {
+        nativeUpload: true,
+        collections: authMode === 'altero',
+        upstreamSync: authMode === 'altero',
+        externalLibrary: authMode === 'altero'
+      };
+      const isAltero = authMode === 'altero' || caps.externalLibrary;
+
+      // Upstream sync button in inbox
+      const btnScan = document.getElementById('btn-inbox-scan-now');
+      if (btnScan) {
+        btnScan.classList.toggle('hidden', !caps.upstreamSync);
+      }
+
+      // Collections container in library pane
+      const collectionsContainer = document.getElementById('collections-container');
+      if (collectionsContainer) {
+        collectionsContainer.classList.toggle('hidden', !caps.collections);
+      }
+
+      // Collection bindings tab in topic settings
+      const bindingsTab = document.querySelector('.topic-tab[data-tab="bindings"]');
+      if (bindingsTab) {
+        bindingsTab.classList.toggle('hidden', !caps.collections);
+      }
+
+      // Altero auth section toggle in login modal
+      const toggleAuthBtn = document.getElementById('btn-toggle-auth-mode');
+      if (toggleAuthBtn) {
+        toggleAuthBtn.classList.toggle('hidden', !isAltero && !dynamicAlteroAllowed);
+      }
+
+      // Native PDF upload top button
+      const btnUploadTop = document.getElementById('btn-upload-pdf-top');
+      if (btnUploadTop) {
+        btnUploadTop.classList.toggle('hidden', !caps.nativeUpload);
+      }
+    }
+
     function updateAuthUI(authenticated, user = null, alteroApi = null) {
+      applyCapabilitiesUI();
       const btnLogin = document.getElementById('btn-login');
       const userBadge = document.getElementById('user-badge');
       const userNameDisplay = document.getElementById('user-name-display');
@@ -1548,6 +1589,13 @@
           directModeAllowed = data.allowDirectMode === true;
           dynamicAlteroAllowed = data.allowDynamicAltero === true;
           config.defaultAlteroApi = data.defaultAlteroApi || '';
+          config.capabilities = data.capabilities || {
+            nativeUpload: true,
+            collections: authMode === 'altero',
+            upstreamSync: authMode === 'altero',
+            externalLibrary: authMode === 'altero'
+          };
+          applyCapabilitiesUI();
           document.getElementById('btn-open-settings').classList.toggle('hidden', !directModeAllowed);
           if (directModeAllowed) {
             config.api = localStorage.getItem('altcanvas_api') || '';
