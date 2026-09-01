@@ -1485,7 +1485,8 @@
           descText.textContent = '请输入您的本地账号与密码以登录 AltCanvas 原生研究工作台。';
           submitText.textContent = '登录';
         }
-        if (dynamicAlteroAllowed || config.defaultAlteroApi) {
+        const allowAlteroLogin = dynamicAlteroAllowed || config.capabilities?.externalLibrary === true;
+        if (allowAlteroLogin) {
           toggleBtn.classList.remove('hidden');
           toggleBtn.textContent = '切换至 Altero 授权登录';
         } else {

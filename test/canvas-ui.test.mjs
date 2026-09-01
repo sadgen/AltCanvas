@@ -532,6 +532,54 @@ assert.match(html, /bindingsTab\.classList\.toggle\('hidden', !caps\.collections
 assert.match(html, /function openQuickImportModal\(/);
 assert.match(html, /async function resolveQuickImport\(\)/);
 
+// --- Behavioral test: openLoginModal in local mode with externalLibrary disabled ---
+{
+  const openLoginMatch = /function openLoginModal\(\)\s*\{([\s\S]*?)\n    \}/.exec(scripts[0]);
+  assert.ok(openLoginMatch, 'openLoginModal must be extractable from script');
+
+  const classes = {
+    'login-modal': new Set(['hidden']),
+    'local-auth-section': new Set(['hidden']),
+    'altero-auth-section': new Set(['hidden']),
+    'btn-toggle-auth-mode': new Set(),
+    'local-auth-error': new Set()
+  };
+  const texts = {};
+
+  const mockDoc = {
+    getElementById: (id) => ({
+      classList: {
+        add: (c) => classes[id]?.add(c),
+        remove: (c) => classes[id]?.delete(c),
+        toggle: (c, force) => force ? classes[id]?.add(c) : classes[id]?.delete(c),
+        contains: (c) => classes[id]?.has(c) ?? false
+      },
+      set textContent(v) { texts[id] = v; },
+      get textContent() { return texts[id] || ''; },
+      focus: () => {}
+    })
+  };
+
+  const openLoginRunner = new Function(
+    'document', 'authMode', 'needsSetup', 'dynamicAlteroAllowed', 'config', 'requestAnimationFrame',
+    openLoginMatch[1]
+  );
+
+  // Test with externalLibrary = false and defaultAlteroApi present
+  openLoginRunner(
+    mockDoc,
+    'local',
+    false,
+    false,
+    { capabilities: { externalLibrary: false }, defaultAlteroApi: 'https://altero.example.com' },
+    (fn) => fn()
+  );
+
+  assert.ok(classes['btn-toggle-auth-mode'].has('hidden'), 'btn-toggle-auth-mode must remain hidden in local auth mode when externalLibrary is false');
+  assert.ok(!classes['local-auth-section'].has('hidden'), 'local-auth-section must be visible');
+  assert.ok(classes['altero-auth-section'].has('hidden'), 'altero-auth-section must be hidden');
+}
+
 // --- Behavioral test: autoFitCanvasNodeHeight execution ---
 {
   const autoFitMatch = /function autoFitCanvasNodeHeight\(node, element\)\s*\{([\s\S]*?)\n    \}/.exec(scripts[0]);

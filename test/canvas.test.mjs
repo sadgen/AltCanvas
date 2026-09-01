@@ -1497,8 +1497,8 @@ try {
         classification_confidence REAL, classification_reason TEXT, item_version INTEGER, attachment_version INTEGER,
         version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT
       ) STRICT;
-      CREATE UNIQUE INDEX topic_documents_unique_idx ON topic_documents(workspace_id, library_type, library_id, item_key);
-      CREATE INDEX topic_documents_owner_idx ON topic_documents(owner_key, deleted_at, updated_at);
+      CREATE UNIQUE INDEX topic_documents_unique_active_idx ON topic_documents(workspace_id, library_type, library_id, item_key) WHERE deleted_at IS NULL;
+      CREATE INDEX topic_documents_owner_idx ON topic_documents(owner_key, workspace_id, status, deleted_at);
       CREATE INDEX topic_documents_lookup_idx ON topic_documents(library_type, library_id, item_key);
 
       CREATE TABLE collection_bindings (
@@ -1509,8 +1509,8 @@ try {
         last_library_version INTEGER NOT NULL DEFAULT 0, last_synced_at TEXT, enabled INTEGER NOT NULL DEFAULT 1,
         version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT
       ) STRICT;
-      CREATE UNIQUE INDEX collection_bindings_unique_idx ON collection_bindings(workspace_id, library_type, library_id, collection_key);
-      CREATE INDEX collection_bindings_owner_idx ON collection_bindings(owner_key, deleted_at, updated_at);
+      CREATE UNIQUE INDEX collection_bindings_unique_active_idx ON collection_bindings(workspace_id, library_type, library_id, collection_key) WHERE deleted_at IS NULL;
+      CREATE INDEX collection_bindings_owner_idx ON collection_bindings(owner_key, workspace_id, deleted_at);
 
       CREATE TABLE inbox_entries (
         id TEXT PRIMARY KEY, owner_key TEXT NOT NULL,
@@ -1574,18 +1574,28 @@ try {
         status TEXT NOT NULL DEFAULT 'suggested' CHECK (status IN ('suggested', 'accepted', 'rejected', 'dismissed')),
         created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       ) STRICT;
+      CREATE INDEX knowledge_relations_source_idx ON knowledge_relations(owner_key, source_unit_id, status);
+      CREATE INDEX knowledge_relations_target_idx ON knowledge_relations(owner_key, target_unit_id, status);
       CREATE UNIQUE INDEX knowledge_relations_pair_idx ON knowledge_relations(source_unit_id, target_unit_id, relation_type);
       CREATE INDEX knowledge_relations_owner_idx ON knowledge_relations(owner_key, status, updated_at);
 
-      -- Insert representative baseline v11 data
+      -- Insert representative baseline v11 data including MULTIPLE historical soft-deleted records for same item
       INSERT INTO workspaces (id, owner_key, name, created_at, updated_at) VALUES ('ws-v11', '${actor}', 'V11 Workspace', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
       INSERT INTO boards (id, workspace_id, name, created_at, updated_at) VALUES ('board-v11', 'ws-v11', 'V11 Board', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
       INSERT INTO source_refs (id, owner_key, library_type, library_id, item_key, attachment_key, attachment_version, created_at, updated_at) VALUES ('sr-v11-1', '${actor}', 'user', '42', 'ITEM_V11', 'ATT_V11', 1, '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
       INSERT INTO nodes (id, board_id, node_type, x, y, width, height, source_ref_id, created_at, updated_at) VALUES ('n1-v11', 'board-v11', 'manual_note', 0, 0, 100, 100, 'sr-v11-1', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
       INSERT INTO nodes (id, board_id, node_type, x, y, width, height, source_ref_id, created_at, updated_at) VALUES ('n2-v11', 'board-v11', 'manual_note', 200, 0, 100, 100, NULL, '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
       INSERT INTO edges (id, board_id, source_node_id, target_node_id, relation, origin, created_at, updated_at) VALUES ('e1-v11', 'board-v11', 'n1-v11', 'n2-v11', 'supports', 'manual', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
-      INSERT INTO topic_documents (id, workspace_id, owner_key, library_type, library_id, item_key, status, origin, created_at, updated_at) VALUES ('td-v11-1', 'ws-v11', '${actor}', 'user', '42', 'ITEM_V11', 'accepted', 'manual', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
-      INSERT INTO collection_bindings (id, workspace_id, owner_key, library_type, library_id, collection_key, mode, created_at, updated_at) VALUES ('cb-v11-1', 'ws-v11', '${actor}', 'user', '42', 'COL_V11', 'inbound', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
+
+      -- Soft-deleted historical entries (same workspace_id, library_type, library_id, item_key)
+      INSERT INTO topic_documents (id, workspace_id, owner_key, library_type, library_id, item_key, status, origin, created_at, updated_at, deleted_at) VALUES ('td-v11-old-1', 'ws-v11', '${actor}', 'user', '42', 'ITEM_V11', 'removed', 'manual', '2026-08-29T00:00:00.000Z', '2026-08-29T00:00:00.000Z', '2026-08-29T00:00:00.000Z');
+      INSERT INTO topic_documents (id, workspace_id, owner_key, library_type, library_id, item_key, status, origin, created_at, updated_at, deleted_at) VALUES ('td-v11-old-2', 'ws-v11', '${actor}', 'user', '42', 'ITEM_V11', 'removed', 'manual', '2026-08-30T00:00:00.000Z', '2026-08-30T00:00:00.000Z', '2026-08-30T00:00:00.000Z');
+      -- Active entry
+      INSERT INTO topic_documents (id, workspace_id, owner_key, library_type, library_id, item_key, status, origin, created_at, updated_at, deleted_at) VALUES ('td-v11-1', 'ws-v11', '${actor}', 'user', '42', 'ITEM_V11', 'accepted', 'manual', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z', NULL);
+
+      INSERT INTO collection_bindings (id, workspace_id, owner_key, library_type, library_id, collection_key, mode, created_at, updated_at, deleted_at) VALUES ('cb-v11-old', 'ws-v11', '${actor}', 'user', '42', 'COL_V11', 'inbound', '2026-08-30T00:00:00.000Z', '2026-08-30T00:00:00.000Z', '2026-08-30T00:00:00.000Z');
+      INSERT INTO collection_bindings (id, workspace_id, owner_key, library_type, library_id, collection_key, mode, created_at, updated_at, deleted_at) VALUES ('cb-v11-1', 'ws-v11', '${actor}', 'user', '42', 'COL_V11', 'inbound', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z', NULL);
+
       INSERT INTO inbox_entries (id, owner_key, library_type, library_id, item_key, title, clean_title, doi, created_at, updated_at) VALUES ('inbox-v11-1', '${actor}', 'user', '42', 'ITEM_V11', 'Raw Paper Title', 'Clean Title V11', '10.1000/v11doi', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
       INSERT INTO jobs (id, owner_key, job_type, payload_json, created_at, updated_at) VALUES ('job-v11', '${actor}', 'import_document', '{"libraryType":"user","libraryId":"42"}', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
       INSERT INTO document_analyses (id, owner_key, library_type, library_id, item_key, attachment_key, attachment_version, model, prompt_version, document_title, graph_json, created_at, updated_at) VALUES ('ana-v11-1', '${actor}', 'user', '42', 'ITEM_V11', 'ATT_V11', 1, 'gpt-4o', 'v1', 'Paper Analysis', '{"overview":{"title":"Overview","body":"Text"}}', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
@@ -1598,7 +1608,7 @@ try {
 
     const migratedV11Store = new CanvasStore(v11LineageDbPath);
     const maxV11 = migratedV11Store.db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v;
-    assert.equal(maxV11, 12, 'Genuine V11 DB must upgrade to schema v12');
+    assert.equal(maxV11, 12, 'Genuine V11 DB must upgrade to schema v12 without errors on soft-deleted history');
 
     // 1. Assert foreign key consistency across entire migrated schema
     const fkCheck = migratedV11Store.db.prepare('PRAGMA foreign_key_check').all();
@@ -1607,12 +1617,14 @@ try {
     // 2. Assert ALL critical business indexes exist and were not dropped
     const indexRows = migratedV11Store.db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND sql IS NOT NULL").all().map(r => r.name);
     const expectedIndexes = [
-      'topic_documents_unique_idx', 'topic_documents_owner_idx', 'topic_documents_lookup_idx',
-      'collection_bindings_unique_idx', 'collection_bindings_owner_idx',
+      'topic_documents_unique_active_idx', 'topic_documents_owner_idx', 'topic_documents_lookup_idx',
+      'collection_bindings_unique_active_idx', 'collection_bindings_owner_idx',
       'inbox_entries_unique_idx', 'inbox_entries_owner_state_idx',
+      'jobs_owner_idx',
       'document_analyses_unique_cache_idx', 'document_analyses_lookup_idx',
       'document_metas_unique_idx', 'document_metas_owner_idx',
       'knowledge_units_owner_item_idx', 'knowledge_units_analysis_idx',
+      'knowledge_relations_source_idx', 'knowledge_relations_target_idx',
       'knowledge_relations_pair_idx', 'knowledge_relations_owner_idx',
       'source_refs_owner_idx', 'source_refs_target_idx',
       'edges_board_idx', 'edges_projection_idx',
@@ -1622,7 +1634,7 @@ try {
       assert.ok(indexRows.includes(expectedIdx), `Index ${expectedIdx} must be preserved in migrated v12 database`);
     }
 
-    // 3. Assert full data fidelity for all entities
+    // 3. Assert full data fidelity for all entities including soft-deleted entries
     assert.equal(migratedV11Store.getWorkspace(actor, 'ws-v11').name, 'V11 Workspace');
     assert.equal(migratedV11Store.getEdge(actor, 'e1-v11').origin, 'manual');
     assert.equal(migratedV11Store.getTopicDocument(actor, 'td-v11-1').status, 'accepted');
@@ -1632,13 +1644,21 @@ try {
     assert.equal(migratedV11Store.getKnowledgeUnit(actor, 'ku-v11-1').evidencePage, 3);
     assert.equal(migratedV11Store.getJob(actor, 'job-v11').payload.libraryType, 'user');
 
-    // 4. Assert unique constraint behavior is preserved
+    // 4. Assert partial unique constraint behavior: active duplicate rejected, soft-deleted allowed
     assert.throws(() => {
       migratedV11Store.db.prepare(`
-        INSERT INTO topic_documents (id, workspace_id, owner_key, library_type, library_id, item_key, created_at, updated_at)
-        VALUES ('td-dup', 'ws-v11', '${actor}', 'user', '42', 'ITEM_V11', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z')
+        INSERT INTO topic_documents (id, workspace_id, owner_key, library_type, library_id, item_key, created_at, updated_at, deleted_at)
+        VALUES ('td-dup-active', 'ws-v11', '${actor}', 'user', '42', 'ITEM_V11', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z', NULL)
       `).run();
-    }, /UNIQUE constraint failed/, 'topic_documents unique constraint must block duplicate insertion');
+    }, /UNIQUE constraint failed/, 'Partial unique index must block duplicate ACTIVE item');
+
+    // Soft-deleted entry with same key MUST be allowed
+    assert.doesNotThrow(() => {
+      migratedV11Store.db.prepare(`
+        INSERT INTO topic_documents (id, workspace_id, owner_key, library_type, library_id, item_key, created_at, updated_at, deleted_at)
+        VALUES ('td-another-deleted', 'ws-v11', '${actor}', 'user', '42', 'ITEM_V11', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z')
+      `).run();
+    }, 'Partial unique index must allow inserting soft-deleted records with same itemKey');
 
     // 5. Assert native tables and native library types work on the upgraded database
     const nativeDoc = migratedV11Store.createDocument(actor, { title: 'Native Doc in Migrated V11' });

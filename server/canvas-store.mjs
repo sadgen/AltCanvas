@@ -609,7 +609,7 @@ function ensureNativeLibraryTypeSupport(db) {
         `);
         for (const idx of existingIndexes) {
           if (idx.sql) {
-            try { db.exec(idx.sql); } catch {}
+            db.exec(idx.sql);
           }
         }
       }
@@ -732,6 +732,7 @@ function ensureNativeCoreTables(db) {
 
 function ensureAllIndexes(db) {
   const tableExists = (name) => Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name));
+  const tableCols = (name) => tableExists(name) ? db.prepare(`PRAGMA table_info(${name})`).all().map(c => c.name) : [];
 
   if (tableExists('workspaces')) {
     db.exec("CREATE INDEX IF NOT EXISTS workspaces_owner_idx ON workspaces(owner_key, deleted_at, updated_at);");
@@ -756,25 +757,41 @@ function ensureAllIndexes(db) {
   }
   if (tableExists('topic_documents')) {
     db.exec(`
-      CREATE UNIQUE INDEX IF NOT EXISTS topic_documents_unique_idx ON topic_documents(workspace_id, library_type, library_id, item_key);
-      CREATE INDEX IF NOT EXISTS topic_documents_owner_idx ON topic_documents(owner_key, deleted_at, updated_at);
+      CREATE UNIQUE INDEX IF NOT EXISTS topic_documents_unique_active_idx ON topic_documents(workspace_id, library_type, library_id, item_key) WHERE deleted_at IS NULL;
+      CREATE INDEX IF NOT EXISTS topic_documents_owner_idx ON topic_documents(owner_key, workspace_id, status, deleted_at);
       CREATE INDEX IF NOT EXISTS topic_documents_lookup_idx ON topic_documents(library_type, library_id, item_key);
     `);
   }
   if (tableExists('collection_bindings')) {
     db.exec(`
-      CREATE UNIQUE INDEX IF NOT EXISTS collection_bindings_unique_idx ON collection_bindings(workspace_id, library_type, library_id, collection_key);
-      CREATE INDEX IF NOT EXISTS collection_bindings_owner_idx ON collection_bindings(owner_key, deleted_at, updated_at);
+      CREATE UNIQUE INDEX IF NOT EXISTS collection_bindings_unique_active_idx ON collection_bindings(workspace_id, library_type, library_id, collection_key) WHERE deleted_at IS NULL;
+      CREATE INDEX IF NOT EXISTS collection_bindings_owner_idx ON collection_bindings(owner_key, workspace_id, deleted_at);
     `);
   }
   if (tableExists('inbox_entries')) {
-    db.exec(`
-      CREATE UNIQUE INDEX IF NOT EXISTS inbox_entries_unique_idx ON inbox_entries(owner_key, library_type, library_id, item_key);
-      CREATE INDEX IF NOT EXISTS inbox_entries_owner_state_idx ON inbox_entries(owner_key, state, updated_at);
-    `);
+    const cols = tableCols('inbox_entries');
+    if (cols.includes('deleted_at')) {
+      db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS inbox_entries_unique_active_idx ON inbox_entries(owner_key, library_type, library_id, item_key) WHERE deleted_at IS NULL;
+        CREATE INDEX IF NOT EXISTS inbox_entries_owner_state_idx ON inbox_entries(owner_key, state, deleted_at, updated_at);
+      `);
+    } else {
+      db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS inbox_entries_unique_idx ON inbox_entries(owner_key, library_type, library_id, item_key);
+        CREATE INDEX IF NOT EXISTS inbox_entries_owner_state_idx ON inbox_entries(owner_key, state, updated_at);
+      `);
+    }
   }
   if (tableExists('jobs')) {
-    db.exec("CREATE INDEX IF NOT EXISTS jobs_owner_idx ON jobs(owner_key, state, updated_at);");
+    const cols = tableCols('jobs');
+    if (cols.includes('available_at') && cols.includes('attempts')) {
+      db.exec("CREATE INDEX IF NOT EXISTS jobs_runner_idx ON jobs(state, available_at, attempts);");
+    }
+    if (cols.includes('job_type')) {
+      db.exec("CREATE INDEX IF NOT EXISTS jobs_owner_idx ON jobs(owner_key, job_type, state);");
+    } else {
+      db.exec("CREATE INDEX IF NOT EXISTS jobs_owner_idx ON jobs(owner_key, state, updated_at);");
+    }
   }
   if (tableExists('document_analyses')) {
     db.exec(`
@@ -796,6 +813,8 @@ function ensureAllIndexes(db) {
   }
   if (tableExists('knowledge_relations')) {
     db.exec(`
+      CREATE INDEX IF NOT EXISTS knowledge_relations_source_idx ON knowledge_relations(owner_key, source_unit_id, status);
+      CREATE INDEX IF NOT EXISTS knowledge_relations_target_idx ON knowledge_relations(owner_key, target_unit_id, status);
       CREATE UNIQUE INDEX IF NOT EXISTS knowledge_relations_pair_idx ON knowledge_relations(source_unit_id, target_unit_id, relation_type);
       CREATE INDEX IF NOT EXISTS knowledge_relations_owner_idx ON knowledge_relations(owner_key, status, updated_at);
     `);
