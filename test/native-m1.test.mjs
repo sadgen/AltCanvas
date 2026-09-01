@@ -518,6 +518,52 @@ try {
   assert.equal(docMapRes.statusCode, 201);
   assert.ok(docMapRes.payload.data.nodes.length >= 4);
 
+  // 11. [P1 Regression] Upload Transaction Failure & Orphan Blob File Rollback
+  const orphanTestPdf = Buffer.from('%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n% unique-orphan-payload-12345');
+  const orphanSha256 = crypto.createHash('sha256').update(orphanTestPdf).digest('hex');
+  const orphanBlobPath = store.resolveBlobPath(orphanSha256, '.pdf');
+
+  const failedUploadRes = await call(handler, '/canvas/native/upload', {
+    method: 'POST',
+    cookie: newCookie,
+    headers: {
+      'content-type': 'application/pdf',
+      'x-filename': 'orphan_test.pdf',
+      'x-target-workspace-id': 'non-existent-workspace-id-999'
+    },
+    body: orphanTestPdf
+  });
+  assert.equal(failedUploadRes.statusCode, 404, 'Upload with invalid targetWorkspaceId must fail transaction with 404');
+  assert.equal(fs.existsSync(orphanBlobPath), false, 'Transaction failure must roll back and delete newly moved blob file (no orphan file on disk)');
+  assert.equal(store.getBlob(orphanSha256), null, 'No blob record must remain in database');
+
+  // 12. [P1 Regression] Native Cross-Document Jump Support
+  // Verify GET /canvas/native/documents/:id returns full document and attachment metadata
+  const nativeDocRes = await call(handler, `/canvas/native/documents/${uploadedDoc.id}`, { cookie: newCookie });
+  assert.equal(nativeDocRes.statusCode, 200);
+  assert.equal(nativeDocRes.payload.data.id, uploadedDoc.id);
+  assert.equal(nativeDocRes.payload.data.attachments.length, 1);
+  assert.equal(nativeDocRes.payload.data.attachments[0].id, uploadedAtt.id);
+
+  // 13. [P2 Regression] Upload Stream Backpressure & Error Propagation
+  // Stream that fails mid-way must reject cleanly and delete temporary file
+  const faultyStreamChunks = [
+    Buffer.from('%PDF-1.7\n1 0 obj\n'),
+    Buffer.from('<< /Type /Catalog >>\nendobj\n')
+  ];
+  const faultyRequest = {
+    method: 'POST',
+    headers: { cookie: newCookie, 'content-type': 'application/pdf', 'x-filename': 'faulty.pdf' },
+    socket: { encrypted: false, remoteAddress: '127.0.0.1' },
+    async *[Symbol.asyncIterator]() {
+      for (const chunk of faultyStreamChunks) yield chunk;
+      throw new Error('Simulated network drop mid-upload');
+    }
+  };
+  const faultyResponse = new MockResponse();
+  await handler(faultyRequest, faultyResponse, new URL('/canvas/native/upload', 'http://127.0.0.1:8088'));
+  assert.equal(faultyResponse.statusCode, 500);
+
   // 10. Persistence across Store & Process Restart & [P1 Regression] Blob Reference Count on Delete
   store.close();
   const reopenedStore = new CanvasStore(dbPath);

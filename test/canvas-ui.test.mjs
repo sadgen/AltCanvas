@@ -308,6 +308,11 @@ assert.match(html, /function setupNativePdfUpload\(/,
 assert.match(html, /id="btn-upload-pdf-top"/,
   'UI header must provide native PDF upload button');
 
+assert.match(html, /async function reloadAndSyncReaderAnnotations\(/,
+  'UI must provide reloadAndSyncReaderAnnotations to resync reader state on annotation write/delete conflict or failure');
+assert.match(html, /setAnnotations\(readerAnnotations\)/,
+  'reloadAndSyncReaderAnnotations must update reader in-memory annotations');
+
 console.log('✅ All Canvas UI Tests Passed Successfully!');
 assert.match(html, /function isSameLibrary\(/,
   'cross-library source matching must include the library identity');

@@ -2830,19 +2830,17 @@ export class CanvasStore {
         tags: []
       }]);
 
-      // 6. Optional Topic Document association
+      // 6. Topic Document association
       let topicDoc = null;
       if (targetWorkspaceId) {
-        try {
-          topicDoc = this.addTopicDocument(actorKey, targetWorkspaceId, {
-            libraryType: 'native',
-            libraryId: 'local',
-            itemKey: document.id,
-            attachmentKey: attachment.id,
-            status: 'accepted',
-            origin: 'native_upload'
-          });
-        } catch {}
+        topicDoc = this.addTopicDocument(actorKey, targetWorkspaceId, {
+          libraryType: 'native',
+          libraryId: 'local',
+          itemKey: document.id,
+          attachmentKey: attachment.id,
+          status: 'accepted',
+          origin: 'native_upload'
+        });
       }
 
       const fullDoc = this.getDocument(actorKey, document.id);

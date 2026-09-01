@@ -48,14 +48,30 @@ async function streamUploadToFile(req, targetDir, maxBytes = MAX_UPLOAD_BYTES) {
   let totalBytes = 0;
   let firstChunk = null;
 
+  let streamError = null;
+  writeStream.on('error', (err) => { streamError = err; });
+
   const cleanup = () => {
     try { writeStream.destroy(); } catch {}
     try { if (fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath); } catch {}
   };
 
   const safeWrite = async (chunk) => {
+    if (streamError) throw streamError;
     if (!writeStream.write(chunk)) {
-      await new Promise(resolve => writeStream.once('drain', resolve));
+      await new Promise((resolve, reject) => {
+        const onDrain = () => { cleanupListeners(); resolve(); };
+        const onError = (err) => { cleanupListeners(); reject(err); };
+        const onClose = () => { cleanupListeners(); resolve(); };
+        const cleanupListeners = () => {
+          writeStream.removeListener('drain', onDrain);
+          writeStream.removeListener('error', onError);
+          writeStream.removeListener('close', onClose);
+        };
+        writeStream.once('drain', onDrain);
+        writeStream.once('error', onError);
+        writeStream.once('close', onClose);
+      });
     }
   };
 
@@ -1043,6 +1059,7 @@ export function createCanvasHandler(store, {
         const { tempFilePath, sha256, sizeBytes, originalFilename, targetWorkspaceId, forceNew } = uploadResult;
 
         let importResult;
+        let newlyCreatedBlobPath = null;
         try {
           const targetBlobPath = store.resolveBlobPath(sha256, '.pdf');
           const relativePath = path.relative(store.getBlobStorageDir(), targetBlobPath);
@@ -1052,6 +1069,7 @@ export function createCanvasHandler(store, {
             fs.mkdirSync(path.dirname(targetBlobPath), { recursive: true, mode: 0o700 });
             fs.renameSync(tempFilePath, targetBlobPath);
             fs.chmodSync(targetBlobPath, 0o600);
+            newlyCreatedBlobPath = targetBlobPath;
           } else {
             try { fs.unlinkSync(tempFilePath); } catch {}
           }
@@ -1067,6 +1085,14 @@ export function createCanvasHandler(store, {
           });
         } catch (err) {
           try { if (fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath); } catch {}
+          if (newlyCreatedBlobPath && fs.existsSync(newlyCreatedBlobPath)) {
+            try {
+              const existingBlobInDb = store.getBlob(sha256);
+              if (!existingBlobInDb || existingBlobInDb.referenceCount <= 0) {
+                fs.unlinkSync(newlyCreatedBlobPath);
+              }
+            } catch {}
+          }
           throw err;
         }
 

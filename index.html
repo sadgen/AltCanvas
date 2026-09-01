@@ -1354,7 +1354,7 @@
     function libraryApiPrefix(sourceRef = null) {
       const library = normalizeLibraryContext(sourceRef);
       if (library.libraryType === 'native') {
-        return `/native/${encodeURIComponent(library.libraryId)}`;
+        throw new Error('Native library does not support Zotero API endpoints');
       }
       const segment = library.libraryType === 'group' ? 'groups' : 'users';
       return `/${segment}/${encodeURIComponent(library.libraryId)}`;
@@ -2751,6 +2751,71 @@
       }
     }
 
+    async function reloadAndSyncReaderAnnotations(attachmentKey) {
+      if (!currentReaderInstance || !attachmentKey) return;
+      try {
+        let rawAnnotations = [];
+        if (currentDocumentLibrary?.libraryType === 'native' || currentAttachment?.isNative) {
+          const annRes = await fetch(`/canvas/native/attachments/${encodeURIComponent(attachmentKey)}/annotations`);
+          const annJson = annRes.ok ? await annRes.json() : { data: [] };
+          rawAnnotations = (annJson.data || []).map(a => ({
+            key: a.id,
+            version: a.version,
+            data: {
+              itemType: 'annotation',
+              parentItem: attachmentKey,
+              annotationType: a.annotationType,
+              annotationText: a.quote,
+              annotationComment: a.comment,
+              annotationColor: a.color,
+              annotationPageLabel: a.pageLabel,
+              annotationSortIndex: a.sortIndex,
+              annotationPosition: JSON.stringify(a.position || { pageIndex: 0, rects: [] })
+            }
+          }));
+        } else {
+          const annUrl = getApiUrl(`${libraryApiPrefix(currentDocumentLibrary)}/items/${encodeURIComponent(attachmentKey)}/children`);
+          const annRes = await fetch(annUrl, { headers: getHeaders() });
+          const annChildren = annRes.ok ? await annRes.json() : [];
+          rawAnnotations = annChildren.filter(c => c.data?.itemType === 'annotation');
+        }
+
+        currentAnnotationsMap.clear();
+        clientAnnotationIdMap.clear();
+        const readerAnnotations = [];
+
+        for (const a of rawAnnotations) {
+          const annData = a.data || {};
+          currentAnnotationsMap.set(a.key, {
+            version: a.version || annData.version || 0,
+            data: annData
+          });
+
+          const pos = getAnnotationPosition(annData);
+          const pageIndex = getAnnotationPageIndex(annData);
+
+          readerAnnotations.push({
+            id: a.key,
+            type: annData.annotationType || 'highlight',
+            color: annData.annotationColor || '#ffd400',
+            pageIndex: pageIndex,
+            position: pos,
+            text: cleanAnnotationText(annData.annotationText),
+            comment: cleanAnnotationText(annData.annotationComment),
+            tags: annData.tags || []
+          });
+        }
+
+        renderAnnotationCards();
+
+        if (currentReaderInstance._primaryView?._annotationManager?.setAnnotations) {
+          currentReaderInstance._primaryView._annotationManager.setAnnotations(readerAnnotations);
+        }
+      } catch (err) {
+        console.warn('Failed to resync reader annotations:', err);
+      }
+    }
+
     async function handleSaveAnnotations(savedAnns) {
       if (!currentAttachment) return;
 
@@ -2785,6 +2850,7 @@
       }
 
       if (currentDocumentLibrary?.libraryType === 'native' || currentAttachment?.isNative) {
+        let hadSaveErrors = false;
         if (toCreate.length > 0) {
           for (const item of toCreate) {
             try {
@@ -2811,10 +2877,12 @@
                 });
                 if (item.annotation) void autoTranslatePdfAnnotation(item.annotation);
               } else {
+                hadSaveErrors = true;
                 const errJson = await res.json().catch(() => null);
                 throw new Error(errJson?.error?.message || `HTTP ${res.status}`);
               }
             } catch (e) {
+              hadSaveErrors = true;
               console.error('Native annotation create failed:', e);
               showToast(`创建批注失败: ${errorMessage(e)}`, 'error');
             }
@@ -2849,6 +2917,7 @@
                   clientAnnotationIdMap.set(item.clientId, item.key);
                 }
               } else if (res.status === 412) {
+                hadSaveErrors = true;
                 showToast(`批注 #${item.key} 存在并发冲突，正在刷新...`, 'warning');
                 const latestRes = await fetch(`/canvas/native/annotations/${encodeURIComponent(item.key)}`);
                 if (latestRes.ok) {
@@ -2864,16 +2933,22 @@
                   });
                 }
               } else {
+                hadSaveErrors = true;
                 const errJson = await res.json().catch(() => null);
                 throw new Error(errJson?.error?.message || `HTTP ${res.status}`);
               }
             } catch (e) {
+              hadSaveErrors = true;
               console.error('Native annotation update failed:', e);
               showToast(`更新批注 #${item.key} 失败: ${errorMessage(e)}`, 'error');
             }
           }
         }
-        renderAnnotationCards();
+        if (hadSaveErrors) {
+          await reloadAndSyncReaderAnnotations(currentAttachment.key);
+        } else {
+          renderAnnotationCards();
+        }
         return;
       }
 
@@ -3012,7 +3087,11 @@
           }
         }
         for (const id of unhandledIds) activeAnnotationDeletions.delete(id);
-        renderAnnotationCards();
+        if (failed.length > 0) {
+          await reloadAndSyncReaderAnnotations(currentAttachment.key);
+        } else {
+          renderAnnotationCards();
+        }
         return;
       }
 
@@ -5556,16 +5635,52 @@
 
       showToast(`正在切换至文献 #${targetItemKey}...`, 'info');
       try {
-        const canUsePersonalLibraryCache = sourceLibrary.libraryType === 'user'
-          && sourceLibrary.libraryId === String(config.userId || '');
-        let targetItem = canUsePersonalLibraryCache
-          ? allItems.find(i => i.key === targetItemKey || (sourceRef.itemKey && i.key === sourceRef.itemKey))
-          : null;
-        if (!targetItem) {
-          const itemUrl = getApiUrl(`${libraryApiPrefix(sourceRef)}/items/${encodeURIComponent(targetItemKey)}`);
-          const res = await fetch(itemUrl, { headers: getHeaders() });
-          if (!res.ok) throw new Error(`获取文献信息失败 (HTTP ${res.status})`);
-          targetItem = await res.json();
+        let targetItem = null;
+        if (sourceLibrary.libraryType === 'native') {
+          targetItem = allLibraryItems.find(i => i.key === targetItemKey || (sourceRef.itemKey && i.key === sourceRef.itemKey));
+          if (!targetItem) {
+            const res = await fetch(`/canvas/native/documents/${encodeURIComponent(targetItemKey)}`);
+            if (!res.ok) throw new Error(`获取原生文献失败 (HTTP ${res.status})`);
+            const docData = await res.json();
+            const d = docData.data;
+            targetItem = {
+              key: d.id,
+              version: d.version,
+              data: {
+                itemType: d.itemType || 'journalArticle',
+                title: d.title,
+                creators: d.creators || [],
+                date: d.date || '',
+                year: d.year || '',
+                tags: []
+              },
+              children: (d.attachments || []).map(a => ({
+                key: a.id,
+                version: a.version,
+                data: {
+                  itemType: 'attachment',
+                  contentType: a.mimeType || 'application/pdf',
+                  filename: a.originalFilename || `${d.title}.pdf`,
+                  title: a.title || d.title,
+                  isNative: true
+                },
+                isNative: true
+              })),
+              isNative: true
+            };
+          }
+        } else {
+          const canUsePersonalLibraryCache = sourceLibrary.libraryType === 'user'
+            && sourceLibrary.libraryId === String(config.userId || '');
+          targetItem = canUsePersonalLibraryCache
+            ? allItems.find(i => i.key === targetItemKey || (sourceRef.itemKey && i.key === sourceRef.itemKey))
+            : null;
+          if (!targetItem) {
+            const itemUrl = getApiUrl(`${libraryApiPrefix(sourceRef)}/items/${encodeURIComponent(targetItemKey)}`);
+            const res = await fetch(itemUrl, { headers: getHeaders() });
+            if (!res.ok) throw new Error(`获取文献信息失败 (HTTP ${res.status})`);
+            targetItem = await res.json();
+          }
         }
 
         await openItem(targetItem, sourceRef);
@@ -5592,12 +5707,48 @@
           && currentAttachment.key === sourceRef.attachmentKey;
         if (!isCurrentDocument) {
           const targetItemKey = sourceRef.itemKey || sourceRef.attachmentKey;
-          let targetItem = sourceLibrary.libraryType === 'user' && sourceLibrary.libraryId === String(config.userId || '')
-            ? allItems.find(item => item.key === targetItemKey) : null;
-          if (!targetItem) {
-            const response = await fetch(getApiUrl(`${libraryApiPrefix(sourceRef)}/items/${encodeURIComponent(targetItemKey)}`), { headers: getHeaders() });
-            if (!response.ok) throw new Error(`获取文献失败 (HTTP ${response.status})`);
-            targetItem = await response.json();
+          let targetItem = null;
+          if (sourceLibrary.libraryType === 'native') {
+            targetItem = allLibraryItems.find(item => item.key === targetItemKey);
+            if (!targetItem) {
+              const response = await fetch(`/canvas/native/documents/${encodeURIComponent(targetItemKey)}`);
+              if (!response.ok) throw new Error(`获取原生文献失败 (HTTP ${response.status})`);
+              const docData = await response.json();
+              const d = docData.data;
+              targetItem = {
+                key: d.id,
+                version: d.version,
+                data: {
+                  itemType: d.itemType || 'journalArticle',
+                  title: d.title,
+                  creators: d.creators || [],
+                  date: d.date || '',
+                  year: d.year || '',
+                  tags: []
+                },
+                children: (d.attachments || []).map(a => ({
+                  key: a.id,
+                  version: a.version,
+                  data: {
+                    itemType: 'attachment',
+                    contentType: a.mimeType || 'application/pdf',
+                    filename: a.originalFilename || `${d.title}.pdf`,
+                    title: a.title || d.title,
+                    isNative: true
+                  },
+                  isNative: true
+                })),
+                isNative: true
+              };
+            }
+          } else {
+            targetItem = sourceLibrary.libraryType === 'user' && sourceLibrary.libraryId === String(config.userId || '')
+              ? allItems.find(item => item.key === targetItemKey) : null;
+            if (!targetItem) {
+              const response = await fetch(getApiUrl(`${libraryApiPrefix(sourceRef)}/items/${encodeURIComponent(targetItemKey)}`), { headers: getHeaders() });
+              if (!response.ok) throw new Error(`获取文献失败 (HTTP ${response.status})`);
+              targetItem = await response.json();
+            }
           }
           await openItem(targetItem, sourceRef);
         }
