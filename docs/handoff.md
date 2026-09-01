@@ -600,3 +600,178 @@
   - 新增不完整单字段附件输入（单传 key 或单传 version）HTTP 400 校验测试；
   - 新增双 null 显式解绑 HTTP upsert 测试。
   - `npm test` 6 套测试全过，`git diff --check` 通过。
+
+## 2026-09-01 会话（Native 架构迁移与 M1 原生 PDF 最小闭环交付）
+
+### 迁移起点与基线建立
+
+1. **安全整理工作区与 .gitignore 排除**：
+   - 检查工作区所有未提交改动并核验健康状态；
+   - 更新 `.gitignore`，安全排除 `ai-settings.key`、`.mimosa/`、`.zcode/`、`data/`、`.debug/` 等敏感凭据、运行数据库与辅助工具目录；
+   - 验证 `npm test` 6 套测试与 `git diff --check` 100% 通过。
+2. **基线分支建立**（`codex/pre-native-baseline`）：
+   - 将现有主题工作台、收件箱、导入解析、探针加固、UI 改造、自动化测试及交接文档拆分为 6 个清晰可审阅的提交（`39dd9a3`, `9e7fe37`, `f1fb7b6`, `ab13f6c`, `e2206e1`, `c677c29`）。
+3. **Native Worktree 建立**：
+   - 路径：`/home/sadgen/Projects/AltCanvas-native`；
+   - 分支：`codex/native-library-core`；
+   - 拥有完全独立的 SQLite 数据库、`data/blobs` 存储目录、AI 密钥与运行日志。
+
+---
+
+### M1 原生数据模型与核心功能实现
+
+#### 1. Schema v10 Native 数据模型 ([`server/canvas-store.mjs`](file:///home/sadgen/Projects/AltCanvas-native/server/canvas-store.mjs))
+- **`users`**：本地账号体系（`id`, `username`, `password_hash`, `password_salt`, `role`, `created_at`, `updated_at`），采用 `crypto.scryptSync`（带 16 字节随机盐值）及常量时间对比；
+- **`blobs`**：不可变文件哈希存储（`sha256`, `relative_path`, `size_bytes`, `mime_type`, `created_at`, `reference_count`）；
+- **`documents`**：原生文献核心实体（`id`, `owner_key`, `item_type`, `title`, `abstract`, `publication_title`, `publisher`, `date`, `year`, `doi`, `isbn`, `url`, `language`, `rights`, `extra_json`, `version`, `created_at`, `updated_at`, `deleted_at`）；
+- **`document_creators`**：按顺序持久化作者（`id`, `document_id`, `position`, `creator_type`, `first_name`, `last_name`, `name`）；
+- **`attachments`**：文献附件（`id`, `document_id`, `blob_hash`, `mime_type`, `original_filename`, `title`, `source_url`, `size_bytes`, `page_count`, `version`, `created_at`, `updated_at`, `deleted_at`）；
+- **`annotations`**：原生批注（`id`, `attachment_id`, `annotation_type`, `page_label`, `position_json`, `quote`, `comment`, `color`, `sort_index`, `version`, `created_at`, `updated_at`, `deleted_at`）；
+- **`external_refs`**：外部数据源映射（`id`, `owner_key`, `document_id`, `provider`, `external_library_id`, `external_item_id`, `external_attachment_id`, `external_version`, `source_url`, `imported_at`）；
+- **`import_jobs`**：规范化导入任务记录（`id`, `owner_key`, `source_type`, `state`, `total_count`, `completed_count`, `failed_count`, `report_json`, `created_at`, `completed_at`）；
+- 全面升级 `source_refs`、`topic_documents`、`inbox_entries`、`document_analyses`、`document_metas` 与 `knowledge_units`，允许 `'native'` 类型的文库及 `'native_upload'` 来源。
+
+#### 2. 原生本地认证模式 ([`server/auth.mjs`](file:///home/sadgen/Projects/AltCanvas-native/server/auth.mjs) & [`scripts/dev-server.mjs`](file:///home/sadgen/Projects/AltCanvas-native/scripts/dev-server.mjs))
+- 智能模式切换：`AUTH_MODE=local` 为 Native 默认（未配置 Altero 时自动为 `local`，同时保留 `AUTH_MODE=altero` 兼容模式）；
+- 首次管理员初始化：`POST /auth/setup`（仅在全库无用户时允许，创建管理员并签发会话）；
+- 本地密码登录：`POST /auth/login`（安全哈希校验，签发 HttpOnly、SameSite=Lax 安全 Cookie）；
+- 会话状态感知：`GET /auth/session` 返回 `needsSetup`、`authMode` 与用户信息；
+- `POST /auth/logout` 清除会话与 Cookie。
+
+#### 3. 原生 PDF 上传与哈希去重存储 ([`server/canvas-api.mjs`](file:///home/sadgen/Projects/AltCanvas-native/server/canvas-api.mjs))
+- `POST /canvas/native/upload`：
+  - 流式写入临时目录（`data/tmp/`，0600 权限），内存零聚合；
+  - 校验 `%PDF-` 魔法文件头，非 PDF 即刻拦截（400 Bad Request）并清理临时文件；
+  - 文件大小上限限制（100 MiB），超限即刻拒绝（413 Payload Too Large）；
+  - 流式计算 SHA-256 哈希，相同内容自动复用 Blob 记录并递增引用计数；
+  - 新 Blob 原子移动至 `data/blobs/sha256/ab/cd/<hash>.pdf`，严格服务端路径计算；
+  - 自动去重检查：同一用户已存在该 PDF 时提示已存在（返回已有文档与附件）；
+  - 自动创建 `documents`、`attachments`、`inbox_entries`，并支持可选直接关联至研究主题 `topic_documents`。
+
+## 2026-09-01 会话（M1.5 Native Core Integration 合流与解除 Altero 依赖验收）
+
+### 合流概述与架构统一
+
+在 `codex/pre-native-baseline`（含 T1–T4、Stage 1/2、Edge ownership、SSRF、DOI）与 `codex/native-library-core`（Native 本地认证、PDF 上传、Blob 去重、Range 传输、原生批注）之间完成 **M1.5 Native Core Integration**，合流至 `codex/native-integration`。
+
+### 核心成果与实现要点
+
+1. **Schema v12 谱系汇合与能力探测幂等迁移** ([`server/canvas-store.mjs`](file:///home/sadgen/Projects/AltCanvas/server/canvas-store.mjs))：
+   - 保留共同历史 v1–v9，保持当前线 v10（jobs.payload_json, DOI）与 v11（Edge ownership CHECK 约束与 projection_key）；
+   - Native 核心数据模型（`users`, `blobs`, `documents`, `document_creators`, `attachments`, `annotations`, `external_refs`, `import_jobs`）统一迁入 Schema v12；
+   - 引入动态能力探测函数（`ensureCurrentV10Features`、`ensureEdgeV11Features`、`ensureNativeCoreTables`、`ensureNativeLibraryTypeSupport`、`ensureNativeIndexes`），无论是 Fresh DB、Current v11 DB 还是 Native v10 DB，均能在单一事务中安全升级至 v12 并保持幂等；
+   - 升级 `source_refs`、`topic_documents`、`inbox_entries`、`document_analyses`、`document_metas` 与 `knowledge_units`，全面支持 `library_type = 'native'` 与 `origin = 'native_upload'`。
+
+2. **后端运行时解耦与统一能力模型** ([`server/auth.mjs`](file:///home/sadgen/Projects/AltCanvas/server/auth.mjs) & [`server/canvas-api.mjs`](file:///home/sadgen/Projects/AltCanvas/server/canvas-api.mjs))：
+   - 默认认证模式为 Native 本地认证（未配置 `AUTH_MODE` 时默认为 `local`，显式 `AUTH_MODE=altero` 时启用 Altero 兼容）；
+   - 会话统一返回 `capabilities` 对象（`nativeUpload: true`, `collections: isAltero`, `upstreamSync: isAltero`, `externalLibrary: isAltero`）；
+   - 清除所有无条件 Altero 请求，Altero 扫描与 Collection 同步在 Native 模式下安全降级与拦截，不产生任何网络异常。
+
+3. **前端工作流统一** ([`index.html`](file:///home/sadgen/Projects/AltCanvas/index.html))：
+   - 提供标准化的 `openDocument(identity)` 统一入口，支持按 `libraryType`（`native` vs `user`/`group`）分派至 Native 或 Altero 适配链路；
+   - 保留 `resetCurrentDocumentState()` 原子状态重置，在切换文献或加载失败时彻底清理 reader、批注、缓存与 UI 状态；
+   - 同一 Native 文献可关联至多个研究主题，底层 PDF Blob 零冗余；AI 全文分析结果在不同主题画板间实现零大模型调用的跨板复用。
+
+4. **全套 7 套自动化测试通过**：
+   - BFF Unit Tests（通过）；
+   - BFF Flow Integration Tests（通过）；
+   - Server-side AI Provider Security Tests（通过）；
+   - Canvas Persistence & API Tests（含 Fresh/Current-v11/Native-v10/Idempotency 四大谱系迁移测试，通过）；
+   - Canvas UI Structure Tests（通过）；
+   - Dev Logger Tests（通过）；
+   - Native M1 Minimal Loop & Audit Regression Tests（含多主题关联与全文分析跨板复用断言，通过）。
+   - `git diff --check` 100% 通过。
+
+### 里程碑最新状态表
+
+| 里程碑 | 状态 | 说明 |
+|---|---|---|
+| M1.5 Native Core Integration | **PASS (完成)** | Schema v12 谱系汇合、Native 为默认核心、Altero 解耦为可选 Provider、7 套测试全过 |
+| Schema v12 数据模型 | **完成** | 涵盖 users, blobs, documents, attachments, annotations, topic_documents, inbox_entries, jobs, analyses, metas, knowledge_units/relations, edges (origin/projection_key) |
+| Native 本地认证与会话 | **PASS (关闭)** | 默认 local 模式，管理员首次 setup，密码登录，capabilities 能力驱动 |
+| Native PDF 上传与哈希去重 | **PASS (关闭)** | 流式上传、%PDF- 校验、100MB 限制、SHA-256 去重与安全事务写入 |
+| Native HTTP Range 服务与 Reader | **PASS (关闭)** | 200/206/304/416 范围读取、原生批注 CRUD/412 冲突/软删除恢复 |
+| 全文理解画板上下文增强 | **PASS (关闭)** | Stage 1 基础分析全局缓存，Stage 2 画板关系推理，Native 文献跨主题零调用复用 |
+| T1 主题工作台与研究收件箱 | **PASS (关闭)** | 增量扫描、研究收件箱、多主题归类、Collection 绑定与全屏视图 |
+| T2 AI 主题分类与体系提炼 | **PASS (关闭)** | AI 自动提炼核心主题体系、分类建议、一键采纳与分析跨主题复用 |
+| 研报易读中文名与元数据识别 | **PASS (关闭)** | AI 提取机构/研报主标题/年份、document_metas、易读中文名渲染与编辑 |
+| T3 跨报告观点关联与渐进展开 | **PASS (关闭)** | 知识单元索引、跨报告关系发现、安全渐进展开、真实单元核验与精确页码定位 |
+| T4 Canvas 快速导入与 PDF 浮层 | **PASS (关闭)** | 导入任务持久化/恢复重试机制、多源去重与逐跳重定向 SSRF 安全防护 |
+| M2 统一 Native 导入管线 | `就绪 (待启动)` | 下一阶段目标：统一快速导入与多源文档至 Native documents/attachments |
+| M4 Altero/Zotero 一次性迁移器 | `就绪 (待启动)` | 历史 Altero 数据至 Native 本地文库的幂等无损迁移 |
+
+
+#### 4. 原生 HTTP Range PDF 文件流服务 ([`server/canvas-api.mjs`](file:///home/sadgen/Projects/AltCanvas-native/server/canvas-api.mjs))
+- `GET /canvas/native/attachments/:id/file` 与 `HEAD /canvas/native/attachments/:id/file`：
+  - 严格所有权核验（`owner_key` 隔离，跨用户访问返回 404）；
+  - 完整内容：`200 OK`，附带 `Content-Length`, `Accept-Ranges: bytes`, `ETag: W/"<sha256>"`, `Content-Type: application/pdf`；
+  - 缓存协商：`If-None-Match` 命中即刻返回 `304 Not Modified`；
+  - 范围读取：正确解析 `bytes=start-end`, `bytes=start-`, `bytes=-suffix`，返回 `206 Partial Content` 与精确的 `Content-Range: bytes start-end/total`；
+  - 越界范围拦截：返回 `416 Range Not Satisfiable` 与 `Content-Range: bytes */total`。
+
+#### 5. 原生批注持久化与 Reader 闭环 ([`server/canvas-api.mjs`](file:///home/sadgen/Projects/AltCanvas-native/server/canvas-api.mjs) & [`index.html`](file:///home/sadgen/Projects/AltCanvas-native/index.html))
+- 批注接口体系：
+  - `GET /canvas/native/attachments/:id/annotations`：拉取批注列表；
+  - `POST /canvas/native/attachments/:id/annotations`：创建高亮批注；
+  - `PATCH /canvas/native/annotations/:id`：修改批注/评论/颜色，强制 `If-Match: W/"<version>"` 乐观并发控制（冲突返回 412）；
+  - `DELETE /canvas/native/annotations/:id`：软删除批注，强制 `If-Match`；
+  - `POST /canvas/native/annotations/:id/restore`：恢复批注。
+- Reader 前端无缝适配：
+  - 原生 PDF 直接使用 `/canvas/native/attachments/:id/file` 供 Reader 渲染；
+  - 批注增删改查透明路由至 Native 批注 API；
+  - 支持划线自动 AI 翻译写回 comment；
+  - 支持 Canvas 证据卡片原位跳转与“证据转正式批注”；
+  - 支持基于原生 PDF 的“理解全文”AI 图谱生成（`/canvas/boards/:id/ai/document-map`），图谱节点直接锚定原生文献与页码。
+
+---
+
+### M1 验收与测试结果
+
+#### 自动化测试覆盖 ([`test/native-m1.test.mjs`](file:///home/sadgen/Projects/AltCanvas-native/test/native-m1.test.mjs))
+- ✅ 1. 无 Altero 环境变量时默认启动为 `AUTH_MODE=local`；
+- ✅ 2. [P0 回归] `AUTH_MODE=altero` 模式下直接请求 `/auth/setup` 与 `POST /auth/login` 严格被 403 阻断（`local_auth_disabled`）；
+- ✅ 3. 空库检测 `needsSetup: true`，弱密码拦截，首个管理员创建成功，二次 Setup 400 阻断；
+- ✅ 4. 密码错误 401 拦截，正确密码登录成功，会话 Cookie 签发，登出使会话失效；
+- ✅ 5. 非 PDF 文件上传拦截（400 Bad Request），合法 PDF 流式上传并入库；
+- ✅ 6. 校验 `data/blobs/sha256/` 目录结构与 0600 文件权限，字节逐位比对完全一致；
+- ✅ 7. [P1 回归] 同一用户重复上传相同 PDF，去重且绝不虚增 `reference_count`（保持精准为 1）；
+- ✅ 8. [P1 回归] `updateDocument` 更新作者列表成功（彻底修复 `docId` 未定义引用异常）；
+- ✅ 9. [P1 回归] 删除文献/附件原子扣减对应 Blob 的 `reference_count`；
+- ✅ 10. HTTP Range 测试：200 全量流、HEAD 零 body、304 If-None-Match、206 `bytes=0-100`、206 `bytes=100-`、206 `bytes=-50` 后缀、416 越界 Range；
+- ✅ 11. 跨用户数据隔离：User B 访问 User A 的文档、附件文件、批注均严格返回 404；
+- ✅ 12. 原生批注生命周期：创建、读取、PATCH 428/412 并发控制、修改成功、DELETE、[P2 回归] RESTORE 强制校验 If-Match（缺失返回 428，陈旧返回 412）；
+- ✅ 13. [P0 回归] `openItem` 与 `initReaderEngine` 彻底消除对 `libraryApiPrefix` 的无条件前置调用，仅在 Zotero/Altero 路径计算代理前缀，Native 模式完全不调用 `libraryApiPrefix`，彻底阻断 P0 打开报错；
+- ✅ 14. [P0 回归] `openNativeDocument` 修正为调用 `openItem`，构造标准原生文献与附件嵌套结构（`children: [attData]`），上传成功与查重命中后均可无缝直接进入中央 Reader；
+- ✅ 15. [P1 回归] `reloadAndSyncReaderAnnotations` 请求失败时抛错保留当前批注状态（绝不误清空），并增加 `currentAttachment` 切换竞态保护（防止旧批注写回新文献 Reader）；
+- ✅ 16. [P1 回归] `importNativeUploadedDocument` 在重复上传命中查重时幂等执行目标主题关联，支持多主题跨上传归类，并在响应中返回 `topicDocument`；
+- ✅ 17. [P2 回归] `streamUploadToFile` 安全解码 `x-filename`（防畸变编码崩溃），并在 `safeWrite` 背压等待触发 `close` 时明确 reject，杜绝写入提前终止被误判为成功；
+- ✅ 18. [P1 回归] `streamUploadToFile` 引入显式 `--boundary--` 关闭状态机解析与 64KB 字段上限，在 EOF 时强制校验 `sawClosingBoundary === true`，彻底拦截缺少最终关闭符、残缺 Header 或未闭合字段的各类截断请求（返回 400 Bad Request 并清理临时文件）；
+- ✅ 19. [P1 回归] `openItem` 统一通过 `resetCurrentDocumentState()` 在失败或无附件时原子重置 `currentDocumentLibrary`、`currentItem`、`currentAttachment`、批注映射及侧栏状态，杜绝跨文献残留混合；
+- ✅ 20. [P1 回归] 上传事务失败补偿：若因非法主题或其他 DB 异常导致事务失败，自动回滚并删除新移动的 Blob 文件，杜绝孤儿文件残留；
+- ✅ 21. 全文 AI 图谱（`document-map`）基于原生 PDF 成功生成并实例化画板节点；
+- ✅ 22. 数据库关闭并重开后，用户、文献、附件、Blob、批注数据 100% 保真恢复。
+
+**完整测试套件运行**：
+`npm test`（7 套测试全部通过）：
+- `test/bff.test.mjs` - PASS
+- `test/bff-flow.test.mjs` - PASS
+- `test/ai-provider.test.mjs` - PASS
+- `test/canvas.test.mjs` - PASS
+- `test/canvas-ui.test.mjs` - PASS
+- `test/dev-logger.test.mjs` - PASS
+- `test/native-m1.test.mjs` - PASS
+- `git diff --check` - PASS
+
+---
+
+### 里程碑状态
+
+| 里程碑 | 状态 | 说明 |
+|---|---|---|
+| M1 原生 PDF 基础单文献闭环 | **PASS (完成)** | 独立 local 认证、原生流式上传、去重、Range 文件流服务、Reader 批注持久化、全文理解与证据转批注 |
+| M1 审计整改与深层防御闭环 | **PASS (完成)** | P0 认证隔离、P0 原生打开链路贯通、resetCurrentDocumentState 原子清空、严格 closing boundary 截断拦截、孤儿 Blob 回滚补偿、背压错误生命周期、重复上传主题关联全覆盖 |
+| M2 统一导入管线 | `PENDING` | 下一阶段目标：规范化多源导入（DOI/arXiv/URL/PDF/RIS/BibTeX）与合并策略 |
+| M3 Translation Server 集成 | `PENDING` | 下一阶段目标：内部解析组件集成与 SSRF 安全隔离 |
+| M4 Altero/Zotero 外部迁移器 | `PENDING` | 幂等一次性迁移 |
+| M5 AltCanvas Capture 浏览器扩展 | `PENDING` | 独立扩展仓库 |
+| M6 默认解除 Altero 依赖 | `PENDING` | 默认部署全面切换为 Native |

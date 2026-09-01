@@ -20,6 +20,7 @@ import {
   verifyIdToken
 } from './oidc.mjs';
 import { isPrivateNetworkHost } from './security.mjs';
+import { canvasActorKey } from './canvas-store.mjs';
 
 const DEFAULT_ALTERO_API = (process.env.ALTERO_API || 'http://localhost:8000').replace(/\/$/, '');
 const OAUTH_CLIENT_ID = process.env.OAUTH_CLIENT_ID || 'altcanvas';
@@ -352,12 +353,198 @@ export async function handleCallback(req, res, url, selfOrigin) {
   }
 }
 
+export function getAuthMode() {
+  if (process.env.AUTH_MODE === 'altero') return 'altero';
+  if (process.env.AUTH_MODE === 'local') return 'local';
+  return 'local';
+}
+
+async function readRequestBody(req, maxBytes = 65536) {
+  let size = 0;
+  const chunks = [];
+  for await (const chunk of req) {
+    const buffer = Buffer.from(chunk);
+    size += buffer.length;
+    if (size > maxBytes) {
+      const err = new Error('Request body too large');
+      err.status = 413;
+      throw err;
+    }
+    chunks.push(buffer);
+  }
+  if (!chunks.length) return {};
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  } catch {
+    const err = new Error('Invalid JSON body');
+    err.status = 400;
+    throw err;
+  }
+}
+
+export function isLocalAuthAllowed() {
+  const mode = getAuthMode();
+  if (mode === 'local') return true;
+  return process.env.ALLOW_LOCAL_AUTH_IN_ALTERO === 'true';
+}
+
+/**
+ * Handle POST /auth/setup (Local Admin Initialization)
+ */
+export async function handleLocalSetup(req, res, store) {
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+
+  if (!isLocalAuthAllowed()) {
+    res.writeHead(403);
+    res.end(JSON.stringify({ error: 'local_auth_disabled', message: '当前部署模式未启用本地账户认证' }));
+    return;
+  }
+
+  if (!store) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: 'store_unavailable', message: 'Storage not available' }));
+    return;
+  }
+
+  if (store.hasUsers()) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: 'already_initialized', message: '系统已初始化，管理员账户已存在' }));
+    return;
+  }
+
+  let body;
+  try {
+    body = await readRequestBody(req);
+  } catch (err) {
+    res.writeHead(err.status || 400);
+    res.end(JSON.stringify({ error: 'invalid_request', message: err.message }));
+    return;
+  }
+
+  const { username, password } = body || {};
+  if (!username || typeof username !== 'string' || username.trim().length < 3) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: 'invalid_username', message: '用户名至少需要 3 个字符' }));
+    return;
+  }
+  if (!password || typeof password !== 'string' || password.length < 8) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: 'invalid_password', message: '密码至少需要 8 个字符' }));
+    return;
+  }
+
+  let user;
+  try {
+    user = store.createUser({ username, password, role: 'admin' });
+  } catch (err) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: 'creation_failed', message: err.message }));
+    return;
+  }
+
+  const session = createSession({
+    userId: user.id,
+    subject: user.id,
+    username: user.username,
+    displayName: user.username,
+    role: user.role,
+    authMode: 'local',
+    scopes: ['*'],
+    expiresAt: Date.now() + 30 * 86400 * 1000,
+    issuer: 'local',
+    actorKey: canvasActorKey('local', user.id)
+  });
+
+  setSessionCookie(res, session.id, req);
+  res.writeHead(201);
+  res.end(JSON.stringify({
+    data: {
+      user: {
+        id: user.id,
+        username: user.username,
+        role: user.role
+      }
+    }
+  }));
+}
+
+/**
+ * Handle POST /auth/login (Local Password Authentication)
+ */
+export async function handleLocalLogin(req, res, store) {
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+
+  if (!isLocalAuthAllowed()) {
+    res.writeHead(403);
+    res.end(JSON.stringify({ error: 'local_auth_disabled', message: '当前部署模式未启用本地账户认证' }));
+    return;
+  }
+
+  if (!store) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: 'store_unavailable', message: 'Storage not available' }));
+    return;
+  }
+
+  let body;
+  try {
+    body = await readRequestBody(req);
+  } catch (err) {
+    res.writeHead(err.status || 400);
+    res.end(JSON.stringify({ error: 'invalid_request', message: err.message }));
+    return;
+  }
+
+  const { username, password } = body || {};
+  if (!username || !password) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: 'missing_credentials', message: '请输入用户名和密码' }));
+    return;
+  }
+
+  const user = store.verifyUserPassword(username, password);
+  if (!user) {
+    res.writeHead(401);
+    res.end(JSON.stringify({ error: 'invalid_credentials', message: '用户名或密码错误' }));
+    return;
+  }
+
+  const session = createSession({
+    userId: user.id,
+    subject: user.id,
+    username: user.username,
+    displayName: user.username,
+    role: user.role,
+    authMode: 'local',
+    scopes: ['*'],
+    expiresAt: Date.now() + 30 * 86400 * 1000,
+    issuer: 'local',
+    actorKey: canvasActorKey('local', user.id)
+  });
+
+  setSessionCookie(res, session.id, req);
+  res.writeHead(200);
+  res.end(JSON.stringify({
+    data: {
+      user: {
+        id: user.id,
+        username: user.username,
+        role: user.role
+      }
+    }
+  }));
+}
+
 /**
  * Handle GET /auth/session
  */
-export async function handleSession(req, res) {
+export async function handleSession(req, res, store = null) {
   const sessionId = getSessionIdFromRequest(req);
   const session = getSession(sessionId);
+  const authMode = getAuthMode();
+  const needsSetup = authMode === 'local' && store ? !store.hasUsers() : false;
 
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
@@ -366,20 +553,43 @@ export async function handleSession(req, res) {
 
   if (!session) {
     res.writeHead(200);
-    res.end(JSON.stringify({ authenticated: false, allowDirectMode, allowDynamicAltero, defaultAlteroApi: DEFAULT_ALTERO_API }));
+    res.end(JSON.stringify({
+      authenticated: false,
+      authMode,
+      needsSetup,
+      allowDirectMode,
+      allowDynamicAltero,
+      defaultAlteroApi: DEFAULT_ALTERO_API
+    }));
     return;
   }
+
+  const isAltero = (session.authMode || authMode) === 'altero';
+  const capabilities = {
+    nativeUpload: true,
+    collections: isAltero,
+    upstreamSync: isAltero,
+    externalLibrary: isAltero
+  };
 
   res.writeHead(200);
   res.end(JSON.stringify({
     authenticated: true,
+    authMode: session.authMode || authMode,
+    capabilities,
     user: {
       id: session.userId,
       username: session.username,
-      displayName: session.displayName
+      displayName: session.displayName || session.username,
+      role: session.role || 'user'
     },
-    alteroApi: session.alteroApi,
-    scopes: session.scopes,
+    library: {
+      id: session.userId,
+      type: isAltero ? 'user' : 'native'
+    },
+    alteroApi: session.alteroApi || null,
+    scopes: session.scopes || ['*'],
+    needsSetup: false,
     allowDirectMode,
     allowDynamicAltero,
     defaultAlteroApi: DEFAULT_ALTERO_API

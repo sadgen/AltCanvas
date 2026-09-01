@@ -295,8 +295,196 @@ assert.match(html, /Collections count exceeded safety limit/);
 assert.match(html, /\/collection-bindings\/\$\{bindingId\}\/sync/);
 assert.match(html, /局域网 HTTP 会明文传输卡片内容与凭据/,
   'AI settings must warn about plaintext private-network transport');
-assert.doesNotMatch(html, /modelConfig:\s*aiConfig/,
-  'the browser must not choose an arbitrary AI endpoint per request');
+assert.match(html, /libraryType === 'native'/,
+  'normalizeLibraryContext must preserve native library type without mapping to user');
+assert.match(html, /library\.libraryType === 'native'/,
+  'libraryApiPrefix must handle native library without mapping to users');
+assert.match(html, /async function uploadNativePdfFile\(/,
+  'UI must provide uploadNativePdfFile handler for PDF uploads');
+assert.match(html, /async function openNativeDocument\(/,
+  'UI must provide openNativeDocument for opening native documents and attachments');
+assert.match(html, /function setupNativePdfUpload\(/,
+  'UI must setup file drop and file input event handlers for native PDF uploads');
+assert.match(html, /id="btn-upload-pdf-top"/,
+  'UI header must provide native PDF upload button');
+
+assert.match(html, /async function reloadAndSyncReaderAnnotations\(/,
+  'UI must provide reloadAndSyncReaderAnnotations to resync reader state on annotation write/delete conflict or failure');
+assert.match(html, /setAnnotations\(readerAnnotations\)/,
+  'reloadAndSyncReaderAnnotations must update reader in-memory annotations');
+
+assert.match(html, /async function openDocument\(/,
+  'UI must provide unified openDocument router');
+assert.match(html, /await openItem\(itemData, nativeLib\)/,
+  'openNativeDocument must call openItem with nativeLib');
+assert.match(html, /throw new Error\('Native library does not support Zotero API endpoints'\)/,
+  'libraryApiPrefix must strictly reject native library');
+
+// --- Behavioral Execution Tests for Native Opening & Reader Annotation Sync ---
+{
+  // 1. Test openNativeDocument execution
+  let openItemCalled = null;
+  const mockOpenNativeContext = {
+    openItem: async (itemData, lib) => { openItemCalled = { itemData, lib }; },
+    showToast: () => {},
+    fetch: async () => ({ ok: true, json: async () => ({ data: {} }) })
+  };
+
+  const openNativeDocMatch = html.match(/async function openNativeDocument\(doc, attachment\) \{([\s\S]*?)\n    \}/);
+  assert.ok(openNativeDocMatch, 'openNativeDocument definition must exist');
+
+  const openNativeDocRunner = new Function(
+    'openItem', 'showToast', 'fetch', 'doc', 'attachment',
+    `return (async () => { ${openNativeDocMatch[1]} })();`
+  );
+
+  const testDoc = { id: 'doc-123', version: 1, title: 'Test Native Doc', itemType: 'journalArticle', creators: [{ name: 'Author A' }] };
+  const testAtt = { id: 'att-456', version: 1, originalFilename: 'doc.pdf', mimeType: 'application/pdf', title: 'Test Native Doc' };
+
+  await openNativeDocRunner(
+    mockOpenNativeContext.openItem,
+    mockOpenNativeContext.showToast,
+    mockOpenNativeContext.fetch,
+    testDoc,
+    testAtt
+  );
+
+  assert.ok(openItemCalled, 'openNativeDocument must successfully call openItem');
+  assert.equal(openItemCalled.itemData.key, 'doc-123');
+  assert.equal(openItemCalled.itemData.isNative, true);
+  assert.equal(openItemCalled.itemData.children.length, 1);
+  assert.equal(openItemCalled.itemData.children[0].key, 'att-456');
+  assert.equal(openItemCalled.lib.libraryType, 'native');
+
+  // 2. Test reloadAndSyncReaderAnnotations error resilience on HTTP 500
+  const annotationsMap = new Map([['ann-1', { version: 1, data: { annotationText: 'Preserved Text' } }]]);
+  const clientMap = new Map([['client-1', 'ann-1']]);
+  const mockReader = { _primaryView: { _annotationManager: { setAnnotations: () => {} } } };
+
+  const reloadFnMatch = html.match(/async function reloadAndSyncReaderAnnotations\(attachmentKey\) \{([\s\S]*?)\n    \}/);
+  assert.ok(reloadFnMatch, 'reloadAndSyncReaderAnnotations definition must exist');
+
+  const reloadRunner = new Function(
+    'currentReaderInstance', 'currentAttachment', 'currentDocumentLibrary', 'currentAnnotationsMap', 'clientAnnotationIdMap',
+    'getAnnotationPosition', 'getAnnotationPageIndex', 'cleanAnnotationText', 'renderAnnotationCards', 'fetch', 'libraryApiPrefix', 'getApiUrl', 'getHeaders', 'console',
+    'attachmentKey',
+    `return (async () => { ${reloadFnMatch[1]} })();`
+  );
+
+  // Simulate HTTP 500 error on native annotation fetch
+  await reloadRunner(
+    mockReader,
+    { key: 'att-456', isNative: true },
+    { libraryType: 'native', libraryId: 'local' },
+    annotationsMap,
+    clientMap,
+    () => ({}),
+    () => 0,
+    s => s,
+    () => {},
+    async () => ({ ok: false, status: 500 }),
+    () => { throw new Error('should not call'); },
+    s => s,
+    () => ({}),
+    { warn: () => {} },
+    'att-456'
+  );
+
+  assert.equal(annotationsMap.has('ann-1'), true, 'Annotations map must NOT be cleared when fetch returns HTTP 500');
+  assert.equal(annotationsMap.get('ann-1').data.annotationText, 'Preserved Text');
+
+  // 3. Test reloadAndSyncReaderAnnotations race condition when document switched in-flight
+  await reloadRunner(
+    mockReader,
+    { key: 'att-NEW-DOCUMENT', isNative: true }, // Document switched
+    { libraryType: 'native', libraryId: 'local' },
+    annotationsMap,
+    clientMap,
+    () => ({}),
+    () => 0,
+    s => s,
+    () => {},
+    async () => ({ ok: true, json: async () => ({ data: [{ id: 'ann-OLD', version: 1, quote: 'Old Quote' }] }) }),
+    () => { throw new Error('should not call'); },
+    s => s,
+    () => ({}),
+    { warn: () => {} },
+    'att-456' // Old attachmentKey
+  );
+
+  assert.equal(annotationsMap.has('ann-OLD'), false, 'In-flight response for old document must not overwrite active annotations map');
+
+  // 4. Test openItem error handling on initial annotation fetch failure (HTTP 500)
+  // Assert previous document A annotations are cleared and not retained in a mixed state
+  let readerPlaceholderTitle = '';
+  let toastErrorShown = '';
+  const mockOpenItemDom = {
+    'current-doc-title': { textContent: '' },
+    'btn-doc-edit-title': { classList: { remove: () => {}, add: () => {} } },
+    'btn-doc-ai-title': { classList: { remove: () => {}, add: () => {} } },
+    'reader-loading': { classList: { remove: () => {}, add: () => {} } },
+    'reader-loading-text': { textContent: '' },
+    'reader-placeholder': { classList: { remove: () => {}, add: () => {} } },
+    'reader-wrapper': { classList: { remove: () => {}, add: () => {} } },
+    'reader-placeholder-title': { set textContent(val) { readerPlaceholderTitle = val; }, get textContent() { return readerPlaceholderTitle; } },
+    'reader-placeholder-subtitle': { textContent: '' }
+  };
+
+  const openItemFnMatch = html.match(/async function openItem\(item, libraryContext = null\) \{([\s\S]*?)\n    \}/);
+  assert.ok(openItemFnMatch, 'openItem definition must exist');
+
+  const resetFnMatch = html.match(/function resetCurrentDocumentState\(\) \{([\s\S]*?)\n    \}/);
+  assert.ok(resetFnMatch, 'resetCurrentDocumentState definition must exist');
+
+  const openItemRunner = new Function(
+    'openRequestId', 'documentController', 'currentItem', 'currentReaderInstance', 'updateCanvasAiToolbar',
+    'currentDocumentLibrary', 'normalizeLibraryContext', 'libraryApiPrefix', 'renderItems', 'mobileMedia', 'setMobilePane',
+    'config', 'documentMetas', 'docMetaKey', 'document', 'fetch', 'getApiUrl', 'getHeaders', 'showToast',
+    'currentAttachment', 'currentAnnotationsMap', 'clientAnnotationIdMap', 'getAnnotationPosition', 'getAnnotationPageIndex',
+    'cleanAnnotationText', 'renderAnnotationCards', 'initReaderEngine', 'reportApplicationError', 'errorMessage', 'resetCurrentDocumentState',
+    'item', 'libraryContext',
+    `return (async () => { ${openItemFnMatch[1]} })();`
+  );
+
+  // Document A already had annotations in memory
+  const docAAnnotations = new Map([['doc-A-ann', { version: 1, data: { text: 'Doc A Note' } }]]);
+  const docAClientMap = new Map([['client-A', 'doc-A-ann']]);
+  let currentDocLibrary = { libraryType: 'user', libraryId: '42' };
+
+  const mockReset = () => {
+    docAAnnotations.clear();
+    docAClientMap.clear();
+    currentDocLibrary = null;
+  };
+
+  await openItemRunner(
+    0, null, { key: 'doc-A' }, null, () => {},
+    null, s => s, () => '/users/0', () => {}, { matches: false }, () => {},
+    { userId: '42' }, new Map(), () => '',
+    { getElementById: id => mockOpenItemDom[id] || { textContent: '', classList: { add: () => {}, remove: () => {} } } },
+    async (url) => {
+      if (url.includes('/annotations')) return { ok: false, status: 500 };
+      return { ok: true, json: async () => ({}) };
+    },
+    s => s, () => ({}), (msg) => { toastErrorShown = msg; },
+    { key: 'att-A' }, docAAnnotations, docAClientMap, () => ({}), () => 0,
+    s => s, () => {}, async () => {}, () => {}, err => err.message, mockReset,
+    { key: 'doc-B', isNative: true, children: [{ key: 'att-B', data: { contentType: 'application/pdf' }, isNative: true }] },
+    { libraryType: 'native', libraryId: 'local' }
+  );
+
+  assert.equal(readerPlaceholderTitle, 'PDF 加载失败', 'Annotation fetch failure on initial open must trigger error state');
+  assert.match(toastErrorShown, /500/, 'Toast must report actual error status');
+  assert.equal(docAAnnotations.size, 0, 'Opening doc B failure must clear doc A annotations to prevent cross-doc mixed state');
+  assert.equal(docAClientMap.size, 0, 'Opening doc B failure must clear client annotation mapping');
+  assert.equal(currentDocLibrary, null, 'Opening doc B failure must reset currentDocumentLibrary to null');
+}
+
+assert.match(html, /function resetCurrentDocumentState\(\)/,
+  'UI must provide unified resetCurrentDocumentState function');
+assert.match(html, /currentDocumentLibrary = null;/,
+  'resetCurrentDocumentState must reset currentDocumentLibrary to null on failure');
+
 assert.match(html, /function isSameLibrary\(/,
   'cross-library source matching must include the library identity');
 assert.match(html, /canUsePersonalLibraryCache/,

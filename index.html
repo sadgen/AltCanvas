@@ -213,6 +213,13 @@
         <span id="label-canvas-maximize">全屏画板</span>
       </button>
 
+      <!-- Native PDF Upload Trigger -->
+      <input type="file" id="native-pdf-file-input" accept=".pdf,application/pdf" class="hidden">
+      <button id="btn-upload-pdf-top" type="button" class="px-2.5 py-1 bg-emerald-950/80 hover:bg-emerald-900 text-emerald-300 border border-emerald-700/60 rounded transition flex items-center gap-1.5 shadow-sm" title="直接上传本地 PDF 文献到原生文库">
+        <svg class="w-3.5 h-3.5 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path></svg>
+        <span>上传 PDF</span>
+      </button>
+
       <!-- Connection & Auth Status -->
       <div id="auth-container" class="flex items-center gap-2">
         <button id="btn-login" type="button" class="px-3 py-1 bg-blue-600 hover:bg-blue-500 text-white font-medium rounded transition flex items-center gap-1 shadow-sm">
@@ -394,12 +401,29 @@
       <div class="flex items-center justify-between border-b border-slate-800 pb-3">
         <h3 id="login-title" class="text-sm font-semibold text-slate-100 flex items-center gap-2">
           <svg class="w-4 h-4 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1"></path></svg>
-          登录并授权 Altero
+          <span id="login-title-text">登录 AltCanvas</span>
         </h3>
         <button id="btn-close-login" type="button" aria-label="关闭" class="text-slate-500 hover:text-slate-300 text-lg leading-none">&times;</button>
       </div>
 
-      <div class="space-y-3 text-xs">
+      <!-- Local Auth Form -->
+      <div id="local-auth-section" class="space-y-3 text-xs">
+        <p id="local-auth-desc" class="text-slate-400 leading-relaxed">
+          请输入您的本地账号与密码以登录 AltCanvas 原生研究工作台。
+        </p>
+        <div id="local-auth-error" class="hidden p-2 bg-rose-950/50 border border-rose-800/80 rounded text-rose-300 text-xs"></div>
+        <div>
+          <label for="input-local-username" class="block text-slate-300 font-medium mb-1.5">用户名</label>
+          <input id="input-local-username" type="text" autocomplete="username" placeholder="admin" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:outline-none focus:border-blue-500 text-xs">
+        </div>
+        <div>
+          <label for="input-local-password" class="block text-slate-300 font-medium mb-1.5">密码</label>
+          <input id="input-local-password" type="password" autocomplete="current-password" placeholder="••••••••" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:outline-none focus:border-blue-500 text-xs">
+        </div>
+      </div>
+
+      <!-- Altero OAuth Section (for dynamic Altero or legacy) -->
+      <div id="altero-auth-section" class="space-y-3 text-xs hidden">
         <p class="text-slate-400 leading-relaxed">
           请输入您的自托管 Altero 服务端地址。AltCanvas 将跳转至该节点进行标准 OAuth 2.0 PKCE 授权，前端不存储您的明文密码。
         </p>
@@ -410,12 +434,15 @@
         </div>
       </div>
 
-      <div class="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
-        <button id="btn-cancel-login" class="px-3.5 py-1.5 bg-transparent hover:bg-slate-800 text-slate-400 rounded text-xs transition">取消</button>
-        <button id="btn-submit-login" class="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs font-medium transition shadow-lg shadow-blue-600/20 flex items-center gap-1.5">
-          <span>前往 Altero 授权</span>
-          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 5l7 7m0 0l-7 7m7-7H3"></path></svg>
-        </button>
+      <div class="flex items-center justify-between pt-2 border-t border-slate-800">
+        <button id="btn-toggle-auth-mode" type="button" class="text-[11px] text-slate-500 hover:text-blue-400 transition hidden">切换认证源</button>
+        <div class="flex items-center gap-2 ml-auto">
+          <button id="btn-cancel-login" class="px-3.5 py-1.5 bg-transparent hover:bg-slate-800 text-slate-400 rounded text-xs transition">取消</button>
+          <button id="btn-submit-login" class="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs font-medium transition shadow-lg shadow-blue-600/20 flex items-center gap-1.5">
+            <span id="btn-submit-login-text">登录</span>
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 5l7 7m0 0l-7 7m7-7H3"></path></svg>
+          </button>
+        </div>
       </div>
     </div>
   </div>
@@ -1316,6 +1343,9 @@
     }
 
     function normalizeLibraryContext(sourceRef = null) {
+      if (sourceRef?.libraryType === 'native' || sourceRef?.isNative) {
+        return { libraryType: 'native', libraryId: String(sourceRef?.libraryId || 'local') };
+      }
       const libraryType = sourceRef?.libraryType === 'group' ? 'group' : 'user';
       const libraryId = String(sourceRef?.libraryId || config.userId || '');
       return { libraryType, libraryId };
@@ -1323,6 +1353,9 @@
 
     function libraryApiPrefix(sourceRef = null) {
       const library = normalizeLibraryContext(sourceRef);
+      if (library.libraryType === 'native') {
+        throw new Error('Native library does not support Zotero API endpoints');
+      }
       const segment = library.libraryType === 'group' ? 'groups' : 'users';
       return `/${segment}/${encodeURIComponent(library.libraryId)}`;
     }
@@ -1385,12 +1418,55 @@
       }
     }
 
+    let authMode = 'local';
+    let needsSetup = false;
+
     function openLoginModal() {
-      const serverInput = document.getElementById('input-oauth-server');
-      const saved = localStorage.getItem('altcanvas_altero_server') || config.defaultAlteroApi || '';
-      serverInput.value = saved;
-      document.getElementById('login-modal').classList.remove('hidden');
-      requestAnimationFrame(() => serverInput.focus());
+      const modal = document.getElementById('login-modal');
+      const localSection = document.getElementById('local-auth-section');
+      const alteroSection = document.getElementById('altero-auth-section');
+      const toggleBtn = document.getElementById('btn-toggle-auth-mode');
+      const titleText = document.getElementById('login-title-text');
+      const submitText = document.getElementById('btn-submit-login-text');
+      const descText = document.getElementById('local-auth-desc');
+      const errorBox = document.getElementById('local-auth-error');
+      if (errorBox) errorBox.classList.add('hidden');
+
+      if (authMode === 'local') {
+        localSection.classList.remove('hidden');
+        alteroSection.classList.add('hidden');
+        if (needsSetup) {
+          titleText.textContent = '🎉 创建管理员账户';
+          descText.textContent = '欢迎使用 AltCanvas 原生工作台！请先创建您的初始管理员账户。';
+          submitText.textContent = '创建并登录';
+        } else {
+          titleText.textContent = '登录 AltCanvas';
+          descText.textContent = '请输入您的本地账号与密码以登录 AltCanvas 原生研究工作台。';
+          submitText.textContent = '登录';
+        }
+        if (dynamicAlteroAllowed || config.defaultAlteroApi) {
+          toggleBtn.classList.remove('hidden');
+          toggleBtn.textContent = '切换至 Altero 授权登录';
+        } else {
+          toggleBtn.classList.add('hidden');
+        }
+      } else {
+        localSection.classList.add('hidden');
+        alteroSection.classList.remove('hidden');
+        titleText.textContent = '登录并授权 Altero';
+        submitText.textContent = '前往 Altero 授权';
+        toggleBtn.classList.remove('hidden');
+        toggleBtn.textContent = '切换至本地账户登录';
+      }
+
+      modal.classList.remove('hidden');
+      requestAnimationFrame(() => {
+        if (authMode === 'local') {
+          document.getElementById('input-local-username')?.focus();
+        } else {
+          document.getElementById('input-oauth-server')?.focus();
+        }
+      });
     }
 
     function closeLoginModal() {
@@ -1398,11 +1474,51 @@
     }
 
     function beginLogin() {
-      if (dynamicAlteroAllowed) openLoginModal();
-      else window.location.href = '/auth/login';
+      openLoginModal();
     }
 
-    function submitLogin() {
+    async function submitLogin() {
+      if (authMode === 'local') {
+        const username = document.getElementById('input-local-username').value.trim();
+        const password = document.getElementById('input-local-password').value;
+        const errorBox = document.getElementById('local-auth-error');
+        if (!username || !password) {
+          if (errorBox) {
+            errorBox.textContent = '请输入用户名和密码';
+            errorBox.classList.remove('hidden');
+          }
+          return;
+        }
+
+        const endpoint = needsSetup ? '/auth/setup' : '/auth/login';
+        try {
+          const res = await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, password })
+          });
+          const result = await res.json();
+          if (!res.ok) {
+            if (errorBox) {
+              errorBox.textContent = result.message || '登录失败';
+              errorBox.classList.remove('hidden');
+            }
+            return;
+          }
+          closeLoginModal();
+          showToast(needsSetup ? '管理员创建成功！' : '登录成功！', 'success');
+          await checkSession();
+          if (typeof loadCollectionsAndLibrary === 'function') loadCollectionsAndLibrary();
+          if (typeof loadInboxEntries === 'function') loadInboxEntries();
+        } catch (err) {
+          if (errorBox) {
+            errorBox.textContent = err.message || '网络连接异常';
+            errorBox.classList.remove('hidden');
+          }
+        }
+        return;
+      }
+
       const serverInput = document.getElementById('input-oauth-server');
       const raw = serverInput.value.trim();
       if (!raw) {
@@ -1427,6 +1543,8 @@
         const res = await fetch('/auth/session', { cache: 'no-store' });
         if (res.ok) {
           const data = await res.json();
+          authMode = data.authMode || 'local';
+          needsSetup = Boolean(data.needsSetup);
           directModeAllowed = data.allowDirectMode === true;
           dynamicAlteroAllowed = data.allowDynamicAltero === true;
           config.defaultAlteroApi = data.defaultAlteroApi || '';
@@ -1442,11 +1560,15 @@
           }
           if (data.authenticated && data.user) {
             config.mode = 'bff';
+            config.authMode = data.authMode || 'local';
             config.userId = String(data.user.id);
             config.user = data.user;
             config.alteroApi = data.alteroApi;
             updateAuthUI(true, data.user, data.alteroApi);
             return true;
+          }
+          if (needsSetup) {
+            openLoginModal();
           }
         }
       } catch (err) {
@@ -2000,7 +2122,7 @@
         document.getElementById('items-container').innerHTML = `
           <div class="text-center text-slate-500 py-12 px-4 space-y-3">
             <p class="text-xs">未检测到有效登录会话</p>
-            <button id="btn-empty-login" type="button" class="inline-block px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs transition shadow-sm">连接并登录 Altero</button>
+            <button id="btn-empty-login" type="button" class="inline-block px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs transition shadow-sm">登录 AltCanvas</button>
           </div>`;
         document.getElementById('btn-empty-login')?.addEventListener('click', beginLogin);
         return;
@@ -2010,6 +2132,47 @@
       container.innerHTML = '<div class="text-center text-slate-500 py-12 text-xs animate-pulse">正在加载文库与集合...</div>';
       libraryController?.abort();
       libraryController = new AbortController();
+
+      if (config.authMode === 'local' || !config.alteroApi) {
+        try {
+          const nativeDocsRes = await fetch('/canvas/native/documents', { signal: libraryController.signal });
+          if (nativeDocsRes.ok) {
+            const docsData = await nativeDocsRes.json();
+            const nativeDocs = docsData.data || [];
+            allLibraryItems = nativeDocs.map(d => ({
+              key: d.id,
+              version: d.version,
+              data: {
+                itemType: d.itemType || 'journalArticle',
+                title: d.title,
+                creators: d.creators || [],
+                date: d.date || '',
+                year: d.year || '',
+                url: d.url || '',
+                tags: []
+              },
+              children: (d.attachments || []).map(a => ({
+                key: a.id,
+                data: {
+                  itemType: 'attachment',
+                  contentType: a.mimeType || 'application/pdf',
+                  filename: a.originalFilename || `${d.title}.pdf`,
+                  title: a.title || d.title,
+                  isNative: true
+                },
+                isNative: true
+              })),
+              isNative: true
+            }));
+            renderCollections([]);
+            renderItems(allLibraryItems);
+            return;
+          }
+        } catch (err) {
+          if (err?.name === 'AbortError') return;
+          console.warn('Native docs load error:', err);
+        }
+      }
 
       try {
         const userId = encodeURIComponent(config.userId);
@@ -2261,6 +2424,21 @@
     }
 
     // --- Document & PDF Opening ---
+    function resetCurrentDocumentState() {
+      currentItem = null;
+      currentAttachment = null;
+      currentDocumentLibrary = null;
+      currentAnnotationsMap.clear();
+      clientAnnotationIdMap.clear();
+      renderAnnotationCards();
+      const titleEl = document.getElementById('current-doc-title');
+      if (titleEl) titleEl.textContent = '';
+      document.getElementById('btn-doc-edit-title')?.classList.add('hidden');
+      document.getElementById('btn-doc-ai-title')?.classList.add('hidden');
+      renderItems();
+      updateCanvasAiToolbar();
+    }
+
     async function openItem(item, libraryContext = null) {
       const requestId = ++openRequestId;
       documentController?.abort();
@@ -2269,8 +2447,9 @@
       currentItem = item;
       currentReaderInstance = null;
       updateCanvasAiToolbar();
-      currentDocumentLibrary = normalizeLibraryContext(libraryContext);
-      const documentLibraryPrefix = libraryApiPrefix(currentDocumentLibrary);
+      currentDocumentLibrary = normalizeLibraryContext(libraryContext || (item?.isNative ? { libraryType: 'native', libraryId: 'local' } : null));
+      const isNativeDoc = item?.isNative || currentDocumentLibrary?.libraryType === 'native';
+      const documentLibraryPrefix = !isNativeDoc ? libraryApiPrefix(currentDocumentLibrary) : null;
       renderItems(); // Update active selection state
       if (mobileMedia.matches) setMobilePane('reader');
 
@@ -2290,7 +2469,33 @@
       try {
         let pdfAttachment = null;
 
-        if (item.data?.itemType === 'attachment' && item.data?.contentType === 'application/pdf') {
+        if (isNativeDoc) {
+          pdfAttachment = (item.children || []).find(c => c.data?.contentType === 'application/pdf')
+            || (item.data?.itemType === 'attachment' ? item : null);
+          if (!pdfAttachment && item.key) {
+            try {
+              const fullDocRes = await fetch(`/canvas/native/documents/${encodeURIComponent(item.key)}`, { signal });
+              if (fullDocRes.ok) {
+                const fullDoc = await fullDocRes.json();
+                const firstAtt = fullDoc.data?.attachments?.[0];
+                if (firstAtt) {
+                  pdfAttachment = {
+                    key: firstAtt.id,
+                    version: firstAtt.version,
+                    data: {
+                      key: firstAtt.id,
+                      title: firstAtt.title,
+                      contentType: firstAtt.mimeType || 'application/pdf',
+                      filename: firstAtt.originalFilename,
+                      isNative: true
+                    },
+                    isNative: true
+                  };
+                }
+              }
+            } catch {}
+          }
+        } else if (item.data?.itemType === 'attachment' && item.data?.contentType === 'application/pdf') {
           // Direct standalone PDF attachment
           pdfAttachment = item;
         } else {
@@ -2308,7 +2513,11 @@
           document.getElementById('reader-placeholder').classList.remove('hidden');
           document.getElementById('reader-wrapper').classList.add('hidden');
           document.getElementById('reader-placeholder-title').textContent = '该条目未关联可用的 PDF 附件';
-          document.getElementById('reader-placeholder-subtitle').textContent = '请检查 Altero/Zotero 中是否已上传该研报的 PDF 文件。';
+          document.getElementById('reader-placeholder-subtitle').textContent = '请检查文献是否已上传关联的 PDF 文件。';
+
+          // Atomic cleanup on failure: avoid cross-document mixed state
+          resetCurrentDocumentState();
+
           showToast('该条目未关联可用的 PDF 附件', 'error');
           return;
         }
@@ -2317,11 +2526,38 @@
         loadingText.textContent = '正在加载已有标注...';
 
         // Fetch existing annotations for this attachment
-        const annUrl = getApiUrl(`${documentLibraryPrefix}/items/${encodeURIComponent(pdfAttachment.key)}/children`);
-        const annRes = await fetch(annUrl, { headers: getHeaders(), signal });
-        const annChildren = annRes.ok ? await annRes.json() : [];
+        let rawAnnotations = [];
+        if (isNativeDoc || pdfAttachment.isNative) {
+          const annRes = await fetch(`/canvas/native/attachments/${encodeURIComponent(pdfAttachment.key)}/annotations`, { signal });
+          if (!annRes.ok) {
+            throw new Error(`获取批注列表失败 (HTTP ${annRes.status})`);
+          }
+          const annJson = await annRes.json();
+          rawAnnotations = (annJson.data || []).map(a => ({
+            key: a.id,
+            version: a.version,
+            data: {
+              itemType: 'annotation',
+              parentItem: pdfAttachment.key,
+              annotationType: a.annotationType,
+              annotationText: a.quote,
+              annotationComment: a.comment,
+              annotationColor: a.color,
+              annotationPageLabel: a.pageLabel,
+              annotationSortIndex: a.sortIndex,
+              annotationPosition: JSON.stringify(a.position || { pageIndex: 0, rects: [] })
+            }
+          }));
+        } else {
+          const annUrl = getApiUrl(`${documentLibraryPrefix}/items/${encodeURIComponent(pdfAttachment.key)}/children`);
+          const annRes = await fetch(annUrl, { headers: getHeaders(), signal });
+          if (!annRes.ok) {
+            throw new Error(`获取批注列表失败 (HTTP ${annRes.status})`);
+          }
+          const annChildren = await annRes.json();
+          rawAnnotations = (Array.isArray(annChildren) ? annChildren : []).filter(c => c.data?.itemType === 'annotation');
+        }
         if (requestId !== openRequestId) return;
-        const rawAnnotations = annChildren.filter(c => c.data?.itemType === 'annotation');
 
         // Populate Annotations Map
         currentAnnotationsMap.clear();
@@ -2367,6 +2603,10 @@
         document.getElementById('reader-wrapper').classList.add('hidden');
         document.getElementById('reader-placeholder-title').textContent = 'PDF 加载失败';
         document.getElementById('reader-placeholder-subtitle').textContent = errorMessage(err);
+
+        // Atomic cleanup on failure: avoid cross-document mixed state
+        resetCurrentDocumentState();
+
         showToast(`打开失败: ${errorMessage(err)}`, 'error');
       }
     }
@@ -2419,13 +2659,17 @@
       
       let fileUrl;
       let readerData;
-      const documentLibraryPrefix = libraryApiPrefix(libraryContext);
-      if (config.mode === 'bff') {
+      if (libraryContext?.libraryType === 'native' || currentAttachment?.isNative) {
+        fileUrl = `/canvas/native/attachments/${encodeURIComponent(attachmentKey)}/file`;
+        readerData = { url: fileUrl };
+      } else if (config.mode === 'bff') {
+        const documentLibraryPrefix = libraryApiPrefix(libraryContext);
         fileUrl = `/files${documentLibraryPrefix}/items/${encodeURIComponent(attachmentKey)}`;
         // Let PDF.js fetch the same-origin URL directly so it can use HTTP Range
         // requests and avoid buffering the entire document in the parent page.
         readerData = { url: fileUrl };
       } else {
+        const documentLibraryPrefix = libraryApiPrefix(libraryContext);
         fileUrl = `${config.api}${documentLibraryPrefix}/items/${encodeURIComponent(attachmentKey)}/file/content`;
         // Legacy development mode still needs a header-authenticated fetch because
         // PDF.js cannot attach the manually supplied Zotero API key to its requests.
@@ -2538,6 +2782,81 @@
       }
     }
 
+    async function reloadAndSyncReaderAnnotations(attachmentKey) {
+      if (!currentReaderInstance || !attachmentKey) return;
+      try {
+        let rawAnnotations = [];
+        if (currentDocumentLibrary?.libraryType === 'native' || currentAttachment?.isNative) {
+          const annRes = await fetch(`/canvas/native/attachments/${encodeURIComponent(attachmentKey)}/annotations`);
+          if (!annRes.ok) {
+            throw new Error(`获取最新批注列表失败 (HTTP ${annRes.status})`);
+          }
+          const annJson = await annRes.json();
+          rawAnnotations = (annJson.data || []).map(a => ({
+            key: a.id,
+            version: a.version,
+            data: {
+              itemType: 'annotation',
+              parentItem: attachmentKey,
+              annotationType: a.annotationType,
+              annotationText: a.quote,
+              annotationComment: a.comment,
+              annotationColor: a.color,
+              annotationPageLabel: a.pageLabel,
+              annotationSortIndex: a.sortIndex,
+              annotationPosition: JSON.stringify(a.position || { pageIndex: 0, rects: [] })
+            }
+          }));
+        } else {
+          const documentLibraryPrefix = libraryApiPrefix(currentDocumentLibrary);
+          const annUrl = getApiUrl(`${documentLibraryPrefix}/items/${encodeURIComponent(attachmentKey)}/children`);
+          const annRes = await fetch(annUrl, { headers: getHeaders() });
+          if (!annRes.ok) {
+            throw new Error(`获取最新批注列表失败 (HTTP ${annRes.status})`);
+          }
+          const annChildren = await annRes.json();
+          rawAnnotations = (Array.isArray(annChildren) ? annChildren : []).filter(c => c.data?.itemType === 'annotation');
+        }
+
+        // Concurrency guard: check if current document has changed while request was in-flight
+        if (!currentAttachment || currentAttachment.key !== attachmentKey) return;
+
+        currentAnnotationsMap.clear();
+        clientAnnotationIdMap.clear();
+        const readerAnnotations = [];
+
+        for (const a of rawAnnotations) {
+          const annData = a.data || {};
+          currentAnnotationsMap.set(a.key, {
+            version: a.version || annData.version || 0,
+            data: annData
+          });
+
+          const pos = getAnnotationPosition(annData);
+          const pageIndex = getAnnotationPageIndex(annData);
+
+          readerAnnotations.push({
+            id: a.key,
+            type: annData.annotationType || 'highlight',
+            color: annData.annotationColor || '#ffd400',
+            pageIndex: pageIndex,
+            position: pos,
+            text: cleanAnnotationText(annData.annotationText),
+            comment: cleanAnnotationText(annData.annotationComment),
+            tags: annData.tags || []
+          });
+        }
+
+        renderAnnotationCards();
+
+        if (currentReaderInstance?._primaryView?._annotationManager?.setAnnotations) {
+          currentReaderInstance._primaryView._annotationManager.setAnnotations(readerAnnotations);
+        }
+      } catch (err) {
+        console.warn('Failed to resync reader annotations:', err);
+      }
+    }
+
     async function handleSaveAnnotations(savedAnns) {
       if (!currentAttachment) return;
 
@@ -2569,6 +2888,109 @@
         } else {
           toCreate.push({ id: ann.id, annotation: ann, data: zoteroAnnData });
         }
+      }
+
+      if (currentDocumentLibrary?.libraryType === 'native' || currentAttachment?.isNative) {
+        let hadSaveErrors = false;
+        if (toCreate.length > 0) {
+          for (const item of toCreate) {
+            try {
+              const res = await fetch(`/canvas/native/attachments/${encodeURIComponent(currentAttachment.key)}/annotations`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  annotationType: item.data.annotationType,
+                  pageLabel: item.data.annotationPageLabel,
+                  position: JSON.parse(item.data.annotationPosition || '{}'),
+                  quote: item.data.annotationText,
+                  comment: item.data.annotationComment,
+                  color: item.data.annotationColor,
+                  sortIndex: 0
+                })
+              });
+              if (res.ok) {
+                const jsonRes = await res.json();
+                const created = jsonRes.data;
+                clientAnnotationIdMap.set(item.id, created.id);
+                currentAnnotationsMap.set(created.id, {
+                  version: created.version,
+                  data: item.data
+                });
+                if (item.annotation) void autoTranslatePdfAnnotation(item.annotation);
+              } else {
+                hadSaveErrors = true;
+                const errJson = await res.json().catch(() => null);
+                throw new Error(errJson?.error?.message || `HTTP ${res.status}`);
+              }
+            } catch (e) {
+              hadSaveErrors = true;
+              console.error('Native annotation create failed:', e);
+              showToast(`创建批注失败: ${errorMessage(e)}`, 'error');
+            }
+          }
+        }
+
+        if (toUpdate.length > 0) {
+          for (const item of toUpdate) {
+            try {
+              const res = await fetch(`/canvas/native/annotations/${encodeURIComponent(item.key)}`, {
+                method: 'PATCH',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'If-Match': `W/"${item.version}"`
+                },
+                body: JSON.stringify({
+                  annotationType: item.data.annotationType,
+                  pageLabel: item.data.annotationPageLabel,
+                  position: JSON.parse(item.data.annotationPosition || '{}'),
+                  quote: item.data.annotationText,
+                  comment: item.data.annotationComment,
+                  color: item.data.annotationColor
+                })
+              });
+              if (res.ok) {
+                const jsonRes = await res.json();
+                currentAnnotationsMap.set(item.key, {
+                  version: jsonRes.data?.version || (item.version + 1),
+                  data: item.data
+                });
+                if (item.clientId && item.clientId !== item.key) {
+                  clientAnnotationIdMap.set(item.clientId, item.key);
+                }
+              } else if (res.status === 412) {
+                hadSaveErrors = true;
+                showToast(`批注 #${item.key} 存在并发冲突，正在刷新...`, 'warning');
+                const latestRes = await fetch(`/canvas/native/annotations/${encodeURIComponent(item.key)}`);
+                if (latestRes.ok) {
+                  const latestJson = await latestRes.json();
+                  currentAnnotationsMap.set(item.key, {
+                    version: latestJson.data.version,
+                    data: {
+                      ...item.data,
+                      annotationText: latestJson.data.quote,
+                      annotationComment: latestJson.data.comment,
+                      annotationColor: latestJson.data.color
+                    }
+                  });
+                }
+              } else {
+                hadSaveErrors = true;
+                const errJson = await res.json().catch(() => null);
+                throw new Error(errJson?.error?.message || `HTTP ${res.status}`);
+              }
+            } catch (e) {
+              hadSaveErrors = true;
+              console.error('Native annotation update failed:', e);
+              showToast(`更新批注 #${item.key} 失败: ${errorMessage(e)}`, 'error');
+            }
+          }
+        }
+        if (hadSaveErrors) {
+          await reloadAndSyncReaderAnnotations(currentAttachment.key);
+        } else {
+          renderAnnotationCards();
+        }
+        return;
       }
 
       // 1. Create New Annotations
@@ -2676,6 +3098,43 @@
           }
         }
       };
+
+      if (currentDocumentLibrary?.libraryType === 'native' || currentAttachment?.isNative) {
+        for (const rawId of unhandledIds) {
+          const mappedId = clientAnnotationIdMap.get(rawId);
+          const serverId = mappedId || rawId;
+          const record = currentAnnotationsMap.get(serverId) || currentAnnotationsMap.get(rawId);
+          const version = record?.version || 1;
+          try {
+            const res = await fetch(`/canvas/native/annotations/${encodeURIComponent(serverId)}`, {
+              method: 'DELETE',
+              headers: { 'If-Match': `W/"${version}"` }
+            });
+            if (res.status === 204 || res.status === 404) {
+              forgetAnnotation(rawId, serverId);
+              deleted.push(rawId);
+            } else if (res.status === 412) {
+              showToast(`删除批注 #${serverId} 冲突：已被其他操作修改`, 'warning');
+              failed.push(rawId);
+            } else {
+              const errJson = await res.json().catch(() => null);
+              showToast(`删除批注失败: ${errJson?.error?.message || `HTTP ${res.status}`}`, 'error');
+              failed.push(rawId);
+            }
+          } catch (err) {
+            console.error('Native annotation delete error:', err);
+            showToast(`删除批注失败: ${errorMessage(err)}`, 'error');
+            failed.push(rawId);
+          }
+        }
+        for (const id of unhandledIds) activeAnnotationDeletions.delete(id);
+        if (failed.length > 0) {
+          await reloadAndSyncReaderAnnotations(currentAttachment.key);
+        } else {
+          renderAnnotationCards();
+        }
+        return;
+      }
 
       const fetchItemVersion = async serverId => {
         const itemUrl = getApiUrl(`${libraryApiPrefix(currentDocumentLibrary)}/items/${encodeURIComponent(serverId)}`);
@@ -5241,16 +5700,52 @@
 
       showToast(`正在切换至文献 #${targetItemKey}...`, 'info');
       try {
-        const canUsePersonalLibraryCache = sourceLibrary.libraryType === 'user'
-          && sourceLibrary.libraryId === String(config.userId || '');
-        let targetItem = canUsePersonalLibraryCache
-          ? allItems.find(i => i.key === targetItemKey || (sourceRef.itemKey && i.key === sourceRef.itemKey))
-          : null;
-        if (!targetItem) {
-          const itemUrl = getApiUrl(`${libraryApiPrefix(sourceRef)}/items/${encodeURIComponent(targetItemKey)}`);
-          const res = await fetch(itemUrl, { headers: getHeaders() });
-          if (!res.ok) throw new Error(`获取文献信息失败 (HTTP ${res.status})`);
-          targetItem = await res.json();
+        let targetItem = null;
+        if (sourceLibrary.libraryType === 'native') {
+          targetItem = allLibraryItems.find(i => i.key === targetItemKey || (sourceRef.itemKey && i.key === sourceRef.itemKey));
+          if (!targetItem) {
+            const res = await fetch(`/canvas/native/documents/${encodeURIComponent(targetItemKey)}`);
+            if (!res.ok) throw new Error(`获取原生文献失败 (HTTP ${res.status})`);
+            const docData = await res.json();
+            const d = docData.data;
+            targetItem = {
+              key: d.id,
+              version: d.version,
+              data: {
+                itemType: d.itemType || 'journalArticle',
+                title: d.title,
+                creators: d.creators || [],
+                date: d.date || '',
+                year: d.year || '',
+                tags: []
+              },
+              children: (d.attachments || []).map(a => ({
+                key: a.id,
+                version: a.version,
+                data: {
+                  itemType: 'attachment',
+                  contentType: a.mimeType || 'application/pdf',
+                  filename: a.originalFilename || `${d.title}.pdf`,
+                  title: a.title || d.title,
+                  isNative: true
+                },
+                isNative: true
+              })),
+              isNative: true
+            };
+          }
+        } else {
+          const canUsePersonalLibraryCache = sourceLibrary.libraryType === 'user'
+            && sourceLibrary.libraryId === String(config.userId || '');
+          targetItem = canUsePersonalLibraryCache
+            ? allItems.find(i => i.key === targetItemKey || (sourceRef.itemKey && i.key === sourceRef.itemKey))
+            : null;
+          if (!targetItem) {
+            const itemUrl = getApiUrl(`${libraryApiPrefix(sourceRef)}/items/${encodeURIComponent(targetItemKey)}`);
+            const res = await fetch(itemUrl, { headers: getHeaders() });
+            if (!res.ok) throw new Error(`获取文献信息失败 (HTTP ${res.status})`);
+            targetItem = await res.json();
+          }
         }
 
         await openItem(targetItem, sourceRef);
@@ -5277,12 +5772,48 @@
           && currentAttachment.key === sourceRef.attachmentKey;
         if (!isCurrentDocument) {
           const targetItemKey = sourceRef.itemKey || sourceRef.attachmentKey;
-          let targetItem = sourceLibrary.libraryType === 'user' && sourceLibrary.libraryId === String(config.userId || '')
-            ? allItems.find(item => item.key === targetItemKey) : null;
-          if (!targetItem) {
-            const response = await fetch(getApiUrl(`${libraryApiPrefix(sourceRef)}/items/${encodeURIComponent(targetItemKey)}`), { headers: getHeaders() });
-            if (!response.ok) throw new Error(`获取文献失败 (HTTP ${response.status})`);
-            targetItem = await response.json();
+          let targetItem = null;
+          if (sourceLibrary.libraryType === 'native') {
+            targetItem = allLibraryItems.find(item => item.key === targetItemKey);
+            if (!targetItem) {
+              const response = await fetch(`/canvas/native/documents/${encodeURIComponent(targetItemKey)}`);
+              if (!response.ok) throw new Error(`获取原生文献失败 (HTTP ${response.status})`);
+              const docData = await response.json();
+              const d = docData.data;
+              targetItem = {
+                key: d.id,
+                version: d.version,
+                data: {
+                  itemType: d.itemType || 'journalArticle',
+                  title: d.title,
+                  creators: d.creators || [],
+                  date: d.date || '',
+                  year: d.year || '',
+                  tags: []
+                },
+                children: (d.attachments || []).map(a => ({
+                  key: a.id,
+                  version: a.version,
+                  data: {
+                    itemType: 'attachment',
+                    contentType: a.mimeType || 'application/pdf',
+                    filename: a.originalFilename || `${d.title}.pdf`,
+                    title: a.title || d.title,
+                    isNative: true
+                  },
+                  isNative: true
+                })),
+                isNative: true
+              };
+            }
+          } else {
+            targetItem = sourceLibrary.libraryType === 'user' && sourceLibrary.libraryId === String(config.userId || '')
+              ? allItems.find(item => item.key === targetItemKey) : null;
+            if (!targetItem) {
+              const response = await fetch(getApiUrl(`${libraryApiPrefix(sourceRef)}/items/${encodeURIComponent(targetItemKey)}`), { headers: getHeaders() });
+              if (!response.ok) throw new Error(`获取文献失败 (HTTP ${response.status})`);
+              targetItem = await response.json();
+            }
           }
           await openItem(targetItem, sourceRef);
         }
@@ -6365,6 +6896,138 @@
       makeDraggable(document.getElementById('divider-annotations'), 'annotations-pane', 'annotations');
     })();
 
+    async function openNativeDocument(doc, attachment) {
+      if (!attachment) {
+        try {
+          const fullDocRes = await fetch(`/canvas/native/documents/${encodeURIComponent(doc.id)}`);
+          if (fullDocRes.ok) {
+            const fullDoc = await fullDocRes.json();
+            doc = fullDoc.data || doc;
+            attachment = doc.attachments?.[0];
+          }
+        } catch {}
+      }
+      if (!attachment) {
+        showToast('该文献没有关联的 PDF 附件', 'warning');
+        return;
+      }
+      const attData = {
+        key: attachment.id,
+        version: attachment.version,
+        data: {
+          key: attachment.id,
+          title: attachment.title || doc.title,
+          contentType: attachment.mimeType || 'application/pdf',
+          filename: attachment.originalFilename || `${doc.title}.pdf`,
+          isNative: true
+        },
+        isNative: true
+      };
+      const itemData = {
+        key: doc.id,
+        version: doc.version,
+        data: {
+          title: doc.title,
+          itemType: doc.itemType || 'journalArticle',
+          creators: doc.creators || []
+        },
+        children: [attData],
+        isNative: true
+      };
+      const nativeLib = {
+        libraryType: 'native',
+        libraryId: 'local',
+        isNative: true
+      };
+      await openItem(itemData, nativeLib);
+    }
+
+    async function openDocument(identity) {
+      if (!identity || !identity.itemKey) return;
+      const libraryType = identity.libraryType || (identity.isNative ? 'native' : 'user');
+      const libraryId = identity.libraryId || (libraryType === 'native' ? 'local' : config.userId);
+      const itemKey = identity.itemKey;
+      return openItem({
+        key: itemKey,
+        isNative: libraryType === 'native',
+        data: {
+          key: itemKey,
+          title: identity.title || '',
+          itemType: identity.itemType || 'journalArticle'
+        }
+      }, { libraryType, libraryId });
+    }
+    window.openDocument = openDocument;
+
+    async function uploadNativePdfFile(file, forceNew = false) {
+      showToast(`正在上传 ${file.name}...`, 'info');
+      try {
+        const formData = new FormData();
+        formData.append('file', file, file.name);
+        if (canvasWorkspace?.id) formData.append('targetWorkspaceId', canvasWorkspace.id);
+        if (forceNew) formData.append('forceNew', 'true');
+
+        const res = await fetch('/canvas/native/upload', {
+          method: 'POST',
+          body: formData
+        });
+        const result = await res.json();
+        if (!res.ok) {
+          throw new Error(result.error?.message || result.message || '上传失败');
+        }
+        if (result.duplicate) {
+          showToast(`文献已存在: ${result.data?.document?.title || file.name}`, 'info');
+          if (result.data?.document && result.data?.attachment) {
+            await openNativeDocument(result.data.document, result.data.attachment);
+          }
+          return;
+        }
+        showToast(`上传成功: ${result.data.document.title}`, 'success');
+        if (result.data.document && result.data.attachment) {
+          await openNativeDocument(result.data.document, result.data.attachment);
+        }
+        if (typeof loadCollectionsAndLibrary === 'function') loadCollectionsAndLibrary();
+        if (typeof loadInboxEntries === 'function') loadInboxEntries();
+      } catch (err) {
+        showToast(`上传失败: ${err.message}`, 'error');
+      }
+    }
+
+    function setupNativePdfUpload() {
+      const fileInput = document.getElementById('native-pdf-file-input');
+      const uploadTopBtn = document.getElementById('btn-upload-pdf-top');
+      if (uploadTopBtn && fileInput) {
+        uploadTopBtn.onclick = () => fileInput.click();
+      }
+      if (fileInput) {
+        fileInput.onchange = async () => {
+          if (!fileInput.files?.length) return;
+          for (const file of Array.from(fileInput.files)) {
+            await uploadNativePdfFile(file);
+          }
+          fileInput.value = '';
+        };
+      }
+
+      window.addEventListener('dragover', (e) => {
+        if (e.dataTransfer?.types?.includes('Files')) {
+          e.preventDefault();
+        }
+      });
+
+      window.addEventListener('drop', async (e) => {
+        if (!e.dataTransfer?.files?.length) return;
+        const pdfFiles = Array.from(e.dataTransfer.files).filter(f => f.name.toLowerCase().endsWith('.pdf') || f.type === 'application/pdf');
+        if (!pdfFiles.length) return;
+        e.preventDefault();
+        e.stopPropagation();
+
+        for (const file of pdfFiles) {
+          await uploadNativePdfFile(file);
+        }
+      });
+    }
+
     // --- Init App on Load ---
     (async () => {
       const urlParams = new URLSearchParams(window.location.search);
@@ -6376,6 +7039,7 @@
         window.history.replaceState({}, '', `${window.location.pathname}${cleanQuery}${window.location.hash}`);
       }
 
+      setupNativePdfUpload();
       await checkSession();
       loadKnownDeletedAnnotations();
       localStorage.removeItem('altcanvas.aiConfig');

@@ -1093,7 +1093,7 @@ try {
 
     const migratedStore = new CanvasStore(v2DbPath);
     const maxV = migratedStore.db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v;
-    assert.equal(maxV, 11, 'Database must be upgraded to schema v11');
+    assert.equal(maxV, 12, 'Database must be upgraded to schema v12');
 
     // Verify document_metas table and methods
     const savedMeta = migratedStore.saveDocumentMeta(actor, {
@@ -1238,7 +1238,7 @@ try {
 
     const migratedV5Store = new CanvasStore(v5DbPath);
     const maxV = migratedV5Store.db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v;
-    assert.equal(maxV, 11, 'Database must be upgraded from v5 to v11');
+    assert.equal(maxV, 12, 'Database must be upgraded from v5 to v12');
 
     const v5Analysis = migratedV5Store.getDocumentAnalysis(actor, {
       libraryType: 'user', libraryId: '42', attachmentKey: 'ATT_V5', attachmentVersion: 1, model: 'gpt-4o', promptVersion: 'v1'
@@ -1321,7 +1321,7 @@ try {
 
     const migratedV7Store = new CanvasStore(v7DbPath);
     const maxV = migratedV7Store.db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v;
-    assert.equal(maxV, 11, 'Database must be upgraded from v7 to v11');
+    assert.equal(maxV, 12, 'Database must be upgraded from v7 to v12');
 
     // Assert existing knowledge relations were 100% preserved
     const rels = migratedV7Store.listKnowledgeRelations(actor);
@@ -1369,7 +1369,7 @@ try {
 
     const migratedV10Store = new CanvasStore(v10DbPath);
     const maxV10 = migratedV10Store.db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v;
-    assert.equal(maxV10, 11, 'Database must be upgraded from v10 to v11');
+    assert.equal(maxV10, 12, 'Database must be upgraded from v10 to v12');
 
     const migratedEdge = migratedV10Store.getEdge(actor, 'e-v10-1');
     assert.ok(migratedEdge);
@@ -1401,9 +1401,150 @@ try {
     fs.rmSync(v10Dir, { recursive: true, force: true });
   }
 
-  // --- Schema v11: Topics, Topic Documents, Collection Bindings, Inbox, Jobs, Document Analyses, Document Metas, Knowledge Units & Relations, Edge Origins ---
+  // --- Lineage Test 2: Current v11 DB -> v12 ---
+  const v11LineageDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-v11-lineage-test-'));
+  const v11LineageDbPath = path.join(v11LineageDir, 'canvas-v11.sqlite');
+  try {
+    const rawV11 = new DatabaseSync(v11LineageDbPath);
+    rawV11.exec(`
+      CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL) STRICT;
+      INSERT INTO schema_migrations (version, applied_at) VALUES (1, '2026-08-30T00:00:00.000Z');
+      INSERT INTO schema_migrations (version, applied_at) VALUES (2, '2026-08-30T01:00:00.000Z');
+      INSERT INTO schema_migrations (version, applied_at) VALUES (3, '2026-08-31T00:00:00.000Z');
+      INSERT INTO schema_migrations (version, applied_at) VALUES (4, '2026-08-31T01:00:00.000Z');
+      INSERT INTO schema_migrations (version, applied_at) VALUES (5, '2026-08-31T02:00:00.000Z');
+      INSERT INTO schema_migrations (version, applied_at) VALUES (6, '2026-08-31T03:00:00.000Z');
+      INSERT INTO schema_migrations (version, applied_at) VALUES (7, '2026-08-31T04:00:00.000Z');
+      INSERT INTO schema_migrations (version, applied_at) VALUES (8, '2026-08-31T05:00:00.000Z');
+      INSERT INTO schema_migrations (version, applied_at) VALUES (9, '2026-08-31T06:00:00.000Z');
+      INSERT INTO schema_migrations (version, applied_at) VALUES (10, '2026-08-31T07:00:00.000Z');
+      INSERT INTO schema_migrations (version, applied_at) VALUES (11, '2026-08-31T08:00:00.000Z');
+
+      CREATE TABLE workspaces (id TEXT PRIMARY KEY, owner_key TEXT NOT NULL, name TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 1, description TEXT NOT NULL DEFAULT '', research_question TEXT NOT NULL DEFAULT '', inclusion_rules TEXT NOT NULL DEFAULT '', exclusion_rules TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT) STRICT;
+      CREATE TABLE boards (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES workspaces(id), name TEXT NOT NULL, viewport_x REAL NOT NULL DEFAULT 0, viewport_y REAL NOT NULL DEFAULT 0, viewport_zoom REAL NOT NULL DEFAULT 1, version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT) STRICT;
+      CREATE TABLE source_refs (id TEXT PRIMARY KEY, board_id TEXT NOT NULL REFERENCES boards(id), library_type TEXT NOT NULL CHECK (library_type IN ('user', 'group', 'native')), library_id TEXT NOT NULL, item_key TEXT, attachment_key TEXT, attachment_version INTEGER, annotation_key TEXT, annotation_version INTEGER, page_label TEXT, position_json TEXT, quote_snapshot TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL) STRICT;
+      CREATE TABLE nodes (id TEXT PRIMARY KEY, board_id TEXT NOT NULL REFERENCES boards(id), node_type TEXT NOT NULL, x REAL NOT NULL, y REAL NOT NULL, width REAL NOT NULL, height REAL NOT NULL, z_index INTEGER NOT NULL DEFAULT 0, title TEXT NOT NULL DEFAULT '', body TEXT NOT NULL DEFAULT '', color TEXT, source_ref_id TEXT REFERENCES source_refs(id), version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT) STRICT;
+      CREATE TABLE edges (id TEXT PRIMARY KEY, board_id TEXT NOT NULL REFERENCES boards(id), source_node_id TEXT NOT NULL REFERENCES nodes(id), target_node_id TEXT NOT NULL REFERENCES nodes(id), relation TEXT NOT NULL, label TEXT NOT NULL DEFAULT '', origin TEXT NOT NULL DEFAULT 'manual' CHECK (origin IN ('manual', 'document_map_internal', 'document_map_context', 't3_expand', 'ai_synthesis')), projection_key TEXT, version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT, CHECK (source_node_id <> target_node_id)) STRICT;
+      CREATE TABLE jobs (id TEXT PRIMARY KEY, owner_key TEXT NOT NULL, job_type TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'queued', progress INTEGER NOT NULL DEFAULT 0, total INTEGER NOT NULL DEFAULT 0, payload_json TEXT, result_json TEXT, error_code TEXT, error_message TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, started_at TEXT, completed_at TEXT) STRICT;
+      CREATE TABLE inbox_entries (id TEXT PRIMARY KEY, owner_key TEXT NOT NULL, library_type TEXT NOT NULL, library_id TEXT NOT NULL, item_key TEXT NOT NULL, attachment_key TEXT, attachment_version INTEGER, detected_from TEXT NOT NULL DEFAULT 'scan', title TEXT NOT NULL, clean_title TEXT, institution TEXT, doi TEXT, year TEXT, creators_json TEXT NOT NULL DEFAULT '[]', abstract_note TEXT NOT NULL DEFAULT '', tags_json TEXT NOT NULL DEFAULT '[]', state TEXT NOT NULL DEFAULT 'unread', created_at TEXT NOT NULL, updated_at TEXT NOT NULL) STRICT;
+
+      INSERT INTO workspaces (id, owner_key, name, created_at, updated_at) VALUES ('ws-v11', '${actor}', 'V11 Workspace', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
+      INSERT INTO boards (id, workspace_id, name, created_at, updated_at) VALUES ('board-v11', 'ws-v11', 'V11 Board', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
+      INSERT INTO nodes (id, board_id, node_type, x, y, width, height, created_at, updated_at) VALUES ('n1-v11', 'board-v11', 'manual_note', 0, 0, 100, 100, '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
+      INSERT INTO nodes (id, board_id, node_type, x, y, width, height, created_at, updated_at) VALUES ('n2-v11', 'board-v11', 'manual_note', 200, 0, 100, 100, '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
+      INSERT INTO edges (id, board_id, source_node_id, target_node_id, relation, origin, created_at, updated_at) VALUES ('e1-v11', 'board-v11', 'n1-v11', 'n2-v11', 'supports', 'manual', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
+      INSERT INTO jobs (id, owner_key, job_type, payload_json, created_at, updated_at) VALUES ('job-v11', '${actor}', 'import_document', '{"libraryType":"user","libraryId":"42"}', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
+    `);
+    rawV11.close();
+
+    const migratedV11Store = new CanvasStore(v11LineageDbPath);
+    const maxV11 = migratedV11Store.db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v;
+    assert.equal(maxV11, 12, 'V11 DB must upgrade to schema v12');
+
+    // Verify existing v11 data preserved
+    assert.equal(migratedV11Store.getWorkspace(actor, 'ws-v11').name, 'V11 Workspace');
+    assert.equal(migratedV11Store.getEdge(actor, 'e1-v11').origin, 'manual');
+    const job = migratedV11Store.getJob(actor, 'job-v11');
+    assert.equal(job.payload.libraryType, 'user');
+
+    // Verify native tables created and usable
+    const nativeDoc = migratedV11Store.createDocument(actor, { title: 'Native Doc in Migrated V11' });
+    assert.equal(nativeDoc.title, 'Native Doc in Migrated V11');
+
+    migratedV11Store.close();
+  } finally {
+    fs.rmSync(v11LineageDir, { recursive: true, force: true });
+  }
+
+  // --- Lineage Test 3: Native v10 DB -> v12 ---
+  const nativeV10Dir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-native-v10-lineage-test-'));
+  const nativeV10DbPath = path.join(nativeV10Dir, 'canvas-native-v10.sqlite');
+  try {
+    const rawNativeV10 = new DatabaseSync(nativeV10DbPath);
+    rawNativeV10.exec(`
+      CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL) STRICT;
+      INSERT INTO schema_migrations (version, applied_at) VALUES (1, '2026-08-30T00:00:00.000Z');
+      INSERT INTO schema_migrations (version, applied_at) VALUES (10, '2026-08-31T00:00:00.000Z');
+
+      CREATE TABLE users (id TEXT PRIMARY KEY, username TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, password_salt TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'admin', created_at TEXT NOT NULL, updated_at TEXT NOT NULL) STRICT;
+      CREATE TABLE blobs (sha256 TEXT PRIMARY KEY, relative_path TEXT NOT NULL, size_bytes INTEGER NOT NULL, mime_type TEXT NOT NULL, created_at TEXT NOT NULL, reference_count INTEGER NOT NULL DEFAULT 1) STRICT;
+      CREATE TABLE documents (id TEXT PRIMARY KEY, owner_key TEXT NOT NULL, item_type TEXT NOT NULL DEFAULT 'journalArticle', title TEXT NOT NULL, abstract TEXT NOT NULL DEFAULT '', publication_title TEXT NOT NULL DEFAULT '', publisher TEXT NOT NULL DEFAULT '', date TEXT NOT NULL DEFAULT '', year INTEGER, doi TEXT, isbn TEXT, url TEXT, language TEXT NOT NULL DEFAULT '', rights TEXT NOT NULL DEFAULT '', extra_json TEXT NOT NULL DEFAULT '{}', version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT) STRICT;
+      CREATE TABLE attachments (id TEXT PRIMARY KEY, document_id TEXT NOT NULL REFERENCES documents(id), blob_hash TEXT NOT NULL REFERENCES blobs(sha256), mime_type TEXT NOT NULL DEFAULT 'application/pdf', original_filename TEXT NOT NULL DEFAULT '', title TEXT NOT NULL DEFAULT '', source_url TEXT, size_bytes INTEGER NOT NULL DEFAULT 0, page_count INTEGER, version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT) STRICT;
+      CREATE TABLE annotations (id TEXT PRIMARY KEY, attachment_id TEXT NOT NULL REFERENCES attachments(id), annotation_type TEXT NOT NULL DEFAULT 'highlight', page_label TEXT NOT NULL DEFAULT '', position_json TEXT NOT NULL DEFAULT '{}', quote TEXT NOT NULL DEFAULT '', comment TEXT NOT NULL DEFAULT '', color TEXT NOT NULL DEFAULT '#ffd400', sort_index INTEGER NOT NULL DEFAULT 0, version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT) STRICT;
+      CREATE TABLE workspaces (id TEXT PRIMARY KEY, owner_key TEXT NOT NULL, name TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 1, description TEXT NOT NULL DEFAULT '', research_question TEXT NOT NULL DEFAULT '', inclusion_rules TEXT NOT NULL DEFAULT '', exclusion_rules TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT) STRICT;
+      CREATE TABLE boards (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES workspaces(id), name TEXT NOT NULL, viewport_x REAL NOT NULL DEFAULT 0, viewport_y REAL NOT NULL DEFAULT 0, viewport_zoom REAL NOT NULL DEFAULT 1, version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT) STRICT;
+      CREATE TABLE nodes (id TEXT PRIMARY KEY, board_id TEXT NOT NULL REFERENCES boards(id), node_type TEXT NOT NULL, x REAL NOT NULL, y REAL NOT NULL, width REAL NOT NULL, height REAL NOT NULL, z_index INTEGER NOT NULL DEFAULT 0, title TEXT NOT NULL DEFAULT '', body TEXT NOT NULL DEFAULT '', color TEXT, source_ref_id TEXT, version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT) STRICT;
+      CREATE TABLE edges (id TEXT PRIMARY KEY, board_id TEXT NOT NULL REFERENCES boards(id), source_node_id TEXT NOT NULL REFERENCES nodes(id), target_node_id TEXT NOT NULL REFERENCES nodes(id), relation TEXT NOT NULL, label TEXT NOT NULL DEFAULT '', version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT) STRICT;
+      CREATE TABLE jobs (id TEXT PRIMARY KEY, owner_key TEXT NOT NULL, job_type TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'queued', progress INTEGER NOT NULL DEFAULT 0, total INTEGER NOT NULL DEFAULT 0, result_json TEXT, error_code TEXT, error_message TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, started_at TEXT, completed_at TEXT) STRICT;
+      CREATE TABLE inbox_entries (id TEXT PRIMARY KEY, owner_key TEXT NOT NULL, library_type TEXT NOT NULL, library_id TEXT NOT NULL, item_key TEXT NOT NULL, attachment_key TEXT, detected_from TEXT NOT NULL DEFAULT 'scan', title TEXT NOT NULL, year TEXT, creators_json TEXT NOT NULL DEFAULT '[]', abstract_note TEXT NOT NULL DEFAULT '', tags_json TEXT NOT NULL DEFAULT '[]', state TEXT NOT NULL DEFAULT 'unread', created_at TEXT NOT NULL, updated_at TEXT NOT NULL) STRICT;
+
+      INSERT INTO users (id, username, password_hash, password_salt, role, created_at, updated_at) VALUES ('u-native-v10', 'native_admin', 'hash', 'salt', 'admin', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
+      INSERT INTO blobs (sha256, relative_path, size_bytes, mime_type, created_at, reference_count) VALUES ('blobhash123', 'sha256/bl/ob/blobhash123.pdf', 1024, 'application/pdf', '2026-08-31T00:00:00.000Z', 1);
+      INSERT INTO documents (id, owner_key, title, created_at, updated_at) VALUES ('doc-native-v10', '${actor}', 'Native V10 Document', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
+      INSERT INTO attachments (id, document_id, blob_hash, original_filename, created_at, updated_at) VALUES ('att-native-v10', 'doc-native-v10', 'blobhash123', 'paper.pdf', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
+      INSERT INTO annotations (id, attachment_id, quote, created_at, updated_at) VALUES ('ann-native-v10', 'att-native-v10', 'Native Annotation Quote', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
+      INSERT INTO workspaces (id, owner_key, name, created_at, updated_at) VALUES ('ws-native-v10', '${actor}', 'Native V10 Workspace', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
+      INSERT INTO boards (id, workspace_id, name, created_at, updated_at) VALUES ('board-native-v10', 'ws-native-v10', 'Native Board', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
+      INSERT INTO nodes (id, board_id, node_type, x, y, width, height, created_at, updated_at) VALUES ('n1-native', 'board-native-v10', 'manual_note', 0, 0, 100, 100, '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
+      INSERT INTO nodes (id, board_id, node_type, x, y, width, height, created_at, updated_at) VALUES ('n2-native', 'board-native-v10', 'manual_note', 200, 0, 100, 100, '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
+      INSERT INTO edges (id, board_id, source_node_id, target_node_id, relation, label, created_at, updated_at) VALUES ('e1-native', 'board-native-v10', 'n1-native', 'n2-native', 'supports', 'Native Edge', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
+    `);
+    rawNativeV10.close();
+
+    const migratedNativeStore = new CanvasStore(nativeV10DbPath);
+    const maxNativeV10 = migratedNativeStore.db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v;
+    assert.equal(maxNativeV10, 12, 'Native V10 DB must upgrade to schema v12');
+
+    // Verify native data preserved
+    assert.equal(migratedNativeStore.getDocument(actor, 'doc-native-v10').title, 'Native V10 Document');
+    assert.equal(migratedNativeStore.getAttachment(actor, 'att-native-v10').blobHash, 'blobhash123');
+    assert.equal(migratedNativeStore.getAnnotation(actor, 'ann-native-v10').quote, 'Native Annotation Quote');
+
+    // Verify edges migrated to v11/v12 model with default origin manual
+    const edge = migratedNativeStore.getEdge(actor, 'e1-native');
+    assert.equal(edge.origin, 'manual');
+
+    // Verify missing columns added
+    const jobCols = migratedNativeStore.db.prepare('PRAGMA table_info(jobs)').all().map(c => c.name);
+    assert.ok(jobCols.includes('payload_json'), 'jobs table must include payload_json');
+
+    const inboxCols = migratedNativeStore.db.prepare('PRAGMA table_info(inbox_entries)').all().map(c => c.name);
+    assert.ok(inboxCols.includes('doi'), 'inbox_entries table must include doi');
+    assert.ok(inboxCols.includes('attachment_version'), 'inbox_entries table must include attachment_version');
+
+    migratedNativeStore.close();
+  } finally {
+    fs.rmSync(nativeV10Dir, { recursive: true, force: true });
+  }
+
+  // --- Lineage Test 4: Repeated startup on v12 DB (Idempotency) ---
+  const v12IdemDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-v12-idem-test-'));
+  const v12IdemDbPath = path.join(v12IdemDir, 'canvas-v12.sqlite');
+  try {
+    const store1 = new CanvasStore(v12IdemDbPath);
+    const v1 = store1.db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v;
+    const migCount1 = store1.db.prepare('SELECT COUNT(*) AS c FROM schema_migrations').get().c;
+    assert.equal(v1, 12);
+    store1.createUser({ username: 'idem_user', password: 'Password123!' });
+    store1.createWorkspace(actor, { name: 'Idempotency Workspace' });
+    store1.close();
+
+    // Reopen store on same file
+    const store2 = new CanvasStore(v12IdemDbPath);
+    const v2 = store2.db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v;
+    const migCount2 = store2.db.prepare('SELECT COUNT(*) AS c FROM schema_migrations').get().c;
+    assert.equal(v2, 12, 'Version must remain 12 after restart');
+    assert.equal(migCount2, migCount1, 'Migrations count must remain identical');
+    assert.ok(store2.hasUsers());
+    assert.equal(store2.listWorkspaces(actor).length, 1);
+    store2.close();
+  } finally {
+    fs.rmSync(v12IdemDir, { recursive: true, force: true });
+  }
+
+  // --- Schema v12: Topics, Topic Documents, Collection Bindings, Inbox, Jobs, Document Analyses, Document Metas, Knowledge Units & Relations, Edge Origins, Native Core ---
   const currentMigration = store.db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v;
-  assert.equal(currentMigration, 11, 'Schema migration version 11 must be applied');
+  assert.equal(currentMigration, 12, 'Schema migration version 12 must be applied');
 
   // Topic workspace with metadata
   const topic1 = store.createWorkspace(actor, {

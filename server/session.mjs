@@ -180,7 +180,7 @@ export function clearSessionCookie(res, req) {
 /**
  * Create a new user session
  */
-export function createSession({ userId, subject, username, displayName, accessToken, refreshToken, expiresAt, scopes = [], alteroApi, issuer, groupIds = [] }) {
+export function createSession({ userId, subject, username, displayName, role, authMode, actorKey, accessToken, refreshToken, expiresAt, scopes = [], alteroApi, issuer, groupIds = [] }) {
   const sessionId = generateRandomToken(32);
   const sessionHash = hash(sessionId);
   const now = Date.now();
@@ -190,6 +190,9 @@ export function createSession({ userId, subject, username, displayName, accessTo
     subject: subject || null,
     username: username || String(userId),
     displayName: displayName || username || `User ${userId}`,
+    role: role || 'admin',
+    authMode: authMode || 'altero',
+    actorKey: actorKey || null,
     accessToken,
     refreshToken,
     tokenExpiresAt: expiresAt || now + 3600 * 1000,
