@@ -2510,7 +2510,10 @@
         let rawAnnotations = [];
         if (isNativeDoc || pdfAttachment.isNative) {
           const annRes = await fetch(`/canvas/native/attachments/${encodeURIComponent(pdfAttachment.key)}/annotations`, { signal });
-          const annJson = annRes.ok ? await annRes.json() : { data: [] };
+          if (!annRes.ok) {
+            throw new Error(`获取批注列表失败 (HTTP ${annRes.status})`);
+          }
+          const annJson = await annRes.json();
           rawAnnotations = (annJson.data || []).map(a => ({
             key: a.id,
             version: a.version,
@@ -2529,8 +2532,11 @@
         } else {
           const annUrl = getApiUrl(`${documentLibraryPrefix}/items/${encodeURIComponent(pdfAttachment.key)}/children`);
           const annRes = await fetch(annUrl, { headers: getHeaders(), signal });
-          const annChildren = annRes.ok ? await annRes.json() : [];
-          rawAnnotations = annChildren.filter(c => c.data?.itemType === 'annotation');
+          if (!annRes.ok) {
+            throw new Error(`获取批注列表失败 (HTTP ${annRes.status})`);
+          }
+          const annChildren = await annRes.json();
+          rawAnnotations = (Array.isArray(annChildren) ? annChildren : []).filter(c => c.data?.itemType === 'annotation');
         }
         if (requestId !== openRequestId) return;
 

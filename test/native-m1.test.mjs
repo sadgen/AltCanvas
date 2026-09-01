@@ -594,6 +594,35 @@ try {
   });
   assert.equal(malformedHeaderRes.statusCode, 201, 'Malformed x-filename must fallback safely and complete upload');
 
+  // 16. [P1 Regression] Multipart FormData upload with trailing fields fragmented across tiny chunks
+  const thirdTopic = store.createWorkspace(adminActorKey, { name: 'Third Topic Workspace' });
+  const boundary = '----WebKitFormBoundary7MA4YWxkTrZu0gW';
+  const multipartBody = Buffer.concat([
+    Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="fragmented.pdf"\r\nContent-Type: application/pdf\r\n\r\n`),
+    Buffer.from('%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n% multipart-fragmented-pdf'),
+    Buffer.from(`\r\n--${boundary}\r\nContent-Disposition: form-data; name="targetWorkspaceId"\r\n\r\n${thirdTopic.id}\r\n`),
+    Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="forceNew"\r\n\r\ntrue\r\n`),
+    Buffer.from(`--${boundary}--\r\n`)
+  ]);
+
+  // Fragment the payload into tiny 16-byte chunks to test cross-chunk boundary & field parsing
+  const tinyChunks = [];
+  for (let i = 0; i < multipartBody.length; i += 16) {
+    tinyChunks.push(multipartBody.subarray(i, Math.min(multipartBody.length, i + 16)));
+  }
+
+  const fragmentedRes = await call(handler, '/canvas/native/upload', {
+    method: 'POST',
+    cookie: newCookie,
+    headers: {
+      'content-type': `multipart/form-data; boundary=${boundary}`
+    },
+    streamChunks: tinyChunks
+  });
+  assert.equal(fragmentedRes.statusCode, 201, 'Multipart upload split across tiny chunks must parse successfully');
+  assert.ok(fragmentedRes.payload.data.topicDocument, 'Trailing targetWorkspaceId in fragmented multipart must associate topic');
+  assert.equal(fragmentedRes.payload.data.topicDocument.workspaceId, thirdTopic.id);
+
   // 10. Persistence across Store & Process Restart & [P1 Regression] Blob Reference Count on Delete
   store.close();
   const reopenedStore = new CanvasStore(dbPath);

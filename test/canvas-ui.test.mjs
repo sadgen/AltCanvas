@@ -413,6 +413,53 @@ assert.match(html, /throw new Error\('Native library does not support Zotero API
   );
 
   assert.equal(annotationsMap.has('ann-OLD'), false, 'In-flight response for old document must not overwrite active annotations map');
+
+  // 4. Test openItem error handling on initial annotation fetch failure (HTTP 500)
+  let readerPlaceholderTitle = '';
+  let toastErrorShown = '';
+  const mockOpenItemDom = {
+    'current-doc-title': { textContent: '' },
+    'btn-doc-edit-title': { classList: { remove: () => {} } },
+    'btn-doc-ai-title': { classList: { remove: () => {} } },
+    'reader-loading': { classList: { remove: () => {}, add: () => {} } },
+    'reader-loading-text': { textContent: '' },
+    'reader-placeholder': { classList: { remove: () => {}, add: () => {} } },
+    'reader-wrapper': { classList: { remove: () => {}, add: () => {} } },
+    'reader-placeholder-title': { set textContent(val) { readerPlaceholderTitle = val; }, get textContent() { return readerPlaceholderTitle; } },
+    'reader-placeholder-subtitle': { textContent: '' }
+  };
+
+  const openItemFnMatch = html.match(/async function openItem\(item, libraryContext = null\) \{([\s\S]*?)\n    \}/);
+  assert.ok(openItemFnMatch, 'openItem definition must exist');
+
+  const openItemRunner = new Function(
+    'openRequestId', 'documentController', 'currentItem', 'currentReaderInstance', 'updateCanvasAiToolbar',
+    'currentDocumentLibrary', 'normalizeLibraryContext', 'libraryApiPrefix', 'renderItems', 'mobileMedia', 'setMobilePane',
+    'config', 'documentMetas', 'docMetaKey', 'document', 'fetch', 'getApiUrl', 'getHeaders', 'showToast',
+    'currentAttachment', 'currentAnnotationsMap', 'clientAnnotationIdMap', 'getAnnotationPosition', 'getAnnotationPageIndex',
+    'cleanAnnotationText', 'renderAnnotationCards', 'initReaderEngine', 'reportApplicationError', 'errorMessage',
+    'item', 'libraryContext',
+    `return (async () => { ${openItemFnMatch[1]} })();`
+  );
+
+  await openItemRunner(
+    0, null, null, null, () => {},
+    null, s => s, () => '/users/0', () => {}, { matches: false }, () => {},
+    { userId: '42' }, new Map(), () => '',
+    { getElementById: id => mockOpenItemDom[id] || { textContent: '', classList: { add: () => {}, remove: () => {} } } },
+    async (url) => {
+      if (url.includes('/annotations')) return { ok: false, status: 500 };
+      return { ok: true, json: async () => ({}) };
+    },
+    s => s, () => ({}), (msg) => { toastErrorShown = msg; },
+    null, new Map(), new Map(), () => ({}), () => 0,
+    s => s, () => {}, async () => {}, () => {}, err => err.message,
+    { key: 'doc-1', isNative: true, children: [{ key: 'att-1', data: { contentType: 'application/pdf' }, isNative: true }] },
+    { libraryType: 'native', libraryId: 'local' }
+  );
+
+  assert.equal(readerPlaceholderTitle, 'PDF 加载失败', 'Annotation fetch failure on initial open must trigger error state');
+  assert.match(toastErrorShown, /500/, 'Toast must report actual error status');
 }
 
 assert.match(html, /function isSameLibrary\(/,

@@ -90,6 +90,7 @@ async function streamUploadToFile(req, targetDir, maxBytes = MAX_UPLOAD_BYTES) {
 
       let state = 'SEEK_BOUNDARY';
       let buffer = Buffer.alloc(0);
+      let currentFieldName = null;
 
       for await (const chunk of req) {
         totalBytes += chunk.length;
@@ -124,17 +125,19 @@ async function streamUploadToFile(req, targetDir, maxBytes = MAX_UPLOAD_BYTES) {
               state = 'FILE_DATA';
             } else {
               const nameMatch = /name=["']?([^"';\r\n]+)["']?/i.exec(headerStr);
-              const fieldName = nameMatch ? nameMatch[1] : '';
-              const nextBoundaryIdx = buffer.indexOf(boundaryBuffer);
-              if (nextBoundaryIdx !== -1) {
-                const fieldValue = buffer.slice(0, Math.max(0, nextBoundaryIdx - 2)).toString('utf8');
-                if (fieldName === 'targetWorkspaceId') targetWorkspaceId = fieldValue.trim();
-                if (fieldName === 'forceNew') forceNew = fieldValue.trim() === 'true';
-                buffer = buffer.slice(nextBoundaryIdx + boundaryBuffer.length);
-                state = 'HEADERS';
-              } else {
-                break;
-              }
+              currentFieldName = nameMatch ? nameMatch[1] : '';
+              state = 'FIELD_DATA';
+            }
+          } else if (state === 'FIELD_DATA') {
+            const nextBoundaryIdx = buffer.indexOf(boundaryBuffer);
+            if (nextBoundaryIdx === -1) {
+              break;
+            } else {
+              const fieldValue = buffer.slice(0, Math.max(0, nextBoundaryIdx - 2)).toString('utf8');
+              if (currentFieldName === 'targetWorkspaceId') targetWorkspaceId = fieldValue.trim();
+              if (currentFieldName === 'forceNew') forceNew = fieldValue.trim() === 'true';
+              buffer = buffer.slice(nextBoundaryIdx + boundaryBuffer.length);
+              state = 'HEADERS';
             }
           } else if (state === 'FILE_DATA') {
             const nextBoundaryIdx = buffer.indexOf(boundaryBuffer);
