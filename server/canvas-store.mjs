@@ -813,6 +813,12 @@ function ensureAllIndexes(db) {
   }
   if (tableExists('knowledge_relations')) {
     db.exec(`
+      DELETE FROM knowledge_relations
+      WHERE rowid NOT IN (
+        SELECT MAX(rowid)
+        FROM knowledge_relations
+        GROUP BY source_unit_id, target_unit_id, relation_type
+      );
       CREATE INDEX IF NOT EXISTS knowledge_relations_source_idx ON knowledge_relations(owner_key, source_unit_id, status);
       CREATE INDEX IF NOT EXISTS knowledge_relations_target_idx ON knowledge_relations(owner_key, target_unit_id, status);
       CREATE UNIQUE INDEX IF NOT EXISTS knowledge_relations_pair_idx ON knowledge_relations(source_unit_id, target_unit_id, relation_type);

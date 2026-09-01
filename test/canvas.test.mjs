@@ -1565,19 +1565,19 @@ try {
       CREATE INDEX knowledge_units_owner_item_idx ON knowledge_units(owner_key, library_type, library_id, item_key);
       CREATE INDEX knowledge_units_analysis_idx ON knowledge_units(owner_key, analysis_id);
 
+      -- Genuine v11 knowledge_relations without unique constraint on pair
       CREATE TABLE knowledge_relations (
         id TEXT PRIMARY KEY, owner_key TEXT NOT NULL,
         source_unit_id TEXT NOT NULL REFERENCES knowledge_units(id) ON DELETE CASCADE,
         target_unit_id TEXT NOT NULL REFERENCES knowledge_units(id) ON DELETE CASCADE,
-        relation_type TEXT NOT NULL CHECK (relation_type IN ('supports', 'contradicts', 'extends', 'context_difference')),
-        confidence REAL NOT NULL DEFAULT 1.0, reason TEXT NOT NULL DEFAULT '',
-        status TEXT NOT NULL DEFAULT 'suggested' CHECK (status IN ('suggested', 'accepted', 'rejected', 'dismissed')),
-        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        relation_type TEXT NOT NULL CHECK (relation_type IN ('supports', 'contradicts', 'extends', 'same_method', 'context_differs', 'related')),
+        confidence REAL NOT NULL DEFAULT 0.5, reason TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'suggested' CHECK (status IN ('suggested', 'confirmed', 'rejected')),
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        CHECK (source_unit_id <> target_unit_id)
       ) STRICT;
       CREATE INDEX knowledge_relations_source_idx ON knowledge_relations(owner_key, source_unit_id, status);
       CREATE INDEX knowledge_relations_target_idx ON knowledge_relations(owner_key, target_unit_id, status);
-      CREATE UNIQUE INDEX knowledge_relations_pair_idx ON knowledge_relations(source_unit_id, target_unit_id, relation_type);
-      CREATE INDEX knowledge_relations_owner_idx ON knowledge_relations(owner_key, status, updated_at);
 
       -- Insert representative baseline v11 data including MULTIPLE historical soft-deleted records for same item
       INSERT INTO workspaces (id, owner_key, name, created_at, updated_at) VALUES ('ws-v11', '${actor}', 'V11 Workspace', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
@@ -1602,7 +1602,10 @@ try {
       INSERT INTO document_metas (id, owner_key, library_type, library_id, item_key, clean_title, doi, created_at, updated_at) VALUES ('meta-v11-1', '${actor}', 'user', '42', 'ITEM_V11', 'Clean Title V11', '10.1000/v11doi', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
       INSERT INTO knowledge_units (id, owner_key, analysis_id, type, library_type, library_id, item_key, title, evidence_page, created_at, updated_at) VALUES ('ku-v11-1', '${actor}', 'ana-v11-1', 'overview', 'user', '42', 'ITEM_V11', 'Overview Unit', 3, '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
       INSERT INTO knowledge_units (id, owner_key, analysis_id, type, library_type, library_id, item_key, title, evidence_page, created_at, updated_at) VALUES ('ku-v11-2', '${actor}', 'ana-v11-1', 'claim', 'user', '42', 'ITEM_V11', 'Claim Unit', 4, '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
-      INSERT INTO knowledge_relations (id, owner_key, source_unit_id, target_unit_id, relation_type, created_at, updated_at) VALUES ('kr-v11-1', '${actor}', 'ku-v11-1', 'ku-v11-2', 'supports', '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
+
+      -- Insert DUPLICATE relations triples (valid in genuine v11, must be deduplicated deterministically by v12 migration)
+      INSERT INTO knowledge_relations (id, owner_key, source_unit_id, target_unit_id, relation_type, confidence, created_at, updated_at) VALUES ('kr-v11-dup1', '${actor}', 'ku-v11-1', 'ku-v11-2', 'supports', 0.8, '2026-08-30T00:00:00.000Z', '2026-08-30T00:00:00.000Z');
+      INSERT INTO knowledge_relations (id, owner_key, source_unit_id, target_unit_id, relation_type, confidence, created_at, updated_at) VALUES ('kr-v11-dup2', '${actor}', 'ku-v11-1', 'ku-v11-2', 'supports', 0.95, '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z');
     `);
     rawV11.close();
 
@@ -1643,6 +1646,11 @@ try {
     assert.equal(migratedV11Store.getDocumentMeta(actor, { libraryType: 'user', libraryId: '42', itemKey: 'ITEM_V11' }).cleanTitle, 'Clean Title V11');
     assert.equal(migratedV11Store.getKnowledgeUnit(actor, 'ku-v11-1').evidencePage, 3);
     assert.equal(migratedV11Store.getJob(actor, 'job-v11').payload.libraryType, 'user');
+
+    // Assert duplicate relations were deduplicated deterministically
+    const rels = migratedV11Store.db.prepare('SELECT * FROM knowledge_relations WHERE source_unit_id = ? AND target_unit_id = ?').all('ku-v11-1', 'ku-v11-2');
+    assert.equal(rels.length, 1, 'Duplicate knowledge relation triples must be deduplicated to 1 record');
+    assert.equal(rels[0].confidence, 0.95, 'Latest relation record must be retained during deduplication');
 
     // 4. Assert partial unique constraint behavior: active duplicate rejected, soft-deleted allowed
     assert.throws(() => {
