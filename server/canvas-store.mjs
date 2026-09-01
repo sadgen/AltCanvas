@@ -2773,6 +2773,89 @@ export class CanvasStore {
 
   // --- Blobs Storage ---
 
+  importNativeUploadedDocument(actorKey, {
+    sha256,
+    relativePath,
+    sizeBytes,
+    mimeType = 'application/pdf',
+    originalFilename = 'document.pdf',
+    targetWorkspaceId = null,
+    forceNew = false
+  }) {
+    return this.transaction(() => {
+      // 1. Check duplicate document for this owner first
+      const existingDoc = this.findDocumentByBlobHash(actorKey, sha256);
+      if (existingDoc && !forceNew) {
+        const blob = this.getBlob(sha256);
+        return {
+          duplicate: true,
+          document: existingDoc,
+          attachment: existingDoc.attachments?.[0] || null,
+          blob
+        };
+      }
+
+      // 2. Blob insertion or reference increment only when actually creating a new attachment
+      const blob = this.upsertBlob({ sha256, relativePath, sizeBytes, mimeType });
+
+      // 3. Document Creation
+      let cleanTitle = originalFilename.replace(/\.pdf$/i, '').trim();
+      try { cleanTitle = decodeURIComponent(cleanTitle); } catch {}
+      if (!cleanTitle) cleanTitle = '未命名文献';
+
+      const document = this.createDocument(actorKey, {
+        title: cleanTitle,
+        itemType: 'journalArticle'
+      });
+
+      // 4. Attachment Creation
+      const attachment = this.createAttachment(actorKey, document.id, {
+        blobHash: sha256,
+        mimeType,
+        originalFilename,
+        title: cleanTitle,
+        sizeBytes
+      });
+
+      // 5. Inbox Entry Registration
+      this.upsertInboxEntries(actorKey, [{
+        libraryType: 'native',
+        libraryId: 'local',
+        itemKey: document.id,
+        attachmentKey: attachment.id,
+        detectedFrom: 'native_upload',
+        title: cleanTitle,
+        year: null,
+        abstractNote: '',
+        tags: []
+      }]);
+
+      // 6. Optional Topic Document association
+      let topicDoc = null;
+      if (targetWorkspaceId) {
+        try {
+          topicDoc = this.addTopicDocument(actorKey, targetWorkspaceId, {
+            libraryType: 'native',
+            libraryId: 'local',
+            itemKey: document.id,
+            attachmentKey: attachment.id,
+            status: 'accepted',
+            origin: 'native_upload'
+          });
+        } catch {}
+      }
+
+      const fullDoc = this.getDocument(actorKey, document.id);
+      return {
+        duplicate: false,
+        document: fullDoc,
+        attachment,
+        blob,
+        topicDocument: topicDoc
+      };
+    });
+  }
+
   getBlobStorageDir() {
     const dataDir = path.dirname(this.dbPath);
     const blobDir = path.join(dataDir, 'blobs');
@@ -2955,7 +3038,7 @@ export class CanvasStore {
             INSERT INTO document_creators
               (id, document_id, position, creator_type, first_name, last_name, name)
             VALUES (?, ?, ?, ?, ?, ?, ?)
-          `).run(id(), docId, idx, c.creatorType || 'author', c.firstName || '', c.lastName || '', c.name || '');
+          `).run(id(), documentId, idx, c.creatorType || 'author', c.firstName || '', c.lastName || '', c.name || '');
         });
       }
     });
@@ -2973,6 +3056,12 @@ export class CanvasStore {
         UPDATE documents SET deleted_at = ?, version = version + 1, updated_at = ?
         WHERE id = ? AND owner_key = ? AND deleted_at IS NULL
       `).run(timestamp, timestamp, documentId, actorKey);
+
+      const atts = this.db.prepare('SELECT blob_hash FROM attachments WHERE document_id = ? AND deleted_at IS NULL').all(documentId);
+      for (const att of atts) {
+        if (att.blob_hash) this.decrementBlobRef(att.blob_hash);
+      }
+
       this.db.prepare(`
         UPDATE attachments SET deleted_at = ?, version = version + 1, updated_at = ?
         WHERE document_id = ? AND deleted_at IS NULL
@@ -3092,10 +3181,15 @@ export class CanvasStore {
       throw new CanvasConflictError('Attachment version conflict');
     }
     const timestamp = nowIso();
-    this.db.prepare(`
-      UPDATE attachments SET deleted_at = ?, version = version + 1, updated_at = ?
-      WHERE id = ? AND deleted_at IS NULL
-    `).run(timestamp, timestamp, attachmentId);
+    this.transaction(() => {
+      if (current.blobHash) {
+        this.decrementBlobRef(current.blobHash);
+      }
+      this.db.prepare(`
+        UPDATE attachments SET deleted_at = ?, version = version + 1, updated_at = ?
+        WHERE id = ? AND deleted_at IS NULL
+      `).run(timestamp, timestamp, attachmentId);
+    });
   }
 
   // --- Annotations ---
@@ -3208,7 +3302,7 @@ export class CanvasStore {
       WHERE an.id = ? AND d.owner_key = ?
     `).get(annotationId, actorKey);
     if (!row) throw new CanvasNotFoundError('Annotation not found');
-    if (expectedVersion !== undefined && expectedVersion !== null && row.version !== expectedVersion) {
+    if (expectedVersion === undefined || expectedVersion === null || row.version !== expectedVersion) {
       throw new CanvasConflictError('Annotation version conflict');
     }
     const timestamp = nowIso();

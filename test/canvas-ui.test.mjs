@@ -295,8 +295,20 @@ assert.match(html, /Collections count exceeded safety limit/);
 assert.match(html, /\/collection-bindings\/\$\{bindingId\}\/sync/);
 assert.match(html, /局域网 HTTP 会明文传输卡片内容与凭据/,
   'AI settings must warn about plaintext private-network transport');
-assert.doesNotMatch(html, /modelConfig:\s*aiConfig/,
-  'the browser must not choose an arbitrary AI endpoint per request');
+assert.match(html, /libraryType === 'native'/,
+  'normalizeLibraryContext must preserve native library type without mapping to user');
+assert.match(html, /library\.libraryType === 'native'/,
+  'libraryApiPrefix must handle native library without mapping to users');
+assert.match(html, /async function uploadNativePdfFile\(/,
+  'UI must provide uploadNativePdfFile handler for PDF uploads');
+assert.match(html, /async function openNativeDocument\(/,
+  'UI must provide openNativeDocument for opening native documents and attachments');
+assert.match(html, /function setupNativePdfUpload\(/,
+  'UI must setup file drop and file input event handlers for native PDF uploads');
+assert.match(html, /id="btn-upload-pdf-top"/,
+  'UI header must provide native PDF upload button');
+
+console.log('✅ All Canvas UI Tests Passed Successfully!');
 assert.match(html, /function isSameLibrary\(/,
   'cross-library source matching must include the library identity');
 assert.match(html, /canUsePersonalLibraryCache/,

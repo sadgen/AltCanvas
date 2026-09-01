@@ -1343,6 +1343,9 @@
     }
 
     function normalizeLibraryContext(sourceRef = null) {
+      if (sourceRef?.libraryType === 'native' || sourceRef?.isNative) {
+        return { libraryType: 'native', libraryId: String(sourceRef?.libraryId || 'local') };
+      }
       const libraryType = sourceRef?.libraryType === 'group' ? 'group' : 'user';
       const libraryId = String(sourceRef?.libraryId || config.userId || '');
       return { libraryType, libraryId };
@@ -1350,6 +1353,9 @@
 
     function libraryApiPrefix(sourceRef = null) {
       const library = normalizeLibraryContext(sourceRef);
+      if (library.libraryType === 'native') {
+        return `/native/${encodeURIComponent(library.libraryId)}`;
+      }
       const segment = library.libraryType === 'group' ? 'groups' : 'users';
       return `/${segment}/${encodeURIComponent(library.libraryId)}`;
     }
@@ -2804,9 +2810,13 @@
                   data: item.data
                 });
                 if (item.annotation) void autoTranslatePdfAnnotation(item.annotation);
+              } else {
+                const errJson = await res.json().catch(() => null);
+                throw new Error(errJson?.error?.message || `HTTP ${res.status}`);
               }
             } catch (e) {
-              console.warn('Native annotation create failed:', e);
+              console.error('Native annotation create failed:', e);
+              showToast(`创建批注失败: ${errorMessage(e)}`, 'error');
             }
           }
         }
@@ -2838,9 +2848,28 @@
                 if (item.clientId && item.clientId !== item.key) {
                   clientAnnotationIdMap.set(item.clientId, item.key);
                 }
+              } else if (res.status === 412) {
+                showToast(`批注 #${item.key} 存在并发冲突，正在刷新...`, 'warning');
+                const latestRes = await fetch(`/canvas/native/annotations/${encodeURIComponent(item.key)}`);
+                if (latestRes.ok) {
+                  const latestJson = await latestRes.json();
+                  currentAnnotationsMap.set(item.key, {
+                    version: latestJson.data.version,
+                    data: {
+                      ...item.data,
+                      annotationText: latestJson.data.quote,
+                      annotationComment: latestJson.data.comment,
+                      annotationColor: latestJson.data.color
+                    }
+                  });
+                }
+              } else {
+                const errJson = await res.json().catch(() => null);
+                throw new Error(errJson?.error?.message || `HTTP ${res.status}`);
               }
             } catch (e) {
-              console.warn('Native annotation update failed:', e);
+              console.error('Native annotation update failed:', e);
+              showToast(`更新批注 #${item.key} 失败: ${errorMessage(e)}`, 'error');
             }
           }
         }
@@ -2961,14 +2990,24 @@
           const record = currentAnnotationsMap.get(serverId) || currentAnnotationsMap.get(rawId);
           const version = record?.version || 1;
           try {
-            await fetch(`/canvas/native/annotations/${encodeURIComponent(serverId)}`, {
+            const res = await fetch(`/canvas/native/annotations/${encodeURIComponent(serverId)}`, {
               method: 'DELETE',
               headers: { 'If-Match': `W/"${version}"` }
             });
-            forgetAnnotation(rawId, serverId);
-            deleted.push(rawId);
+            if (res.status === 204 || res.status === 404) {
+              forgetAnnotation(rawId, serverId);
+              deleted.push(rawId);
+            } else if (res.status === 412) {
+              showToast(`删除批注 #${serverId} 冲突：已被其他操作修改`, 'warning');
+              failed.push(rawId);
+            } else {
+              const errJson = await res.json().catch(() => null);
+              showToast(`删除批注失败: ${errJson?.error?.message || `HTTP ${res.status}`}`, 'error');
+              failed.push(rawId);
+            }
           } catch (err) {
-            console.warn('Native annotation delete failed:', err);
+            console.error('Native annotation delete error:', err);
+            showToast(`删除批注失败: ${errorMessage(err)}`, 'error');
             failed.push(rawId);
           }
         }

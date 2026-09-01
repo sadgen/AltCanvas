@@ -646,16 +646,21 @@
 
 #### 自动化测试覆盖 ([`test/native-m1.test.mjs`](file:///home/sadgen/Projects/AltCanvas-native/test/native-m1.test.mjs))
 - ✅ 1. 无 Altero 环境变量时默认启动为 `AUTH_MODE=local`；
-- ✅ 2. 空库检测 `needsSetup: true`，弱密码拦截，首个管理员创建成功，二次 Setup 400 阻断；
-- ✅ 3. 密码错误 401 拦截，正确密码登录成功，会话 Cookie 签发，登出使会话失效；
-- ✅ 4. 非 PDF 文件上传拦截（400 Bad Request），合法 PDF 流式上传并入库；
-- ✅ 5. 校验 `data/blobs/sha256/` 目录结构与 0600 文件权限，字节逐位比对完全一致；
-- ✅ 6. 重复上传同一 PDF 触发内容去重（0 重复 blob 产生，引用计数正确维护）；
-- ✅ 7. HTTP Range 测试：200 全量流、HEAD 零 body、304 If-None-Match、206 `bytes=0-100`、206 `bytes=100-`、206 `bytes=-50` 后缀、416 越界 Range；
-- ✅ 8. 跨用户数据隔离：User B 访问 User A 的文档、附件文件、批注均严格返回 404；
-- ✅ 9. 原生批注生命周期：创建、读取、PATCH 428/412 并发控制、修改成功、DELETE、RESTORE；
-- ✅ 10. 全文 AI 图谱（`document-map`）基于原生 PDF 成功生成并实例化画板节点；
-- ✅ 11. 数据库关闭并重开后，用户、文献、附件、Blob、批注数据 100% 保真恢复。
+- ✅ 2. [P0 回归] `AUTH_MODE=altero` 模式下直接请求 `/auth/setup` 与 `POST /auth/login` 严格被 403 阻断（`local_auth_disabled`）；
+- ✅ 3. 空库检测 `needsSetup: true`，弱密码拦截，首个管理员创建成功，二次 Setup 400 阻断；
+- ✅ 4. 密码错误 401 拦截，正确密码登录成功，会话 Cookie 签发，登出使会话失效；
+- ✅ 5. 非 PDF 文件上传拦截（400 Bad Request），合法 PDF 流式上传并入库；
+- ✅ 6. 校验 `data/blobs/sha256/` 目录结构与 0600 文件权限，字节逐位比对完全一致；
+- ✅ 7. [P1 回归] 同一用户重复上传相同 PDF，去重且绝不虚增 `reference_count`（保持精准为 1）；
+- ✅ 8. [P1 回归] `updateDocument` 更新作者列表成功（彻底修复 `docId` 未定义引用异常）；
+- ✅ 9. [P1 回归] 删除文献/附件原子扣减对应 Blob 的 `reference_count`；
+- ✅ 10. HTTP Range 测试：200 全量流、HEAD 零 body、304 If-None-Match、206 `bytes=0-100`、206 `bytes=100-`、206 `bytes=-50` 后缀、416 越界 Range；
+- ✅ 11. 跨用户数据隔离：User B 访问 User A 的文档、附件文件、批注均严格返回 404；
+- ✅ 12. 原生批注生命周期：创建、读取、PATCH 428/412 并发控制、修改成功、DELETE、[P2 回归] RESTORE 强制校验 If-Match（缺失返回 428，陈旧返回 412）；
+- ✅ 13. [P1 回归] 前端 `normalizeLibraryContext` 与 `libraryApiPrefix` 完整保留 `native` 文库类型；
+- ✅ 14. [P1 回归] 前端 Native 批注保存/修改/删除检查 HTTP 状态码，412 提示并发冲突并刷新最新版本，删除失败绝不清除本地批注；
+- ✅ 15. 全文 AI 图谱（`document-map`）基于原生 PDF 成功生成并实例化画板节点；
+- ✅ 16. 数据库关闭并重开后，用户、文献、附件、Blob、批注数据 100% 保真恢复。
 
 **完整测试套件运行**：
 `npm test`（7 套测试全部通过）：
@@ -674,7 +679,7 @@
 
 | 里程碑 | 状态 | 说明 |
 |---|---|---|
-| M1 原生 PDF 最小闭环 | **PASS (闭环完成)** | 独立 local 认证、原生上传/哈希去重、Range 文件流服务、Reader 批注持久化、全文理解与证据转批注 |
+| M1 原生 PDF 最小闭环 | **PASS (审计验收通过)** | 独立 local 认证边界加固、原生流式上传/精确引用计数去重、Range 文件流服务、Reader 批注持久化与 412 冲突处理、全文理解与证据转批注 |
 | M2 统一导入管线 | `PENDING` | 下一阶段目标：规范化多源导入（DOI/arXiv/URL/PDF/RIS/BibTeX）与合并策略 |
 | M3 Translation Server 集成 | `PENDING` | 下一阶段目标：内部解析组件集成与 SSRF 安全隔离 |
 | M4 Altero/Zotero 外部迁移器 | `PENDING` | 幂等一次性迁移 |

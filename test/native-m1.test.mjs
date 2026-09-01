@@ -7,7 +7,7 @@ import path from 'path';
 import { CanvasConflictError, CanvasNotFoundError, CanvasStore, canvasActorKey } from '../server/canvas-store.mjs';
 import { createCanvasHandler } from '../server/canvas-api.mjs';
 import { createSession, getSessionIdFromRequest } from '../server/session.mjs';
-import { getAuthMode, handleLocalSetup, handleLocalLogin, handleSession, handleLogout } from '../server/auth.mjs';
+import { getAuthMode, isLocalAuthAllowed, handleLocalSetup, handleLocalLogin, handleSession, handleLogout } from '../server/auth.mjs';
 
 class MockResponse extends EventEmitter {
   constructor() {
@@ -96,16 +96,40 @@ try {
   // 1. Verify default Auth Mode without Altero env is 'local'
   const originalAlteroApi = process.env.ALTERO_API;
   const originalAuthMode = process.env.AUTH_MODE;
+  const originalAllowLocalInAltero = process.env.ALLOW_LOCAL_AUTH_IN_ALTERO;
+
   delete process.env.ALTERO_API;
   delete process.env.AUTH_MODE;
+  delete process.env.ALLOW_LOCAL_AUTH_IN_ALTERO;
   assert.equal(getAuthMode(), 'local', 'Default auth mode must be local when no Altero config is present');
-  if (originalAlteroApi) process.env.ALTERO_API = originalAlteroApi;
-  if (originalAuthMode) process.env.AUTH_MODE = originalAuthMode;
+  assert.equal(isLocalAuthAllowed(), true);
 
   const store = new CanvasStore(dbPath);
   const handler = createCanvasHandler(store);
 
-  // 2. Authentication & Admin Setup
+  // [P0 Regression] Test AUTH_MODE=altero blocking local setup and login
+  process.env.AUTH_MODE = 'altero';
+  assert.equal(getAuthMode(), 'altero');
+  assert.equal(isLocalAuthAllowed(), false);
+
+  const blockedSetupRes = await call((req, res) => handleLocalSetup(req, res, store), '/auth/setup', {
+    method: 'POST',
+    body: { username: 'admin', password: 'SecurePassword123!' }
+  });
+  assert.equal(blockedSetupRes.statusCode, 403, 'Altero mode must reject /auth/setup with 403');
+  assert.equal(blockedSetupRes.payload.error, 'local_auth_disabled');
+
+  const blockedLoginRes = await call((req, res) => handleLocalLogin(req, res, store), '/auth/login', {
+    method: 'POST',
+    body: { username: 'admin', password: 'SecurePassword123!' }
+  });
+  assert.equal(blockedLoginRes.statusCode, 403, 'Altero mode must reject POST /auth/login with 403');
+  assert.equal(blockedLoginRes.payload.error, 'local_auth_disabled');
+
+  // Reset to local mode for M1 testing
+  delete process.env.AUTH_MODE;
+
+  // 2. Authentication & Admin Setup in local mode
   assert.equal(store.hasUsers(), false, 'Fresh database must have no users');
   const sessionStatusPre = await call((req, res) => handleSession(req, res, store), '/auth/session');
   assert.equal(sessionStatusPre.statusCode, 200);
@@ -208,7 +232,7 @@ try {
   const nonPdfRes = await call(handler, '/canvas/native/upload', {
     method: 'POST',
     cookie: newCookie,
-    headers: { 'content-type': 'application/octet-stream', 'x-filename': 'fake.pdf' },
+    headers: { 'content-type': 'application/pdf', 'x-filename': 'fake.pdf' },
     body: Buffer.from('NOT A PDF FILE AT ALL')
   });
   assert.equal(nonPdfRes.statusCode, 400);
@@ -227,6 +251,7 @@ try {
   assert.ok(uploadRes.payload.data.attachment);
   assert.equal(uploadRes.payload.data.attachment.blobHash, expectedSha256);
   assert.equal(uploadRes.payload.data.blob.sha256, expectedSha256);
+  assert.equal(uploadRes.payload.data.blob.referenceCount, 1, 'Initial upload must set reference_count = 1');
 
   const uploadedDoc = uploadRes.payload.data.document;
   const uploadedAtt = uploadRes.payload.data.attachment;
@@ -237,7 +262,7 @@ try {
   assert.equal(fs.statSync(blobPath).mode & 0o777, 0o600, 'Blob file must have 0600 permissions');
   assert.equal(fs.readFileSync(blobPath).equals(samplePdfContent), true, 'Blob file content must match byte-for-byte');
 
-  // Verify content deduplication on identical PDF upload
+  // [P1 Regression] Verify content deduplication on identical PDF upload does NOT increment reference count
   const secondUploadRes = await call(handler, '/canvas/native/upload', {
     method: 'POST',
     cookie: newCookie,
@@ -248,15 +273,34 @@ try {
   assert.equal(secondUploadRes.payload.duplicate, true);
   assert.equal(secondUploadRes.payload.data.document.id, uploadedDoc.id);
 
-  // Verify blob reference count incremented
-  const blobRow = store.getBlob(expectedSha256);
-  assert.ok(blobRow.referenceCount >= 1);
+  // Verify blob reference count was NOT falsely incremented
+  const blobRowAfterDup = store.getBlob(expectedSha256);
+  assert.equal(blobRowAfterDup.referenceCount, 1, 'Duplicate upload for same user must not falsely increase blob reference count');
 
-  // 5. Native Document Retrieval & Query
+  // 5. Native Document Retrieval, Query & [P1 Regression] Creator Updates
   const docGetRes = await call(handler, `/canvas/native/documents/${uploadedDoc.id}`, { cookie: newCookie });
   assert.equal(docGetRes.statusCode, 200);
   assert.equal(docGetRes.payload.data.id, uploadedDoc.id);
   assert.equal(docGetRes.payload.data.attachments.length, 1);
+
+  // [P1 Regression] Test Document Update with Creators (must not throw docId ReferenceError)
+  const patchDocRes = await call(handler, `/canvas/native/documents/${uploadedDoc.id}`, {
+    method: 'PATCH',
+    cookie: newCookie,
+    headers: { 'if-match': `W/"${uploadedDoc.version}"` },
+    body: {
+      title: 'Robotics Deep Dive (Updated)',
+      creators: [
+        { creatorType: 'author', firstName: 'Alice', lastName: 'Zhang', name: 'Alice Zhang' },
+        { creatorType: 'author', firstName: 'Bob', lastName: 'Li', name: 'Bob Li' }
+      ]
+    }
+  });
+  assert.equal(patchDocRes.statusCode, 200);
+  assert.equal(patchDocRes.payload.data.title, 'Robotics Deep Dive (Updated)');
+  assert.equal(patchDocRes.payload.data.creators.length, 2);
+  assert.equal(patchDocRes.payload.data.creators[0].firstName, 'Alice');
+  assert.equal(patchDocRes.payload.data.creators[1].firstName, 'Bob');
 
   const docListRes = await call(handler, '/canvas/native/documents', { cookie: newCookie });
   assert.equal(docListRes.statusCode, 200);
@@ -403,7 +447,20 @@ try {
   const listAfterDelete = await call(handler, `/canvas/native/attachments/${uploadedAtt.id}/annotations`, { cookie: newCookie });
   assert.equal(listAfterDelete.payload.data.length, 0);
 
-  // 8.7 Restore Annotation (200 OK)
+  // 8.7 [P2 Regression] Restore Annotation (Must enforce If-Match: 428 on missing, 412 on stale)
+  const restoreMissingIfMatch = await call(handler, `/canvas/native/annotations/${annId}/restore`, {
+    method: 'POST',
+    cookie: newCookie
+  });
+  assert.equal(restoreMissingIfMatch.statusCode, 428, 'Restore must reject missing If-Match with 428');
+
+  const restoreStaleIfMatch = await call(handler, `/canvas/native/annotations/${annId}/restore`, {
+    method: 'POST',
+    cookie: newCookie,
+    headers: { 'if-match': 'W/"99"' }
+  });
+  assert.equal(restoreStaleIfMatch.statusCode, 412, 'Restore must reject stale If-Match with 412');
+
   const restoreAnnRes = await call(handler, `/canvas/native/annotations/${annId}/restore`, {
     method: 'POST',
     cookie: newCookie,
@@ -461,23 +518,35 @@ try {
   assert.equal(docMapRes.statusCode, 201);
   assert.ok(docMapRes.payload.data.nodes.length >= 4);
 
-  // 10. Persistence across Store & Process Restart
+  // 10. Persistence across Store & Process Restart & [P1 Regression] Blob Reference Count on Delete
   store.close();
   const reopenedStore = new CanvasStore(dbPath);
   const reopenedDoc = reopenedStore.getDocument(adminActorKey, uploadedDoc.id);
   assert.ok(reopenedDoc, 'Document must persist across database re-instantiation');
-  assert.equal(reopenedDoc.title, 'robotics_deep_dive_2026');
+  assert.equal(reopenedDoc.title, 'Robotics Deep Dive (Updated)');
   assert.equal(reopenedDoc.attachments.length, 1);
+  assert.equal(reopenedDoc.creators.length, 2);
 
   const reopenedBlob = reopenedStore.getBlob(expectedSha256);
   assert.ok(reopenedBlob, 'Blob metadata must persist');
+  assert.equal(reopenedBlob.referenceCount, 1);
 
   const reopenedAnns = reopenedStore.listAnnotations(adminActorKey, uploadedAtt.id);
   assert.equal(reopenedAnns.length, 1);
   assert.equal(reopenedAnns[0].comment, 'Updated and Verified Note');
 
+  // [P1 Regression] Verify deleting Document decrements reference_count to 0
+  reopenedStore.deleteDocument(adminActorKey, uploadedDoc.id, reopenedDoc.version);
+  const blobAfterDelete = reopenedStore.getBlob(expectedSha256);
+  assert.equal(blobAfterDelete.referenceCount, 0, 'Deleting document and its attachment must decrement blob reference count to 0');
+
   reopenedStore.close();
-  console.log('✅ All Native M1 Minimal Loop Tests Passed Successfully!');
+
+  if (originalAlteroApi) process.env.ALTERO_API = originalAlteroApi;
+  if (originalAuthMode) process.env.AUTH_MODE = originalAuthMode;
+  if (originalAllowLocalInAltero) process.env.ALLOW_LOCAL_AUTH_IN_ALTERO = originalAllowLocalInAltero;
+
+  console.log('✅ All Native M1 Minimal Loop & Audit Regression Tests Passed Successfully!');
 } finally {
   fs.rmSync(tempDir, { recursive: true, force: true });
 }

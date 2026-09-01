@@ -49,7 +49,14 @@ async function streamUploadToFile(req, targetDir, maxBytes = MAX_UPLOAD_BYTES) {
   let firstChunk = null;
 
   const cleanup = () => {
+    try { writeStream.destroy(); } catch {}
     try { if (fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath); } catch {}
+  };
+
+  const safeWrite = async (chunk) => {
+    if (!writeStream.write(chunk)) {
+      await new Promise(resolve => writeStream.once('drain', resolve));
+    }
   };
 
   try {
@@ -116,7 +123,7 @@ async function streamUploadToFile(req, targetDir, maxBytes = MAX_UPLOAD_BYTES) {
                 const toWrite = buffer.slice(0, safeLen);
                 if (!firstChunk && toWrite.length > 0) firstChunk = toWrite.slice(0, 5);
                 hash.update(toWrite);
-                writeStream.write(toWrite);
+                await safeWrite(toWrite);
                 buffer = buffer.slice(safeLen);
               }
               break;
@@ -124,7 +131,7 @@ async function streamUploadToFile(req, targetDir, maxBytes = MAX_UPLOAD_BYTES) {
               const fileData = buffer.slice(0, Math.max(0, nextBoundaryIdx - 2));
               if (!firstChunk && fileData.length > 0) firstChunk = fileData.slice(0, 5);
               hash.update(fileData);
-              writeStream.write(fileData);
+              await safeWrite(fileData);
               buffer = buffer.slice(nextBoundaryIdx + boundaryBuffer.length);
               state = 'HEADERS';
             }
@@ -142,7 +149,7 @@ async function streamUploadToFile(req, targetDir, maxBytes = MAX_UPLOAD_BYTES) {
         const buf = Buffer.from(chunk);
         if (!firstChunk && buf.length > 0) firstChunk = buf.slice(0, 5);
         hash.update(buf);
-        writeStream.write(buf);
+        await safeWrite(buf);
       }
     }
 
@@ -1035,89 +1042,53 @@ export function createCanvasHandler(store, {
         const uploadResult = await streamUploadToFile(req, tempDir);
         const { tempFilePath, sha256, sizeBytes, originalFilename, targetWorkspaceId, forceNew } = uploadResult;
 
-        // Check if blob exists
-        let blob = store.getBlob(sha256);
-        if (blob) {
-          store.incrementBlobRef(sha256);
-          try { fs.unlinkSync(tempFilePath); } catch {}
-        } else {
+        let importResult;
+        try {
           const targetBlobPath = store.resolveBlobPath(sha256, '.pdf');
-          fs.mkdirSync(path.dirname(targetBlobPath), { recursive: true, mode: 0o700 });
-          fs.renameSync(tempFilePath, targetBlobPath);
-          fs.chmodSync(targetBlobPath, 0o600);
           const relativePath = path.relative(store.getBlobStorageDir(), targetBlobPath);
-          blob = store.upsertBlob({ sha256, relativePath, sizeBytes, mimeType: 'application/pdf' });
+
+          // Atomic check and move file only if blob doesn't already exist on disk
+          if (!fs.existsSync(targetBlobPath)) {
+            fs.mkdirSync(path.dirname(targetBlobPath), { recursive: true, mode: 0o700 });
+            fs.renameSync(tempFilePath, targetBlobPath);
+            fs.chmodSync(targetBlobPath, 0o600);
+          } else {
+            try { fs.unlinkSync(tempFilePath); } catch {}
+          }
+
+          importResult = store.importNativeUploadedDocument(actor.actorKey, {
+            sha256,
+            relativePath,
+            sizeBytes,
+            mimeType: 'application/pdf',
+            originalFilename,
+            targetWorkspaceId,
+            forceNew
+          });
+        } catch (err) {
+          try { if (fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath); } catch {}
+          throw err;
         }
 
-        // Check duplicate document for this owner
-        const existingDoc = store.findDocumentByBlobHash(actor.actorKey, sha256);
-        if (existingDoc && !forceNew) {
+        if (importResult.duplicate) {
           json(res, 200, {
             duplicate: true,
             data: {
-              document: existingDoc,
-              attachment: existingDoc.attachments?.[0] || null,
-              blob
+              document: importResult.document,
+              attachment: importResult.attachment,
+              blob: importResult.blob
             },
             message: '该文献已在文库中'
           });
           return;
         }
 
-        // Create new Document
-        let cleanTitle = originalFilename.replace(/\.pdf$/i, '').trim();
-        try { cleanTitle = decodeURIComponent(cleanTitle); } catch {}
-        if (!cleanTitle) cleanTitle = '未命名文献';
-
-        const document = store.createDocument(actor.actorKey, {
-          title: cleanTitle,
-          itemType: 'journalArticle'
-        });
-
-        // Create Attachment
-        const attachment = store.createAttachment(actor.actorKey, document.id, {
-          blobHash: sha256,
-          mimeType: 'application/pdf',
-          originalFilename,
-          title: cleanTitle,
-          sizeBytes
-        });
-
-        // Register in Inbox
-        store.upsertInboxEntries(actor.actorKey, [{
-          libraryType: 'native',
-          libraryId: 'local',
-          itemKey: document.id,
-          attachmentKey: attachment.id,
-          detectedFrom: 'native_upload',
-          title: cleanTitle,
-          year: null,
-          abstractNote: '',
-          tags: []
-        }]);
-
-        // If target workspace provided, add to topic documents
-        let topicDoc = null;
-        if (targetWorkspaceId) {
-          try {
-            topicDoc = store.addTopicDocument(actor.actorKey, targetWorkspaceId, {
-              libraryType: 'native',
-              libraryId: 'local',
-              itemKey: document.id,
-              attachmentKey: attachment.id,
-              status: 'accepted',
-              origin: 'native_upload'
-            });
-          } catch {}
-        }
-
-        const fullDoc = store.getDocument(actor.actorKey, document.id);
         json(res, 201, {
           data: {
-            document: fullDoc,
-            attachment,
-            blob,
-            topicDocument: topicDoc
+            document: importResult.document,
+            attachment: importResult.attachment,
+            blob: importResult.blob,
+            topicDocument: importResult.topicDocument
           }
         });
         return;
@@ -1320,6 +1291,10 @@ export function createCanvasHandler(store, {
       match = /^\/canvas\/native\/annotations\/([0-9a-f-]+)\/restore$/.exec(pathname);
       if (match && method === 'POST') {
         const version = versionFromIfMatch(req);
+        if (version === null) {
+          error(res, 428, 'precondition_required', 'A valid If-Match header is required');
+          return;
+        }
         const ann = store.restoreAnnotation(actor.actorKey, match[1], version);
         json(res, 200, { data: ann }, { ETag: etag(ann.version) });
         return;

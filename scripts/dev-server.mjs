@@ -86,6 +86,7 @@ installDevLogging();
 
 const {
   getAuthMode,
+  isLocalAuthAllowed,
   handleLogin,
   handleCallback,
   handleSession,
@@ -226,10 +227,18 @@ const server = http.createServer(async (req, res) => {
   const currentCanvasStore = getCanvasStore();
 
   if (pathname === '/auth/setup' && req.method === 'POST') {
+    if (!isLocalAuthAllowed()) {
+      send(res, 403, JSON.stringify({ error: 'local_auth_disabled', message: '当前部署模式未启用本地账户认证' }), { 'Content-Type': 'application/json' });
+      return;
+    }
     return await handleLocalSetup(req, res, currentCanvasStore);
   }
   if (pathname === '/auth/login') {
     if (req.method === 'POST') {
+      if (!isLocalAuthAllowed()) {
+        send(res, 403, JSON.stringify({ error: 'local_auth_disabled', message: '当前部署模式未启用本地账户认证' }), { 'Content-Type': 'application/json' });
+        return;
+      }
       return await handleLocalLogin(req, res, currentCanvasStore);
     }
     if (['GET', 'HEAD'].includes(req.method)) {

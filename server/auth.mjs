@@ -385,12 +385,24 @@ async function readRequestBody(req, maxBytes = 65536) {
   }
 }
 
+export function isLocalAuthAllowed() {
+  const mode = getAuthMode();
+  if (mode === 'local') return true;
+  return process.env.ALLOW_LOCAL_AUTH_IN_ALTERO === 'true';
+}
+
 /**
  * Handle POST /auth/setup (Local Admin Initialization)
  */
 export async function handleLocalSetup(req, res, store) {
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+
+  if (!isLocalAuthAllowed()) {
+    res.writeHead(403);
+    res.end(JSON.stringify({ error: 'local_auth_disabled', message: '当前部署模式未启用本地账户认证' }));
+    return;
+  }
 
   if (!store) {
     res.writeHead(500);
@@ -466,6 +478,12 @@ export async function handleLocalSetup(req, res, store) {
 export async function handleLocalLogin(req, res, store) {
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+
+  if (!isLocalAuthAllowed()) {
+    res.writeHead(403);
+    res.end(JSON.stringify({ error: 'local_auth_disabled', message: '当前部署模式未启用本地账户认证' }));
+    return;
+  }
 
   if (!store) {
     res.writeHead(500);
