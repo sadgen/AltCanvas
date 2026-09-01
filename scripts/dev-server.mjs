@@ -84,10 +84,18 @@ const {
 } = await import('../server/dev-logger.mjs');
 installDevLogging();
 
-const { handleLogin, handleCallback, handleSession, handleLogout } = await import('../server/auth.mjs');
+const {
+  getAuthMode,
+  handleLogin,
+  handleCallback,
+  handleSession,
+  handleLogout,
+  handleLocalSetup,
+  handleLocalLogin
+} = await import('../server/auth.mjs');
 const { handleApiProxy } = await import('../server/proxy-api.mjs');
 const { handleFilesProxy } = await import('../server/proxy-files.mjs');
-const { handleCanvasApi } = await import('../server/canvas-api.mjs');
+const { handleCanvasApi, getCanvasStore } = await import('../server/canvas-api.mjs');
 const { consumeRateLimit, getRequestOrigin, isSameOriginRequest } = await import('../server/security.mjs');
 
 const mimeTypes = {
@@ -179,7 +187,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (pathname === '/auth/login' || pathname === '/auth/callback') {
+  if (pathname === '/auth/login' || pathname === '/auth/setup' || pathname === '/auth/callback') {
     const rate = consumeRateLimit(req, 'auth', { limit: 30, windowMs: 60 * 1000 });
     if (!rate.allowed) {
       send(res, 429, '429 Too Many Requests', { 'Retry-After': String(rate.retryAfter) });
@@ -214,14 +222,30 @@ const server = http.createServer(async (req, res) => {
   }
 
   // --- BFF Router: Authentication Endpoints ---
-  if (pathname === '/auth/login' && ['GET', 'HEAD'].includes(req.method)) {
-    return await handleLogin(req, res, url, selfOrigin);
+  const currentAuthMode = getAuthMode();
+  const currentCanvasStore = getCanvasStore();
+
+  if (pathname === '/auth/setup' && req.method === 'POST') {
+    return await handleLocalSetup(req, res, currentCanvasStore);
+  }
+  if (pathname === '/auth/login') {
+    if (req.method === 'POST') {
+      return await handleLocalLogin(req, res, currentCanvasStore);
+    }
+    if (['GET', 'HEAD'].includes(req.method)) {
+      if (currentAuthMode === 'local') {
+        res.writeHead(302, { 'Location': '/', 'Cache-Control': 'no-store' });
+        res.end();
+        return;
+      }
+      return await handleLogin(req, res, url, selfOrigin);
+    }
   }
   if (pathname === '/auth/callback' && ['GET', 'HEAD'].includes(req.method)) {
     return await handleCallback(req, res, url, selfOrigin);
   }
   if (pathname === '/auth/session' && ['GET', 'HEAD'].includes(req.method)) {
-    return await handleSession(req, res);
+    return await handleSession(req, res, currentCanvasStore);
   }
   if (pathname === '/auth/logout' && req.method === 'POST') {
     return await handleLogout(req, res);
