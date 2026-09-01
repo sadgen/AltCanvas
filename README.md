@@ -36,6 +36,7 @@ workflow goes through security and interaction stabilization.
 - `docs/m1-api-adaptation.md` — Web Library endpoint, auth, CORS, and file contract
 - `docs/altero-auth-bff-design.md` — production login, OAuth/OIDC, BFF, token, and privacy design
 - `docs/canvas-design.md` — Canvas ownership boundary, schema, API, phases, and acceptance baseline
+- `docs/topic-research-workspace-design.md` — topic inbox, Collection sync, multi-report AI knowledge graph, Canvas-first PDF UX, and staged implementation plan
 - `docs/handoff.md` — Agent and session continuation log with architecture notes and verified test status
 - `docs/human-in-loop-debugging.md` — default human-operated, log-driven UI debugging workflow
 - `config/altero.web-library.example.json` — runtime-injected Web Library configuration

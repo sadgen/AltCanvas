@@ -6,6 +6,9 @@
 本文档是 Canvas（画板）功能后续开发和审计的验收基线。除非另有设计
 变更记录，实施进度以本文的阶段、接口和退出条件为准。
 
+主题收件箱、Collection 同步、跨报告知识关联和 Canvas-first PDF 交互的下一阶段设计，
+见 `docs/topic-research-workspace-design.md`。该方案沿用本文的数据所有权、安全和来源基线。
+
 ## 1. 目标与边界
 
 Canvas 是跨文献组织研究材料的空间工作区。用户可以把 Zotero/Altero
