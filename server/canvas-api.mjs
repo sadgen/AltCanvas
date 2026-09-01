@@ -1,3 +1,6 @@
+import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
 import {
   CanvasConflictError,
   CanvasNotFoundError,
@@ -25,7 +28,154 @@ const AI_TASKS = new Set(['translate', 'synthesize', 'compare', 'explain']);
 const AI_PROMPT_VERSION = 'altcanvas-ai-v1';
 const MAX_IMPORT_NODES = 500;
 const MAX_IMPORT_EDGES = 1000;
+const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_BYTES || 104_857_600); // 100 MiB default
 let defaultStore;
+
+async function streamUploadToFile(req, targetDir, maxBytes = MAX_UPLOAD_BYTES) {
+  fs.mkdirSync(targetDir, { recursive: true, mode: 0o700 });
+  const tempFileName = `upload-${crypto.randomBytes(16).toString('hex')}.tmp`;
+  const tempFilePath = path.join(targetDir, tempFileName);
+  const writeStream = fs.createWriteStream(tempFilePath, { mode: 0o600 });
+  const hash = crypto.createHash('sha256');
+
+  const contentType = String(req.headers['content-type'] || '');
+  let originalFilename = req.headers['x-filename']
+    ? decodeURIComponent(String(req.headers['x-filename']))
+    : 'document.pdf';
+  let targetWorkspaceId = req.headers['x-target-workspace-id'] || null;
+  let forceNew = req.headers['x-force-new'] === 'true';
+
+  let totalBytes = 0;
+  let firstChunk = null;
+
+  const cleanup = () => {
+    try { if (fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath); } catch {}
+  };
+
+  try {
+    if (contentType.includes('multipart/form-data')) {
+      const boundaryMatch = /boundary=(?:["']([^"']+)["']|([^;]+))/i.exec(contentType);
+      if (!boundaryMatch) throw new TypeError('Missing multipart boundary');
+      const boundary = (boundaryMatch[1] || boundaryMatch[2]).trim();
+      const boundaryBuffer = Buffer.from(`--${boundary}`);
+      const doubleCrlf = Buffer.from('\r\n\r\n');
+
+      let state = 'SEEK_BOUNDARY';
+      let buffer = Buffer.alloc(0);
+
+      for await (const chunk of req) {
+        totalBytes += chunk.length;
+        if (totalBytes > maxBytes) {
+          const err = new Error('File exceeds maximum upload size (100MB)');
+          err.status = 413;
+          throw err;
+        }
+
+        buffer = Buffer.concat([buffer, Buffer.from(chunk)]);
+
+        while (true) {
+          if (state === 'SEEK_BOUNDARY') {
+            const idx = buffer.indexOf(boundaryBuffer);
+            if (idx === -1) {
+              if (buffer.length > boundaryBuffer.length + 4) {
+                buffer = buffer.slice(buffer.length - boundaryBuffer.length - 4);
+              }
+              break;
+            }
+            buffer = buffer.slice(idx + boundaryBuffer.length);
+            state = 'HEADERS';
+          } else if (state === 'HEADERS') {
+            const idx = buffer.indexOf(doubleCrlf);
+            if (idx === -1) break;
+            const headerStr = buffer.slice(0, idx).toString('utf8');
+            buffer = buffer.slice(idx + 4);
+
+            const filenameMatch = /filename=["']?([^"';\r\n]+)["']?/i.exec(headerStr);
+            if (filenameMatch) {
+              originalFilename = path.basename(filenameMatch[1].trim());
+              state = 'FILE_DATA';
+            } else {
+              const nameMatch = /name=["']?([^"';\r\n]+)["']?/i.exec(headerStr);
+              const fieldName = nameMatch ? nameMatch[1] : '';
+              const nextBoundaryIdx = buffer.indexOf(boundaryBuffer);
+              if (nextBoundaryIdx !== -1) {
+                const fieldValue = buffer.slice(0, Math.max(0, nextBoundaryIdx - 2)).toString('utf8');
+                if (fieldName === 'targetWorkspaceId') targetWorkspaceId = fieldValue.trim();
+                if (fieldName === 'forceNew') forceNew = fieldValue.trim() === 'true';
+                buffer = buffer.slice(nextBoundaryIdx + boundaryBuffer.length);
+                state = 'HEADERS';
+              } else {
+                break;
+              }
+            }
+          } else if (state === 'FILE_DATA') {
+            const nextBoundaryIdx = buffer.indexOf(boundaryBuffer);
+            if (nextBoundaryIdx === -1) {
+              const safeLen = Math.max(0, buffer.length - boundaryBuffer.length - 8);
+              if (safeLen > 0) {
+                const toWrite = buffer.slice(0, safeLen);
+                if (!firstChunk && toWrite.length > 0) firstChunk = toWrite.slice(0, 5);
+                hash.update(toWrite);
+                writeStream.write(toWrite);
+                buffer = buffer.slice(safeLen);
+              }
+              break;
+            } else {
+              const fileData = buffer.slice(0, Math.max(0, nextBoundaryIdx - 2));
+              if (!firstChunk && fileData.length > 0) firstChunk = fileData.slice(0, 5);
+              hash.update(fileData);
+              writeStream.write(fileData);
+              buffer = buffer.slice(nextBoundaryIdx + boundaryBuffer.length);
+              state = 'HEADERS';
+            }
+          }
+        }
+      }
+    } else {
+      for await (const chunk of req) {
+        totalBytes += chunk.length;
+        if (totalBytes > maxBytes) {
+          const err = new Error('File exceeds maximum upload size (100MB)');
+          err.status = 413;
+          throw err;
+        }
+        const buf = Buffer.from(chunk);
+        if (!firstChunk && buf.length > 0) firstChunk = buf.slice(0, 5);
+        hash.update(buf);
+        writeStream.write(buf);
+      }
+    }
+
+    await new Promise((resolve, reject) => {
+      writeStream.end(err => err ? reject(err) : resolve());
+    });
+
+    const fd = fs.openSync(tempFilePath, 'r');
+    const headBuf = Buffer.alloc(5);
+    fs.readSync(fd, headBuf, 0, 5, 0);
+    fs.closeSync(fd);
+    if (!headBuf.toString('ascii').startsWith('%PDF-')) {
+      cleanup();
+      const err = new Error('File is not a valid PDF (%PDF- header missing)');
+      err.status = 400;
+      throw err;
+    }
+
+    const sha256 = hash.digest('hex');
+    const stat = fs.statSync(tempFilePath);
+    return {
+      tempFilePath,
+      sha256,
+      sizeBytes: stat.size,
+      originalFilename,
+      targetWorkspaceId,
+      forceNew
+    };
+  } catch (err) {
+    cleanup();
+    throw err;
+  }
+}
 
 function json(res, status, payload, headers = {}) {
   const body = payload === undefined ? '' : JSON.stringify(payload);
@@ -305,11 +455,13 @@ function viewport(value, optional = false) {
 }
 
 function validateLibraryAccess(libraryType, libraryId, session) {
-  if (!['user', 'group'].includes(libraryType)) throw new TypeError('libraryType is invalid');
+  if (!['user', 'group', 'native'].includes(libraryType)) throw new TypeError('libraryType is invalid');
   const lid = key(libraryId, 'libraryId', false);
-  const allowed = libraryType === 'user'
-    ? lid === String(session.userId)
-    : (session.groupIds || []).map(String).includes(lid);
+  const allowed = libraryType === 'native'
+    ? true
+    : (libraryType === 'user'
+      ? lid === String(session.userId)
+      : (session.groupIds || []).map(String).includes(lid));
   if (!allowed) {
     const err = new Error('library is not accessible to this session');
     err.status = 403;
@@ -706,12 +858,14 @@ function source(value, session) {
   if (value === undefined || value === null) return null;
   if (typeof value !== 'object' || Array.isArray(value)) throw new TypeError('source must be an object');
   const libraryType = value.libraryType;
-  if (!['user', 'group'].includes(libraryType)) throw new TypeError('source.libraryType is invalid');
+  if (!['user', 'group', 'native'].includes(libraryType)) throw new TypeError('source.libraryType is invalid');
   const normalizedLibId = (value.libraryId !== undefined && value.libraryId !== null) ? String(value.libraryId) : value.libraryId;
   const libraryId = key(normalizedLibId, 'source.libraryId', false);
-  const allowed = libraryType === 'user'
-    ? libraryId === String(session.userId)
-    : (session.groupIds || []).map(String).includes(libraryId);
+  const allowed = libraryType === 'native'
+    ? true
+    : (libraryType === 'user'
+      ? libraryId === String(session.userId)
+      : (session.groupIds || []).map(String).includes(libraryId));
   if (!allowed) {
     const err = new Error('source library is not available to this session');
     err.status = 403;
@@ -726,11 +880,11 @@ function source(value, session) {
   return {
     libraryType,
     libraryId,
-    itemKey: key(value.itemKey, 'source.itemKey'),
-    attachmentKey: key(value.attachmentKey, 'source.attachmentKey'),
+    itemKey: value.itemKey ? key(value.itemKey, 'source.itemKey') : null,
+    attachmentKey: value.attachmentKey ? key(value.attachmentKey, 'source.attachmentKey') : null,
     attachmentVersion: value.attachmentVersion === undefined || value.attachmentVersion === null
       ? null : number(value.attachmentVersion, 'source.attachmentVersion', { min: 0, max: Number.MAX_SAFE_INTEGER, integer: true }),
-    annotationKey: key(value.annotationKey, 'source.annotationKey'),
+    annotationKey: value.annotationKey ? key(value.annotationKey, 'source.annotationKey') : null,
     annotationVersion: value.annotationVersion === undefined || value.annotationVersion === null
       ? null : number(value.annotationVersion, 'source.annotationVersion', { min: 0, max: Number.MAX_SAFE_INTEGER, integer: true }),
     pageLabel: value.pageLabel === undefined || value.pageLabel === null
@@ -850,7 +1004,7 @@ function actorFromRequest(req) {
   const sessionId = getSessionIdFromRequest(req);
   const session = getSession(sessionId);
   if (!session) return null;
-  const actorKey = canvasActorKey(session.issuer, session.subject);
+  const actorKey = session.actorKey || canvasActorKey(session.issuer || (session.authMode === 'local' ? 'local' : null), session.subject || session.userId);
   return actorKey ? { actorKey, session } : null;
 }
 
@@ -871,6 +1025,306 @@ export function createCanvasHandler(store, {
     const method = req.method || 'GET';
     let match;
     try {
+      // ==========================================
+      // --- Native Library Core Endpoints (M1) ---
+      // ==========================================
+
+      // --- Native PDF Upload ---
+      if (pathname === '/canvas/native/upload' && method === 'POST') {
+        const tempDir = path.join(store.getBlobStorageDir(), 'tmp');
+        const uploadResult = await streamUploadToFile(req, tempDir);
+        const { tempFilePath, sha256, sizeBytes, originalFilename, targetWorkspaceId, forceNew } = uploadResult;
+
+        // Check if blob exists
+        let blob = store.getBlob(sha256);
+        if (blob) {
+          store.incrementBlobRef(sha256);
+          try { fs.unlinkSync(tempFilePath); } catch {}
+        } else {
+          const targetBlobPath = store.resolveBlobPath(sha256, '.pdf');
+          fs.mkdirSync(path.dirname(targetBlobPath), { recursive: true, mode: 0o700 });
+          fs.renameSync(tempFilePath, targetBlobPath);
+          fs.chmodSync(targetBlobPath, 0o600);
+          const relativePath = path.relative(store.getBlobStorageDir(), targetBlobPath);
+          blob = store.upsertBlob({ sha256, relativePath, sizeBytes, mimeType: 'application/pdf' });
+        }
+
+        // Check duplicate document for this owner
+        const existingDoc = store.findDocumentByBlobHash(actor.actorKey, sha256);
+        if (existingDoc && !forceNew) {
+          json(res, 200, {
+            duplicate: true,
+            data: {
+              document: existingDoc,
+              attachment: existingDoc.attachments?.[0] || null,
+              blob
+            },
+            message: '该文献已在文库中'
+          });
+          return;
+        }
+
+        // Create new Document
+        let cleanTitle = originalFilename.replace(/\.pdf$/i, '').trim();
+        try { cleanTitle = decodeURIComponent(cleanTitle); } catch {}
+        if (!cleanTitle) cleanTitle = '未命名文献';
+
+        const document = store.createDocument(actor.actorKey, {
+          title: cleanTitle,
+          itemType: 'journalArticle'
+        });
+
+        // Create Attachment
+        const attachment = store.createAttachment(actor.actorKey, document.id, {
+          blobHash: sha256,
+          mimeType: 'application/pdf',
+          originalFilename,
+          title: cleanTitle,
+          sizeBytes
+        });
+
+        // Register in Inbox
+        store.upsertInboxEntries(actor.actorKey, [{
+          libraryType: 'native',
+          libraryId: 'local',
+          itemKey: document.id,
+          attachmentKey: attachment.id,
+          detectedFrom: 'native_upload',
+          title: cleanTitle,
+          year: null,
+          abstractNote: '',
+          tags: []
+        }]);
+
+        // If target workspace provided, add to topic documents
+        let topicDoc = null;
+        if (targetWorkspaceId) {
+          try {
+            topicDoc = store.addTopicDocument(actor.actorKey, targetWorkspaceId, {
+              libraryType: 'native',
+              libraryId: 'local',
+              itemKey: document.id,
+              attachmentKey: attachment.id,
+              status: 'accepted',
+              origin: 'native_upload'
+            });
+          } catch {}
+        }
+
+        const fullDoc = store.getDocument(actor.actorKey, document.id);
+        json(res, 201, {
+          data: {
+            document: fullDoc,
+            attachment,
+            blob,
+            topicDocument: topicDoc
+          }
+        });
+        return;
+      }
+
+      // --- Native Documents List & CRUD ---
+      if (pathname === '/canvas/native/documents' && method === 'GET') {
+        const search = url.searchParams.get('search') || undefined;
+        const year = url.searchParams.get('year') || undefined;
+        const limit = url.searchParams.get('limit') ? Number(url.searchParams.get('limit')) : 50;
+        const offset = url.searchParams.get('offset') ? Number(url.searchParams.get('offset')) : 0;
+        const docs = store.listDocuments(actor.actorKey, { search, year, limit, offset });
+        json(res, 200, { data: docs });
+        return;
+      }
+
+      if (pathname === '/canvas/native/documents' && method === 'POST') {
+        const body = await readJson(req);
+        const title = string(body.title || '未命名文献', 'title', { min: 1, max: 500 });
+        const doc = store.createDocument(actor.actorKey, {
+          ...body,
+          title
+        });
+        json(res, 201, { data: doc }, { ETag: etag(doc.version) });
+        return;
+      }
+
+      match = /^\/canvas\/native\/documents\/([0-9a-f-]+)$/.exec(pathname);
+      if (match && method === 'GET') {
+        const doc = store.requireDocument(actor.actorKey, match[1]);
+        json(res, 200, { data: doc }, { ETag: etag(doc.version) });
+        return;
+      }
+      if (match && ['PATCH', 'DELETE'].includes(method)) {
+        const version = versionFromIfMatch(req);
+        if (version === null) {
+          error(res, 428, 'precondition_required', 'A valid If-Match header is required');
+          return;
+        }
+        if (method === 'DELETE') {
+          store.deleteDocument(actor.actorKey, match[1], version);
+          res.writeHead(204, { 'Cache-Control': 'no-store' });
+          res.end();
+          return;
+        }
+        const body = await readJson(req);
+        const doc = store.updateDocument(actor.actorKey, match[1], version, body);
+        json(res, 200, { data: doc }, { ETag: etag(doc.version) });
+        return;
+      }
+
+      // --- Native Attachment File Streaming with HTTP Range ---
+      match = /^\/canvas\/native\/attachments\/([0-9a-f-]+)\/file$/.exec(pathname);
+      if (match && ['GET', 'HEAD'].includes(method)) {
+        const attachmentId = match[1];
+        const attWithBlob = store.getAttachmentWithBlob(actor.actorKey, attachmentId);
+        if (!attWithBlob) {
+          error(res, 404, 'not_found', 'Attachment not found');
+          return;
+        }
+
+        const blobFilePath = path.resolve(store.getBlobStorageDir(), attWithBlob.blob.relativePath);
+        if (!fs.existsSync(blobFilePath)) {
+          error(res, 404, 'file_not_found', 'Attachment file not found on disk');
+          return;
+        }
+
+        const stat = fs.statSync(blobFilePath);
+        const fileSize = stat.size;
+        const blobEtag = `W/"${attWithBlob.blob.sha256}"`;
+
+        const ifNoneMatch = req.headers['if-none-match'];
+        if (ifNoneMatch && (ifNoneMatch === blobEtag || ifNoneMatch === `"${attWithBlob.blob.sha256}"` || ifNoneMatch === '*')) {
+          res.writeHead(304, {
+            'ETag': blobEtag,
+            'Cache-Control': 'private, max-age=86400',
+            'Accept-Ranges': 'bytes'
+          });
+          res.end();
+          return;
+        }
+
+        const rangeHeader = req.headers['range'];
+        if (!rangeHeader) {
+          res.writeHead(200, {
+            'Content-Type': attWithBlob.blob.mimeType || 'application/pdf',
+            'Content-Length': fileSize,
+            'Accept-Ranges': 'bytes',
+            'ETag': blobEtag,
+            'Cache-Control': 'private, max-age=86400',
+            'Content-Disposition': `inline; filename="${encodeURIComponent(attWithBlob.attachment.originalFilename || 'document.pdf')}"`
+          });
+          if (method === 'HEAD') {
+            res.end();
+            return;
+          }
+          fs.createReadStream(blobFilePath).pipe(res);
+          return;
+        }
+
+        // Parse Range header
+        const rangeMatch = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader.trim());
+        if (!rangeMatch) {
+          res.writeHead(416, {
+            'Content-Range': `bytes */${fileSize}`,
+            'Content-Type': 'text/plain'
+          });
+          res.end('416 Range Not Satisfiable');
+          return;
+        }
+
+        let start;
+        let end;
+        if (rangeMatch[1] === '' && rangeMatch[2] !== '') {
+          const suffix = Number(rangeMatch[2]);
+          if (suffix <= 0) {
+            res.writeHead(416, { 'Content-Range': `bytes */${fileSize}`, 'Content-Type': 'text/plain' });
+            res.end('416 Range Not Satisfiable');
+            return;
+          }
+          start = Math.max(0, fileSize - suffix);
+          end = fileSize - 1;
+        } else if (rangeMatch[1] !== '' && rangeMatch[2] === '') {
+          start = Number(rangeMatch[1]);
+          end = fileSize - 1;
+        } else if (rangeMatch[1] !== '' && rangeMatch[2] !== '') {
+          start = Number(rangeMatch[1]);
+          end = Number(rangeMatch[2]);
+        } else {
+          res.writeHead(416, { 'Content-Range': `bytes */${fileSize}`, 'Content-Type': 'text/plain' });
+          res.end('416 Range Not Satisfiable');
+          return;
+        }
+
+        if (isNaN(start) || isNaN(end) || start < 0 || start > end || start >= fileSize || end >= fileSize) {
+          res.writeHead(416, {
+            'Content-Range': `bytes */${fileSize}`,
+            'Content-Type': 'text/plain'
+          });
+          res.end('416 Range Not Satisfiable');
+          return;
+        }
+
+        const chunkLength = end - start + 1;
+        res.writeHead(206, {
+          'Content-Type': attWithBlob.blob.mimeType || 'application/pdf',
+          'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+          'Content-Length': chunkLength,
+          'Accept-Ranges': 'bytes',
+          'ETag': blobEtag,
+          'Cache-Control': 'private, max-age=86400',
+          'Content-Disposition': `inline; filename="${encodeURIComponent(attWithBlob.attachment.originalFilename || 'document.pdf')}"`
+        });
+        if (method === 'HEAD') {
+          res.end();
+          return;
+        }
+        fs.createReadStream(blobFilePath, { start, end }).pipe(res);
+        return;
+      }
+
+      // --- Native Annotations ---
+      match = /^\/canvas\/native\/attachments\/([0-9a-f-]+)\/annotations$/.exec(pathname);
+      if (match && method === 'GET') {
+        const annotations = store.listAnnotations(actor.actorKey, match[1]);
+        json(res, 200, { data: annotations });
+        return;
+      }
+      if (match && method === 'POST') {
+        const body = await readJson(req);
+        const ann = store.createAnnotation(actor.actorKey, match[1], body);
+        json(res, 201, { data: ann }, { ETag: etag(ann.version) });
+        return;
+      }
+
+      match = /^\/canvas\/native\/annotations\/([0-9a-f-]+)$/.exec(pathname);
+      if (match && method === 'GET') {
+        const ann = store.requireAnnotation(actor.actorKey, match[1]);
+        json(res, 200, { data: ann }, { ETag: etag(ann.version) });
+        return;
+      }
+      if (match && ['PATCH', 'DELETE'].includes(method)) {
+        const version = versionFromIfMatch(req);
+        if (version === null) {
+          error(res, 428, 'precondition_required', 'A valid If-Match header is required');
+          return;
+        }
+        if (method === 'DELETE') {
+          store.deleteAnnotation(actor.actorKey, match[1], version);
+          res.writeHead(204, { 'Cache-Control': 'no-store' });
+          res.end();
+          return;
+        }
+        const body = await readJson(req);
+        const ann = store.updateAnnotation(actor.actorKey, match[1], version, body);
+        json(res, 200, { data: ann }, { ETag: etag(ann.version) });
+        return;
+      }
+
+      match = /^\/canvas\/native\/annotations\/([0-9a-f-]+)\/restore$/.exec(pathname);
+      if (match && method === 'POST') {
+        const version = versionFromIfMatch(req);
+        const ann = store.restoreAnnotation(actor.actorKey, match[1], version);
+        json(res, 200, { data: ann }, { ETag: etag(ann.version) });
+        return;
+      }
+
       if (pathname === '/canvas/inbox' && method === 'GET') {
         const state = url.searchParams.get('state') || undefined;
         const collectionKey = url.searchParams.get('collectionKey') || undefined;
@@ -2633,6 +3087,11 @@ ${textSnippet.slice(0, 8000) || '无'}`;
       }
     }
   };
+}
+
+export function getCanvasStore() {
+  defaultStore ||= new CanvasStore();
+  return defaultStore;
 }
 
 export async function handleCanvasApi(req, res, url) {
