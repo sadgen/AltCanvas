@@ -492,15 +492,42 @@
 
 | 里程碑 | 状态 | 说明 |
 |---|---|---|
-| Schema v9 数据模型 | **完成** | SQLite topic_documents, collection_bindings, inbox_entries (含 attachment_version), jobs, document_analyses, document_metas, knowledge_units, knowledge_relations |
+| Schema v10 数据模型 | **完成** | SQLite topic_documents, collection_bindings, inbox_entries (含 attachment_version 与 doi), jobs (含 payload_json), document_analyses, document_metas (含 doi), knowledge_units, knowledge_relations |
 | T0 兼容性探针框架 | **就绪** | 增量 since、分页遍历、生命周期与版本化安全清理 |
 | T0 真实 PDF 上传/回读实机闸门 | `IN_PROGRESS` | 等待专用存储适配探针闭环，Canvas PDF 拖入保持关闭 |
 | T1 主题工作台与研究收件箱 | **PASS (关闭)** | 增量扫描、研究收件箱、批量多主题归类、Collection 绑定与全屏视图 |
 | T2 AI 主题分类与体系提炼 | **PASS (关闭)** | AI 自动提炼 3~6 个核心主题体系、分类建议、一键采纳与分析跨主题复用 |
 | 研报易读中文名与元数据识别 | **PASS (关闭)** | AI 提取机构/研报主标题/年份、SQLite document_metas、文库/收件箱易读中文名渲染与手动编辑 |
 | T3 跨报告观点关联与渐进展开 | **PASS (关闭)** | 知识单元索引、跨报告关系发现（支持/冲突/拓展/情境差异）、安全渐进展开、真实单元核验与精确页码定位 |
-| T4 Canvas 快速导入与 PDF 浮层 | **PASS (关闭)** | DOI/arXiv/URL 元数据解析、Mimosa SSRF 安全防御、全库去重检测、可恢复持久化导入 job、Canvas 原位证据核验浮层与无缝阅读 |
-| T5 可逆 AI 收缩 | **就绪 (待启动)** | 下一阶段目标 |
+| T4 Canvas 快速导入与 PDF 浮层 | `IN_PROGRESS` | 导入任务持久化/恢复重试机制、多源去重与逐跳重定向安全防护已闭环；等待 T0 真实 PDF 上传/远端 Altero 附件写入探针通过后关闭 |
+| 全文理解画板上下文增强 | **PASS (关闭)** | 画板已有节点上下文注入 Prompt，支持 `existing:<nodeId>` 跨卡片关系生成与 SQLite edges 写入，同文献重复分析原地更新防重叠 |
+| 卡片紧凑高度与尺寸自适应 | **PASS (关闭)** | 服务端与前端估算基底紧凑化，双击 resize-handle 触发真实内容高度测量（`autoFitCanvasNodeHeight`）并持久化保存 |
+| T5 可逆 AI 收缩 | `就绪 (待启动)` | 下一阶段目标 |
+
+## 2026-09-01 会话（全文理解画板上下文注入、跨卡片连线、防重叠原地更新与 SSRF 防护加固）
+
+- **画板已有卡片上下文注入全文理解 Prompt 与 `existing:<nodeId>` 规范化** ([`server/canvas-api.mjs`](file:///home/sadgen/Projects/AltCanvas/server/canvas-api.mjs))：
+  - 在 `POST /canvas/boards/:boardId/ai/document-map` 接口读取当前画板已有卡片（id, type, title, body），格式化注入空间画板合成 Prompt，指导模型建立新生成节点与已有卡片的逻辑连线；
+  - `normalizeDocumentGraph` 接收当前画板已有节点 `existingNodeIds`，保留并规范化指向既有卡片的 `existing:<nodeId>` 关系；
+  - `checkOnly: true` 支持结合 `hasDocumentOnBoard` 准确返回 `{ cached, alreadyOnBoard }`，不触发重复多余投影。
+- **`existing:<nodeId>` 跨卡片关系连线真实落库与扩展关系类型支持** ([`server/canvas-store.mjs`](file:///home/sadgen/Projects/AltCanvas/server/canvas-store.mjs))：
+  - `projectDocumentAnalysisToBoard` 解析 `existing:<nodeId>` 映射为真实已有节点 ID，并写入 SQLite `edges` 表；
+  - `EDGE_RELATIONS` 扩充支持 `extends`、`same_method`、`context_differs` 等学术关联类型，与 `knowledge_relations` 严格对齐。
+- **同一文献重复理解原地更新与多文献防重叠偏移布局** ([`server/canvas-store.mjs`](file:///home/sadgen/Projects/AltCanvas/server/canvas-store.mjs))：
+  - 检测当前画板是否已有该文献的 AI 分析节点；若已存在，则对概览、章节、概念、论点卡片进行原地更新（In-place update），更新原文摘录快照与页码，安全替换/刷新内部连线，清理多余节点，避免卡片重复堆叠；
+  - 在新文献投影至已有卡片的画板时，根据现有节点包围盒自动计算 `startOffsetX`，避免固定在 (280, 30) 发生几何重叠。
+- **可恢复导入任务执行 Runner 与多源去重检测** ([`server/canvas-api.mjs`](file:///home/sadgen/Projects/AltCanvas/server/canvas-api.mjs) & [`server/import-resolver.mjs`](file:///home/sadgen/Projects/AltCanvas/server/import-resolver.mjs))：
+  - 任务入队时保存 `payload_json`，创建 `executeImportJob` 异步执行器；
+  - `POST /canvas/imports/:id/retry` 触发真实重试执行；
+  - `findDuplicateCandidates` 同时检索 `inbox_entries` 与 `document_metas` 的 DOI 和标题。
+- **SSRF 逐跳手动重定向防御与严格响应大小限制** ([`server/import-resolver.mjs`](file:///home/sadgen/Projects/AltCanvas/server/import-resolver.mjs))：
+  - `safeFetchText` 设置 `redirect: 'manual'`，实现至多 5 跳的手动重定向循环，每跳目标 URL 均经 `validateExternalUrl` 验证，彻底封堵通过重定向绕过首次校验访问私网 IP（127.0.0.1、169.254.x 等）的安全隐患；
+  - 流式读取若超过 1MB 立即中止并抛出 413 错误，杜绝截断数据导致解析错误。
+- **卡片双击自适应内容高度与交互完善** ([`index.html`](file:///home/sadgen/Projects/AltCanvas/index.html))：
+  - 卡片缩放手柄（`.canvas-resize-handle`）添加 `dblclick` 事件监听，调用 `autoFitCanvasNodeHeight` 测量内容真实高度并自动持久化，提供拖拽与双击提示气泡。
+- **Schema v10 迁移与自动化测试全覆盖** ([`server/canvas-store.mjs`](file:///home/sadgen/Projects/AltCanvas/server/canvas-store.mjs), [`test/canvas.test.mjs`](file:///home/sadgen/Projects/AltCanvas/test/canvas.test.mjs), [`test/bff.test.mjs`](file:///home/sadgen/Projects/AltCanvas/test/bff.test.mjs), [`test/canvas-ui.test.mjs`](file:///home/sadgen/Projects/AltCanvas/test/canvas-ui.test.mjs))：
+  - 覆盖画板上下文注入、`existing:<nodeId>` 真实 Edge 落库、同一画板重复理解原地更新与总节点数不增断言、`checkOnly` 返回 `alreadyOnBoard`、非重叠偏移、关系类型扩展、SSRF 重定向拦截与大小上限、任务重试执行、双击手柄自适应等测试；
+  - `npm test` 六套测试全部通过，`git diff --check` 通过。
 
 ## 2026-09-01 会话（T4 阶段：Canvas 快速导入与 PDF 引用浮层核验）
 
