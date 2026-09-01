@@ -320,7 +320,101 @@ assert.match(html, /await openItem\(itemData, nativeLib\)/,
 assert.match(html, /throw new Error\('Native library does not support Zotero API endpoints'\)/,
   'libraryApiPrefix must strictly reject native library');
 
-console.log('✅ All Canvas UI Tests Passed Successfully!');
+// --- Behavioral Execution Tests for Native Opening & Reader Annotation Sync ---
+{
+  // 1. Test openNativeDocument execution
+  let openItemCalled = null;
+  const mockOpenNativeContext = {
+    openItem: async (itemData, lib) => { openItemCalled = { itemData, lib }; },
+    showToast: () => {},
+    fetch: async () => ({ ok: true, json: async () => ({ data: {} }) })
+  };
+
+  const openNativeDocMatch = html.match(/async function openNativeDocument\(doc, attachment\) \{([\s\S]*?)\n    \}/);
+  assert.ok(openNativeDocMatch, 'openNativeDocument definition must exist');
+
+  const openNativeDocRunner = new Function(
+    'openItem', 'showToast', 'fetch', 'doc', 'attachment',
+    `return (async () => { ${openNativeDocMatch[1]} })();`
+  );
+
+  const testDoc = { id: 'doc-123', version: 1, title: 'Test Native Doc', itemType: 'journalArticle', creators: [{ name: 'Author A' }] };
+  const testAtt = { id: 'att-456', version: 1, originalFilename: 'doc.pdf', mimeType: 'application/pdf', title: 'Test Native Doc' };
+
+  await openNativeDocRunner(
+    mockOpenNativeContext.openItem,
+    mockOpenNativeContext.showToast,
+    mockOpenNativeContext.fetch,
+    testDoc,
+    testAtt
+  );
+
+  assert.ok(openItemCalled, 'openNativeDocument must successfully call openItem');
+  assert.equal(openItemCalled.itemData.key, 'doc-123');
+  assert.equal(openItemCalled.itemData.isNative, true);
+  assert.equal(openItemCalled.itemData.children.length, 1);
+  assert.equal(openItemCalled.itemData.children[0].key, 'att-456');
+  assert.equal(openItemCalled.lib.libraryType, 'native');
+
+  // 2. Test reloadAndSyncReaderAnnotations error resilience on HTTP 500
+  const annotationsMap = new Map([['ann-1', { version: 1, data: { annotationText: 'Preserved Text' } }]]);
+  const clientMap = new Map([['client-1', 'ann-1']]);
+  const mockReader = { _primaryView: { _annotationManager: { setAnnotations: () => {} } } };
+
+  const reloadFnMatch = html.match(/async function reloadAndSyncReaderAnnotations\(attachmentKey\) \{([\s\S]*?)\n    \}/);
+  assert.ok(reloadFnMatch, 'reloadAndSyncReaderAnnotations definition must exist');
+
+  const reloadRunner = new Function(
+    'currentReaderInstance', 'currentAttachment', 'currentDocumentLibrary', 'currentAnnotationsMap', 'clientAnnotationIdMap',
+    'getAnnotationPosition', 'getAnnotationPageIndex', 'cleanAnnotationText', 'renderAnnotationCards', 'fetch', 'libraryApiPrefix', 'getApiUrl', 'getHeaders', 'console',
+    'attachmentKey',
+    `return (async () => { ${reloadFnMatch[1]} })();`
+  );
+
+  // Simulate HTTP 500 error on native annotation fetch
+  await reloadRunner(
+    mockReader,
+    { key: 'att-456', isNative: true },
+    { libraryType: 'native', libraryId: 'local' },
+    annotationsMap,
+    clientMap,
+    () => ({}),
+    () => 0,
+    s => s,
+    () => {},
+    async () => ({ ok: false, status: 500 }),
+    () => { throw new Error('should not call'); },
+    s => s,
+    () => ({}),
+    { warn: () => {} },
+    'att-456'
+  );
+
+  assert.equal(annotationsMap.has('ann-1'), true, 'Annotations map must NOT be cleared when fetch returns HTTP 500');
+  assert.equal(annotationsMap.get('ann-1').data.annotationText, 'Preserved Text');
+
+  // 3. Test reloadAndSyncReaderAnnotations race condition when document switched in-flight
+  await reloadRunner(
+    mockReader,
+    { key: 'att-NEW-DOCUMENT', isNative: true }, // Document switched
+    { libraryType: 'native', libraryId: 'local' },
+    annotationsMap,
+    clientMap,
+    () => ({}),
+    () => 0,
+    s => s,
+    () => {},
+    async () => ({ ok: true, json: async () => ({ data: [{ id: 'ann-OLD', version: 1, quote: 'Old Quote' }] }) }),
+    () => { throw new Error('should not call'); },
+    s => s,
+    () => ({}),
+    { warn: () => {} },
+    'att-456' // Old attachmentKey
+  );
+
+  assert.equal(annotationsMap.has('ann-OLD'), false, 'In-flight response for old document must not overwrite active annotations map');
+}
+
 assert.match(html, /function isSameLibrary\(/,
   'cross-library source matching must include the library identity');
 assert.match(html, /canUsePersonalLibraryCache/,

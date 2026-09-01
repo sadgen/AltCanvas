@@ -2433,6 +2433,8 @@
       currentReaderInstance = null;
       updateCanvasAiToolbar();
       currentDocumentLibrary = normalizeLibraryContext(libraryContext || (item?.isNative ? { libraryType: 'native', libraryId: 'local' } : null));
+      const isNativeDoc = item?.isNative || currentDocumentLibrary?.libraryType === 'native';
+      const documentLibraryPrefix = !isNativeDoc ? libraryApiPrefix(currentDocumentLibrary) : null;
       renderItems(); // Update active selection state
       if (mobileMedia.matches) setMobilePane('reader');
 
@@ -2452,7 +2454,7 @@
       try {
         let pdfAttachment = null;
 
-        if (item.isNative || currentDocumentLibrary?.libraryType === 'native') {
+        if (isNativeDoc) {
           pdfAttachment = (item.children || []).find(c => c.data?.contentType === 'application/pdf')
             || (item.data?.itemType === 'attachment' ? item : null);
           if (!pdfAttachment && item.key) {
@@ -2483,7 +2485,6 @@
           pdfAttachment = item;
         } else {
           // Parent item: query children for PDF attachment
-          const documentLibraryPrefix = libraryApiPrefix(currentDocumentLibrary);
           const childUrl = getApiUrl(`${documentLibraryPrefix}/items/${encodeURIComponent(item.key)}/children`);
           const res = await fetch(childUrl, { headers: getHeaders(), signal });
           if (!res.ok) throw new Error('未能获取子附件');
@@ -2507,7 +2508,7 @@
 
         // Fetch existing annotations for this attachment
         let rawAnnotations = [];
-        if (currentDocumentLibrary?.libraryType === 'native' || pdfAttachment.isNative) {
+        if (isNativeDoc || pdfAttachment.isNative) {
           const annRes = await fetch(`/canvas/native/attachments/${encodeURIComponent(pdfAttachment.key)}/annotations`, { signal });
           const annJson = annRes.ok ? await annRes.json() : { data: [] };
           rawAnnotations = (annJson.data || []).map(a => ({
@@ -2758,7 +2759,10 @@
         let rawAnnotations = [];
         if (currentDocumentLibrary?.libraryType === 'native' || currentAttachment?.isNative) {
           const annRes = await fetch(`/canvas/native/attachments/${encodeURIComponent(attachmentKey)}/annotations`);
-          const annJson = annRes.ok ? await annRes.json() : { data: [] };
+          if (!annRes.ok) {
+            throw new Error(`获取最新批注列表失败 (HTTP ${annRes.status})`);
+          }
+          const annJson = await annRes.json();
           rawAnnotations = (annJson.data || []).map(a => ({
             key: a.id,
             version: a.version,
@@ -2775,11 +2779,18 @@
             }
           }));
         } else {
-          const annUrl = getApiUrl(`${libraryApiPrefix(currentDocumentLibrary)}/items/${encodeURIComponent(attachmentKey)}/children`);
+          const documentLibraryPrefix = libraryApiPrefix(currentDocumentLibrary);
+          const annUrl = getApiUrl(`${documentLibraryPrefix}/items/${encodeURIComponent(attachmentKey)}/children`);
           const annRes = await fetch(annUrl, { headers: getHeaders() });
-          const annChildren = annRes.ok ? await annRes.json() : [];
-          rawAnnotations = annChildren.filter(c => c.data?.itemType === 'annotation');
+          if (!annRes.ok) {
+            throw new Error(`获取最新批注列表失败 (HTTP ${annRes.status})`);
+          }
+          const annChildren = await annRes.json();
+          rawAnnotations = (Array.isArray(annChildren) ? annChildren : []).filter(c => c.data?.itemType === 'annotation');
         }
+
+        // Concurrency guard: check if current document has changed while request was in-flight
+        if (!currentAttachment || currentAttachment.key !== attachmentKey) return;
 
         currentAnnotationsMap.clear();
         clientAnnotationIdMap.clear();
@@ -2809,7 +2820,7 @@
 
         renderAnnotationCards();
 
-        if (currentReaderInstance._primaryView?._annotationManager?.setAnnotations) {
+        if (currentReaderInstance?._primaryView?._annotationManager?.setAnnotations) {
           currentReaderInstance._primaryView._annotationManager.setAnnotations(readerAnnotations);
         }
       } catch (err) {
@@ -6833,6 +6844,18 @@
         showToast('该文献没有关联的 PDF 附件', 'warning');
         return;
       }
+      const attData = {
+        key: attachment.id,
+        version: attachment.version,
+        data: {
+          key: attachment.id,
+          title: attachment.title || doc.title,
+          contentType: attachment.mimeType || 'application/pdf',
+          filename: attachment.originalFilename || `${doc.title}.pdf`,
+          isNative: true
+        },
+        isNative: true
+      };
       const itemData = {
         key: doc.id,
         version: doc.version,
