@@ -61,6 +61,18 @@
     .canvas-toolbar::-webkit-scrollbar { display: none; }
     #provenance-panel { max-height: min(70vh, 44rem); overflow: hidden; }
     #provenance-list { min-height: 0; max-height: calc(min(70vh, 44rem) - 7rem); overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; scrollbar-color: #475569 transparent; }
+    #inbox-panel {
+      height: min(46rem, calc(100dvh - 2rem));
+      max-height: calc(100dvh - 2rem);
+      overflow: hidden;
+    }
+    #inbox-scroll-region {
+      min-height: 0;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      scrollbar-gutter: stable;
+      scrollbar-color: #475569 transparent;
+    }
     @media (max-width: 1180px) {
       #library-pane { width: var(--library-w, 17rem); }
       #annotations-pane { width: var(--annotations-w, 24rem); }
@@ -143,6 +155,8 @@
       #settings-modal { align-items: flex-end; padding: 0; }
       #settings-panel { max-width: none; max-height: min(92dvh, 46rem); overflow-y: auto; border-radius: 1rem 1rem 0 0; padding-bottom: max(1.25rem, env(safe-area-inset-bottom)); }
       #settings-modal input { min-height: 44px; font-size: 16px; }
+      #inbox-modal { align-items: flex-end; padding: 0; }
+      #inbox-panel { height: min(92dvh, 46rem); max-height: 92dvh; border-radius: 1rem 1rem 0 0; padding: .9rem; }
       #toast-container { left: 1rem; right: 1rem; bottom: calc(4.5rem + env(safe-area-inset-bottom)); }
       #toast-container > div { width: 100%; }
     }
@@ -160,11 +174,46 @@
         <span class="mobile-hide text-[11px] px-2 py-0.5 rounded bg-blue-950/80 text-blue-300 border border-blue-800/80 font-mono">v0.1.0</span>
       </div>
       <span class="mobile-hide text-slate-700">|</span>
-      <div id="current-doc-title" class="text-xs font-medium text-slate-300 truncate max-w-md">未选择文档</div>
+
+      <!-- Topic Workspace Selector & Settings -->
+      <div id="topic-selector-container" class="flex items-center gap-1.5 text-xs">
+        <span class="text-slate-400 font-medium mobile-hide">主题:</span>
+        <select id="select-topic-workspace" class="bg-slate-900 text-slate-200 border border-slate-700 rounded px-2 py-1 text-xs focus:outline-none focus:border-indigo-500 max-w-[160px] truncate" title="选择当前研究主题">
+          <option value="">加载主题中...</option>
+        </select>
+        <button id="btn-open-topic-settings" type="button" class="p-1 text-slate-400 hover:text-indigo-300 hover:bg-slate-800 rounded transition" title="主题设置、Collection 绑定与文献管理" aria-label="主题设置">
+          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+        </button>
+      </div>
+
+      <span class="mobile-hide text-slate-700">|</span>
+      <div class="flex items-center gap-1.5 max-w-sm">
+        <div id="current-doc-title" class="text-xs font-medium text-slate-300 truncate">未选择文档</div>
+        <button id="btn-doc-edit-title" type="button" class="hidden p-0.5 text-slate-400 hover:text-blue-300 hover:bg-slate-800 rounded transition" title="编辑易读中文名与元数据" aria-label="编辑标题">
+          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
+        </button>
+        <button id="btn-doc-ai-title" type="button" class="hidden px-1.5 py-0.5 bg-purple-950/80 hover:bg-purple-900 text-purple-300 border border-purple-800/80 rounded text-[10px] transition flex items-center gap-0.5" title="AI 智能识别研报标题与机构">
+          <span>✨ 识别标题</span>
+        </button>
+      </div>
     </div>
 
-    <!-- Connection & Auth Status -->
-    <div class="flex items-center gap-2.5 text-xs">
+    <!-- Right Controls: Inbox, View Toggles, Auth & Settings -->
+    <div class="flex items-center gap-2 text-xs">
+      <!-- Research Inbox Trigger -->
+      <button id="btn-open-inbox" type="button" class="px-2.5 py-1 bg-indigo-950/80 hover:bg-indigo-900 text-indigo-300 border border-indigo-700/60 rounded transition flex items-center gap-1.5 shadow-sm" title="打开研究收件箱 (查看与批量归类 Altero 新增报告)">
+        <svg class="w-3.5 h-3.5 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4"></path></svg>
+        <span>收件箱</span>
+        <span id="inbox-unread-badge" class="px-1.5 py-0.2 bg-indigo-600 text-white rounded-full text-[10px] font-bold hidden">0</span>
+      </button>
+
+      <!-- Panes Maximize/Expand Toggle -->
+      <button id="btn-toggle-canvas-max" type="button" class="mobile-hide px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded border border-slate-700 flex items-center gap-1 transition" title="切换画板全屏或三栏分栏布局">
+        <svg id="icon-canvas-maximize" class="w-3.5 h-3.5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path></svg>
+        <span id="label-canvas-maximize">全屏画板</span>
+      </button>
+
+      <!-- Connection & Auth Status -->
       <div id="auth-container" class="flex items-center gap-2">
         <button id="btn-login" type="button" class="px-3 py-1 bg-blue-600 hover:bg-blue-500 text-white font-medium rounded transition flex items-center gap-1 shadow-sm">
           <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1"></path></svg>
@@ -177,19 +226,27 @@
           <button id="btn-logout" type="button" class="text-[11px] text-slate-400 hover:text-rose-400 ml-1 transition">退出</button>
         </div>
       </div>
-      <button id="btn-open-settings" type="button" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded transition border border-slate-700 flex items-center gap-1">
+      <button id="btn-open-settings" type="button" class="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded transition border border-slate-700 flex items-center gap-1" title="设置与模型配置">
         <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
-        <span class="mobile-hide">调试</span>
+        <span class="mobile-hide">设置</span>
       </button>
     </div>
   </header>
 
   <!-- Main Split-Pane Workspace -->
   <main id="workspace" class="flex-1 flex overflow-hidden">
-    <!-- Left: Library & Collection Navigator -->
+    <!-- Left: Library & Topic PDF Navigator -->
     <aside id="library-pane" aria-label="研究文库" class="w-80 bg-slate-950/90 border-r border-slate-800 flex flex-col flex-shrink-0">
-      <!-- Collection selector header -->
-      <div class="p-3 border-b border-slate-800 flex flex-col gap-2">
+      <div class="p-2 border-b border-slate-800">
+        <div class="flex gap-1 p-1 rounded-lg bg-slate-900/80" role="tablist" aria-label="文献导航方式">
+          <button id="btn-library-view-all" type="button" role="tab" aria-selected="true" aria-controls="library-all-panel" class="library-view-tab flex-1 px-2.5 py-1.5 rounded bg-blue-600 text-white text-xs font-medium transition">文库</button>
+          <button id="btn-library-view-topics" type="button" role="tab" aria-selected="false" aria-controls="library-topics-panel" class="library-view-tab flex-1 px-2.5 py-1.5 rounded text-slate-400 hover:text-slate-200 text-xs font-medium transition">主题分类</button>
+        </div>
+      </div>
+
+      <div id="library-all-panel" class="border-b border-slate-800">
+        <!-- Collection selector header -->
+        <div class="p-3 flex flex-col gap-2">
         <div class="flex items-center justify-between">
           <span class="text-xs font-semibold text-slate-400 tracking-wider uppercase flex items-center gap-1.5">
             <svg class="w-3.5 h-3.5 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"></path></svg>
@@ -202,11 +259,29 @@
         <div id="collections-container" class="flex gap-1 overflow-x-auto pb-1 text-[11px] custom-scrollbar">
           <button data-col="all" class="col-tab px-2.5 py-1 rounded bg-blue-600 text-white whitespace-nowrap transition">全部条目</button>
         </div>
+        </div>
+      </div>
+
+      <div id="library-topics-panel" class="hidden p-3 border-b border-slate-800 space-y-2">
+        <div class="flex items-center justify-between gap-2">
+          <label for="select-library-topic" class="text-xs font-semibold text-indigo-300 whitespace-nowrap">选择主题</label>
+          <button id="btn-manage-library-topic" type="button" class="text-[11px] text-slate-400 hover:text-indigo-300">管理</button>
+        </div>
+        <select id="select-library-topic" class="w-full bg-slate-900 text-slate-200 border border-slate-700 rounded px-2 py-1.5 text-xs focus:outline-none focus:border-indigo-500" title="只显示所选主题下含 PDF 的文献">
+          <option value="">加载主题中...</option>
+        </select>
+        <div class="flex items-center justify-between text-[10px] text-slate-500">
+          <span>仅显示该主题下可阅读的 PDF</span>
+          <span id="topic-library-count">0 篇</span>
+        </div>
       </div>
 
       <!-- Items List -->
       <div id="items-container" class="flex-1 overflow-y-auto custom-scrollbar p-2 space-y-1">
         <div class="text-center text-slate-500 py-12 text-xs">正在连接 altero...</div>
+      </div>
+      <div id="topic-library-items" class="hidden flex-1 overflow-y-auto custom-scrollbar p-2 space-y-1">
+        <div class="text-center text-slate-500 py-12 text-xs">请选择研究主题</div>
       </div>
     </aside>
 
@@ -229,8 +304,8 @@
           </svg>
         </div>
         <div class="space-y-1">
-          <p class="text-sm font-medium text-slate-300">从左侧选择一篇研报以启动阅读器</p>
-          <p class="text-xs text-slate-500">支持 PDF 原生高亮、笔记、划线及双向标注同步</p>
+          <p id="reader-placeholder-title" class="text-sm font-medium text-slate-300">从左侧选择一篇研报以启动阅读器</p>
+          <p id="reader-placeholder-subtitle" class="text-xs text-slate-500">支持 PDF 原生高亮、笔记、划线及双向标注同步</p>
         </div>
       </div>
 
@@ -263,11 +338,13 @@
       <div class="canvas-toolbar px-2 py-2 border-b border-slate-800/80 bg-slate-950/70 flex items-center gap-1.5 text-[11px] overflow-x-auto whitespace-nowrap">
         <button id="btn-canvas-add-note" type="button" title="新建手写卡片 (N)" class="px-2 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white">+ 手写卡片</button>
         <button id="btn-canvas-import" type="button" class="px-2 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 disabled:opacity-40 disabled:cursor-not-allowed">加入当前标注</button>
+        <button id="btn-canvas-quick-import" type="button" class="px-2 py-1.5 rounded bg-indigo-900/80 hover:bg-indigo-800 text-indigo-200 border border-indigo-700/50" title="通过 DOI / arXiv / 学术链接快速导入文献">📥 快速导入</button>
         <button id="btn-canvas-ai-document" type="button" class="px-2 py-1.5 rounded bg-purple-700 hover:bg-purple-600 text-white disabled:opacity-40 disabled:cursor-not-allowed" disabled title="提取当前 PDF 全文并生成可编辑的理解画板；正文会发送给当前 AI 服务">🧠 理解全文</button>
         <button id="btn-canvas-evidence-annotate" type="button" class="px-2 py-1.5 rounded bg-emerald-700 hover:bg-emerald-600 text-white disabled:opacity-40 disabled:cursor-not-allowed" disabled title="把当前画板所有未转换的 AI 证据引用批量转为正式 PDF 批注">🔖 证据转批注</button>
         <button id="btn-canvas-connect" type="button" aria-pressed="false" title="切换连线模式 (C)" class="px-2 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200">连线</button>
         <button id="btn-canvas-ai-translate" type="button" class="px-2 py-1.5 rounded bg-purple-700 hover:bg-purple-600 text-white disabled:opacity-40 disabled:cursor-not-allowed" disabled title="将选中卡片一键忠实翻译为中文">🌐 中译</button>
         <button id="btn-canvas-ai-synthesize" type="button" class="px-2 py-1.5 rounded bg-purple-900/80 hover:bg-purple-800 text-purple-200 border border-purple-700/50 disabled:opacity-40 disabled:cursor-not-allowed" disabled title="一键综合总结选中卡片">✨ 总结</button>
+        <button id="btn-canvas-cross-report" type="button" class="px-2 py-1.5 rounded bg-indigo-900/80 hover:bg-indigo-800 text-indigo-200 border border-indigo-700/50 disabled:opacity-40 disabled:cursor-not-allowed" title="发现当前选中卡片与主题内其他研报的跨报告观点关联与冲突证据">🔗 跨报告关联</button>
         <button id="btn-canvas-ai" type="button" class="px-2 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-purple-200 disabled:opacity-40 disabled:cursor-not-allowed" disabled title="观点对比、针对问答或补充自定义指令">更多 AI</button>
         <span class="w-px h-5 bg-slate-800"></span>
         <button id="btn-canvas-export-json" type="button" title="导出画板 JSON" class="px-2 py-1.5 rounded hover:bg-slate-800 text-slate-300">导出</button>
@@ -501,6 +578,374 @@
     </div>
   </div>
 
+  <!-- Research Inbox Modal -->
+  <div id="inbox-modal" role="dialog" aria-modal="true" aria-labelledby="inbox-title" class="fixed inset-0 bg-black/75 z-50 flex items-center justify-center p-4 hidden backdrop-blur-sm">
+    <div id="inbox-panel" class="bg-slate-900 border border-slate-800 rounded-xl max-w-3xl w-full p-5 space-y-3.5 shadow-2xl max-h-[90vh] flex flex-col">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+        <div class="flex items-center gap-2">
+          <h3 id="inbox-title" class="text-sm font-semibold text-slate-100 flex items-center gap-2">
+            <svg class="w-4 h-4 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4"></path></svg>
+            研究收件箱 (Research Inbox)
+          </h3>
+          <span id="inbox-count-tag" class="text-[10px] px-2 py-0.5 rounded bg-indigo-950 text-indigo-300 border border-indigo-800 font-mono">0 条</span>
+        </div>
+        <div class="flex items-center gap-2">
+          <button id="btn-inbox-quick-import" type="button" class="px-2.5 py-1 bg-indigo-950/80 hover:bg-indigo-900 text-indigo-200 border border-indigo-700/60 rounded text-xs transition flex items-center gap-1.5 shadow-sm" title="通过 DOI / arXiv / 学术链接快速导入文献">
+            <span>📥 快速导入</span>
+          </button>
+          <button id="btn-inbox-generate-topics-ai" type="button" class="px-2.5 py-1 bg-purple-950/90 hover:bg-purple-900 text-purple-200 border border-purple-700 rounded text-xs transition flex items-center gap-1.5 shadow-sm" title="让 AI 根据研报自动提炼 3~6 个核心研究主题体系">
+            <span>✨ AI 提炼主题</span>
+          </button>
+          <button id="btn-inbox-classify-ai" type="button" class="px-2.5 py-1 bg-purple-950/80 hover:bg-purple-900 text-purple-200 border border-purple-700/60 rounded text-xs transition flex items-center gap-1.5 shadow-sm" title="让 AI 根据主题纳入/排除规则推荐分类">
+            <span>✨ AI 智能分类</span>
+          </button>
+          <button id="btn-inbox-scan-now" type="button" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded text-xs transition flex items-center gap-1.5" title="增量扫描 Altero 文库新条目">
+            <svg class="w-3.5 h-3.5 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+            <span>增量扫描 Altero</span>
+          </button>
+          <button id="btn-close-inbox" type="button" aria-label="关闭" class="text-slate-500 hover:text-slate-300 text-lg leading-none">&times;</button>
+        </div>
+      </div>
+
+      <!-- Filters & Search Bar -->
+      <div class="flex flex-wrap items-center justify-between gap-2 text-xs">
+        <div class="flex items-center gap-1 bg-slate-950 p-0.5 rounded border border-slate-800" role="tablist">
+          <button type="button" class="inbox-state-tab px-2.5 py-1 rounded font-medium transition bg-indigo-600 text-white" data-state="new">待处理</button>
+          <button type="button" class="inbox-state-tab px-2.5 py-1 rounded font-medium transition text-slate-400 hover:text-slate-200" data-state="deferred">已暂缓</button>
+          <button type="button" class="inbox-state-tab px-2.5 py-1 rounded font-medium transition text-slate-400 hover:text-slate-200" data-state="accepted">已采纳</button>
+          <button type="button" class="inbox-state-tab px-2.5 py-1 rounded font-medium transition text-slate-400 hover:text-slate-200" data-state="ignored">已忽略</button>
+          <button type="button" class="inbox-state-tab px-2.5 py-1 rounded font-medium transition text-slate-400 hover:text-slate-200" data-state="all">全部</button>
+        </div>
+        <div class="flex items-center gap-2 flex-1 max-w-xs ml-auto">
+          <input id="input-inbox-search" type="search" placeholder="按标题、作者、年份或标签搜索…" class="w-full px-2.5 py-1 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:outline-none focus:border-indigo-500 text-xs">
+        </div>
+      </div>
+
+      <!-- Entries Table / Card List -->
+      <div id="inbox-scroll-region" class="flex-1 custom-scrollbar border border-slate-800 rounded bg-slate-950/50">
+        <div id="inbox-list-header" class="px-3 py-2 border-b border-slate-800 bg-slate-950 flex items-center justify-between text-[11px] text-slate-400 sticky top-0 z-10">
+          <label class="flex items-center gap-2 cursor-pointer select-none">
+            <input id="checkbox-inbox-select-all" type="checkbox" class="rounded border-slate-700 bg-slate-900 text-indigo-600 focus:ring-0">
+            <span>全选本页</span>
+          </label>
+          <span id="inbox-showing-count">显示 0 项</span>
+        </div>
+        <div id="inbox-items-container" class="divide-y divide-slate-800/60 p-1 space-y-1">
+          <div class="text-center text-slate-500 py-12 text-xs">收件箱暂无文献</div>
+        </div>
+      </div>
+
+      <!-- Bottom Batch Action Bar -->
+      <div class="flex items-center justify-between pt-2 border-t border-slate-800 text-xs">
+        <div class="text-slate-400">
+          已选择 <strong id="inbox-selected-count" class="text-indigo-400 font-mono">0</strong> 篇文献
+        </div>
+        <div class="flex items-center gap-2">
+          <button id="btn-inbox-accept-ai" type="button" disabled class="px-2.5 py-1.5 bg-purple-900/80 hover:bg-purple-800 text-purple-200 border border-purple-700/50 rounded text-xs transition disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1" title="一键采纳所有置信度≥70%的 AI 主题推荐">
+            <span>✨ 采纳 AI 建议</span>
+          </button>
+          <button id="btn-inbox-batch-reopen" type="button" disabled class="px-2.5 py-1.5 bg-blue-950 hover:bg-blue-900 text-blue-300 border border-blue-800 rounded transition disabled:opacity-40 disabled:cursor-not-allowed" title="重新放回待处理；不会移出已归入的主题">重新处理</button>
+          <button id="btn-inbox-batch-ignore" type="button" disabled class="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-rose-300 rounded transition disabled:opacity-40 disabled:cursor-not-allowed">忽略</button>
+          <button id="btn-inbox-batch-defer" type="button" disabled class="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded transition disabled:opacity-40 disabled:cursor-not-allowed">暂缓</button>
+          <button id="btn-inbox-batch-assign" type="button" disabled class="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded font-medium transition shadow-lg shadow-indigo-600/20 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1">
+            <span>批量归类至研究主题…</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Cross-Report Relations & Progressive Expansion Modal -->
+  <div id="cross-report-modal" role="dialog" aria-modal="true" aria-labelledby="cross-report-title" class="fixed inset-0 bg-black/80 z-60 flex items-center justify-center p-4 hidden backdrop-blur-sm">
+    <div id="cross-report-panel" class="bg-slate-900 border border-slate-800 rounded-xl max-w-2xl w-full p-5 space-y-4 shadow-2xl max-h-[85vh] flex flex-col">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+        <div class="flex items-center gap-2">
+          <h3 id="cross-report-title" class="text-sm font-semibold text-slate-100 flex items-center gap-2">
+            <svg class="w-4 h-4 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"></path></svg>
+            跨报告观点关联与冲突证据 (Cross-Report Relations)
+          </h3>
+          <span id="cross-report-count-tag" class="text-[10px] px-2 py-0.5 rounded bg-indigo-950 text-indigo-300 border border-indigo-800 font-mono">0 项发现</span>
+        </div>
+        <button id="btn-close-cross-report" type="button" aria-label="关闭" class="text-slate-500 hover:text-slate-300 text-lg leading-none">&times;</button>
+      </div>
+
+      <div class="p-2.5 bg-slate-950 border border-slate-800 rounded-lg text-xs space-y-1">
+        <div class="text-slate-400 font-medium">当前焦点观点 / 研报：</div>
+        <div id="cross-report-focal-text" class="text-slate-200 font-serif italic line-clamp-2">选择焦点观点…</div>
+      </div>
+
+      <!-- Relations List -->
+      <div id="cross-report-relations-list" class="flex-1 overflow-y-auto custom-scrollbar space-y-2 max-h-[320px]">
+        <div class="text-center text-slate-500 py-8 text-xs">正在分析跨报告关联…</div>
+      </div>
+
+      <div class="flex items-center justify-between pt-2 border-t border-slate-800 text-xs">
+        <div class="text-slate-400">
+          勾选需要展开到当前画板的外部观点（默认最多展开 5 项以防画板杂乱）
+        </div>
+        <div class="flex items-center gap-2">
+          <button id="btn-cancel-cross-report" type="button" class="px-3.5 py-1.5 bg-transparent hover:bg-slate-800 text-slate-400 rounded text-xs transition">关闭</button>
+          <button id="btn-expand-selected-relations" type="button" class="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-xs font-medium transition shadow-lg shadow-indigo-600/20 flex items-center gap-1.5">
+            <span>展开选中国点至画板</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Batch Topic Assignment Dialog -->
+  <div id="batch-topics-modal" role="dialog" aria-modal="true" aria-labelledby="batch-topics-title" class="fixed inset-0 bg-black/80 z-60 flex items-center justify-center p-4 hidden backdrop-blur-sm">
+    <div id="batch-topics-panel" class="bg-slate-900 border border-slate-800 rounded-xl max-w-md w-full p-5 space-y-4 shadow-2xl">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+        <h3 id="batch-topics-title" class="text-sm font-semibold text-slate-100 flex items-center gap-2">
+          <svg class="w-4 h-4 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>
+          批量归类至研究主题
+        </h3>
+        <button id="btn-close-batch-topics" type="button" aria-label="关闭" class="text-slate-500 hover:text-slate-300 text-lg leading-none">&times;</button>
+      </div>
+
+      <div class="text-xs text-slate-400">
+        将选中的 <strong id="batch-assign-doc-count" class="text-indigo-300">0</strong> 篇文献加入以下研究主题（支持同时勾选多个主题，不复制原文件）：
+      </div>
+
+      <!-- Topics Selection List -->
+      <div id="batch-topics-list" class="max-h-48 overflow-y-auto custom-scrollbar p-2 bg-slate-950 border border-slate-800 rounded space-y-1.5">
+        <div class="text-center text-slate-500 py-4 text-xs">加载主题列表中…</div>
+      </div>
+
+      <!-- Inline Quick Create Topic -->
+      <div class="pt-2 border-t border-slate-800 flex items-center gap-2 text-xs">
+        <input id="input-new-topic-quick" type="text" placeholder="新建研究主题名称…" class="flex-1 px-2.5 py-1.5 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:outline-none focus:border-indigo-500">
+        <button id="btn-create-topic-quick" type="button" class="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded shrink-0">+ 新建主题</button>
+      </div>
+
+      <div class="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+        <button id="btn-cancel-batch-topics" type="button" class="px-3.5 py-1.5 bg-transparent hover:bg-slate-800 text-slate-400 rounded text-xs transition">取消</button>
+        <button id="btn-confirm-batch-topics" type="button" class="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-xs font-medium transition shadow-lg shadow-indigo-600/20">
+          <span>确认归类</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Topic Settings, Collection Bindings, and Topic Documents Modal -->
+  <div id="topic-settings-modal" role="dialog" aria-modal="true" aria-labelledby="topic-settings-title" class="fixed inset-0 bg-black/75 z-50 flex items-center justify-center p-4 hidden backdrop-blur-sm">
+    <div id="topic-settings-panel" class="bg-slate-900 border border-slate-800 rounded-xl max-w-2xl w-full p-5 space-y-4 shadow-2xl max-h-[90vh] flex flex-col">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+        <h3 id="topic-settings-title" class="text-sm font-semibold text-slate-100 flex items-center gap-2">
+          <svg class="w-4 h-4 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4"></path></svg>
+          研究主题设置与 Collection 绑定
+        </h3>
+        <button id="btn-close-topic-settings" type="button" aria-label="关闭" class="text-slate-500 hover:text-slate-300 text-lg leading-none">&times;</button>
+      </div>
+
+      <!-- Navigation Tabs -->
+      <div class="flex items-center gap-1 bg-slate-950 p-0.5 rounded border border-slate-800 text-xs">
+        <button type="button" class="topic-tab px-3 py-1.5 rounded font-medium transition bg-indigo-600 text-white" data-tab="meta">主题属性</button>
+        <button type="button" class="topic-tab px-3 py-1.5 rounded font-medium transition text-slate-400 hover:text-slate-200" data-tab="bindings">Collection 绑定</button>
+        <button type="button" class="topic-tab px-3 py-1.5 rounded font-medium transition text-slate-400 hover:text-slate-200" data-tab="docs">主题文献管理</button>
+      </div>
+
+      <!-- Tab 1: Metadata -->
+      <div id="topic-tab-meta" class="topic-tab-pane space-y-3 text-xs flex-1 overflow-y-auto custom-scrollbar pr-1">
+        <div>
+          <label for="input-topic-name" class="block text-slate-300 font-medium mb-1">主题名称 (Title)</label>
+          <input id="input-topic-name" type="text" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:outline-none focus:border-indigo-500 text-xs">
+        </div>
+        <div>
+          <label for="input-topic-desc" class="block text-slate-400 font-medium mb-1">主题描述与背景 (Description)</label>
+          <textarea id="input-topic-desc" rows="2" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:outline-none focus:border-indigo-500 text-xs resize-none"></textarea>
+        </div>
+        <div>
+          <label for="input-topic-question" class="block text-slate-300 font-medium mb-1">核心研究问题 (Research Question)</label>
+          <input id="input-topic-question" type="text" placeholder="例如：推理时搜索对 LLM 逻辑链的作用机制是什么？" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:outline-none focus:border-indigo-500 text-xs">
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label for="input-topic-inclusion" class="block text-slate-400 font-medium mb-1">纳入规则 (Inclusion Rules)</label>
+            <textarea id="input-topic-inclusion" rows="3" placeholder="例如：覆盖 o1/r1 机制分析、强化学习推理架构的实证论文" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:outline-none focus:border-indigo-500 text-xs resize-none"></textarea>
+          </div>
+          <div>
+            <label for="input-topic-exclusion" class="block text-slate-400 font-medium mb-1">排除规则 (Exclusion Rules)</label>
+            <textarea id="input-topic-exclusion" rows="3" placeholder="例如：排除单纯应用层微调、无理论贡献的技术报告" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:outline-none focus:border-indigo-500 text-xs resize-none"></textarea>
+          </div>
+        </div>
+        <div class="flex items-center justify-between pt-2 border-t border-slate-800">
+          <button id="btn-delete-topic" type="button" class="text-rose-400 hover:text-rose-300 text-xs">删除当前主题</button>
+          <button id="btn-save-topic-meta" type="button" class="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-xs font-medium transition shadow-lg shadow-indigo-600/20">保存属性</button>
+        </div>
+      </div>
+
+      <!-- Tab 2: Collection Bindings -->
+      <div id="topic-tab-bindings" class="topic-tab-pane space-y-3.5 text-xs flex-1 overflow-y-auto custom-scrollbar pr-1 hidden">
+        <div class="p-3 bg-slate-950 border border-slate-800 rounded-lg space-y-2">
+          <div class="font-medium text-slate-200">绑定新的 Altero Collection</div>
+          <p class="text-slate-400 text-[11px]">绑定后，Altero 该集合中新增的文献将自动同步至本主题收件箱。</p>
+          <div class="flex flex-wrap items-center gap-2 pt-1">
+            <select id="select-bind-collection" class="flex-1 min-w-[160px] px-2.5 py-1.5 bg-slate-900 border border-slate-700 rounded text-slate-200 focus:outline-none focus:border-indigo-500 text-xs">
+              <option value="">正在读取 Collection 列表…</option>
+            </select>
+            <select id="select-bind-mode" class="px-2.5 py-1.5 bg-slate-900 border border-slate-700 rounded text-slate-200 focus:outline-none focus:border-indigo-500 text-xs">
+              <option value="inbound">单向自动纳入 (inbound)</option>
+              <option value="confirm_both">双向确认 (confirm_both)</option>
+            </select>
+            <button id="btn-submit-bind-collection" type="button" class="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-xs font-medium transition shrink-0">+ 绑定</button>
+          </div>
+        </div>
+
+        <div>
+          <div class="font-medium text-slate-300 mb-1.5">已绑定的 Collections</div>
+          <div id="topic-bindings-list" class="space-y-1.5 max-h-48 overflow-y-auto custom-scrollbar">
+            <div class="text-center text-slate-500 py-6 text-xs">暂无绑定的 Collection</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tab 3: Topic Documents -->
+      <div id="topic-tab-docs" class="topic-tab-pane space-y-2 text-xs flex-1 overflow-y-auto custom-scrollbar pr-1 hidden">
+        <div class="flex items-center justify-between text-slate-400 text-[11px] pb-1 border-b border-slate-800">
+          <span>归属本主题的报告</span>
+          <span id="topic-docs-count">共 0 篇</span>
+        </div>
+        <div id="topic-docs-list" class="space-y-1.5 max-h-64 overflow-y-auto custom-scrollbar">
+          <div class="text-center text-slate-500 py-8 text-xs">主题内暂无文献</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Document Metadata / Chinese Title Rename Modal -->
+  <div id="doc-meta-modal" role="dialog" aria-modal="true" aria-labelledby="doc-meta-title" class="fixed inset-0 bg-black/75 z-50 flex items-center justify-center p-4 hidden backdrop-blur-sm">
+    <div id="doc-meta-panel" class="bg-slate-900 border border-slate-800 rounded-xl max-w-md w-full p-5 space-y-4 shadow-2xl">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+        <h3 id="doc-meta-title" class="text-sm font-semibold text-slate-100 flex items-center gap-2">
+          <svg class="w-4 h-4 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
+          编辑研报易读中文名与元数据
+        </h3>
+        <button id="btn-close-doc-meta" type="button" class="text-slate-400 hover:text-slate-200 text-lg leading-none" aria-label="关闭">&times;</button>
+      </div>
+      <div class="space-y-3 text-xs">
+        <input type="hidden" id="doc-meta-item-key">
+        <div>
+          <label class="block text-slate-400 mb-1">易读中文名 (规范标题)</label>
+          <input id="input-doc-meta-clean-title" type="text" placeholder="例如：【中金公司】人形机器人产业链深度（2024）" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:outline-none focus:border-blue-500">
+        </div>
+        <div class="grid grid-cols-2 gap-2">
+          <div>
+            <label class="block text-slate-400 mb-1">机构 / 作者来源</label>
+            <input id="input-doc-meta-institution" type="text" placeholder="例如：中金公司" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:outline-none focus:border-blue-500">
+          </div>
+          <div>
+            <label class="block text-slate-400 mb-1">发布年份</label>
+            <input id="input-doc-meta-year" type="text" placeholder="例如：2024" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:outline-none focus:border-blue-500">
+          </div>
+        </div>
+        <div>
+          <label class="block text-slate-400 mb-1">报告核心主题 / 主标题</label>
+          <input id="input-doc-meta-report-title" type="text" placeholder="报告核心主标题" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:outline-none focus:border-blue-500">
+        </div>
+        <div>
+          <label class="block text-slate-400 mb-1">细分方向 / 副标题</label>
+          <input id="input-doc-meta-subtitle" type="text" placeholder="副标题或细分方向（可选）" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:outline-none focus:border-blue-500">
+        </div>
+        <div>
+          <label class="block text-slate-400 mb-1">一句话摘要</label>
+          <textarea id="input-doc-meta-summary" rows="2" placeholder="研报核心结论或摘要（可选）" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:outline-none focus:border-blue-500"></textarea>
+        </div>
+      </div>
+      <div class="flex items-center justify-between pt-2 border-t border-slate-800">
+        <button id="btn-doc-meta-ai-extract" type="button" class="px-3 py-1.5 bg-purple-900/80 hover:bg-purple-800 text-purple-200 border border-purple-700/50 rounded text-xs transition flex items-center gap-1">
+          <span>✨ 重新 AI 提取</span>
+        </button>
+        <div class="flex items-center gap-2">
+          <button id="btn-cancel-doc-meta" type="button" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-xs transition">取消</button>
+          <button id="btn-save-doc-meta" type="button" class="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs font-medium transition shadow-md">保存</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Quick DOI/arXiv/URL Import Modal -->
+  <div id="quick-import-modal" role="dialog" aria-modal="true" aria-labelledby="quick-import-title" class="fixed inset-0 bg-black/75 z-50 flex items-center justify-center p-4 hidden backdrop-blur-sm">
+    <div id="quick-import-panel" class="bg-slate-900 border border-slate-800 rounded-xl max-w-lg w-full p-5 space-y-4 shadow-2xl">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+        <h3 id="quick-import-title" class="text-sm font-semibold text-slate-100 flex items-center gap-2">
+          <svg class="w-4 h-4 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path></svg>
+          快速导入文献 (DOI / arXiv / 学术链接)
+        </h3>
+        <button id="btn-close-quick-import" type="button" class="text-slate-400 hover:text-slate-200 text-lg leading-none" aria-label="关闭">&times;</button>
+      </div>
+
+      <div class="space-y-3 text-xs">
+        <div>
+          <label for="input-quick-import-query" class="block text-slate-300 font-medium mb-1">输入 DOI、arXiv 编号或文献网页 URL</label>
+          <div class="flex gap-2">
+            <input id="input-quick-import-query" type="text" placeholder="例如：10.1038/s41586-020-2649-2 或 https://arxiv.org/abs/2301.12345" class="flex-1 px-3 py-2 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:outline-none focus:border-indigo-500 font-mono text-xs">
+            <button id="btn-quick-import-resolve" type="button" class="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded font-medium transition shrink-0 flex items-center gap-1">
+              <span>🔍 解析</span>
+            </button>
+          </div>
+          <p class="text-[11px] text-slate-500 mt-1">支持标准 DOI、arXiv 论文链接及常见学术期刊网页元数据自动抓取与去重检测。</p>
+        </div>
+
+        <!-- Resolution Result Card (Hidden initially) -->
+        <div id="quick-import-result-card" class="p-3 bg-slate-950 border border-slate-800 rounded space-y-2 hidden">
+          <div class="flex items-start justify-between gap-2">
+            <div id="quick-import-result-title" class="font-semibold text-slate-200 text-xs"></div>
+            <span id="quick-import-source-badge" class="px-1.5 py-0.5 rounded bg-indigo-950 text-indigo-300 border border-indigo-800 text-[10px] uppercase shrink-0">DOI</span>
+          </div>
+          <div id="quick-import-result-meta" class="text-[11px] text-slate-400 flex flex-wrap gap-x-3 gap-y-1"></div>
+          <div id="quick-import-result-abstract" class="text-[11px] text-slate-400 line-clamp-3 leading-relaxed"></div>
+
+          <!-- Duplicate Warning Box -->
+          <div id="quick-import-duplicate-warning" class="p-2 rounded bg-amber-950/50 border border-amber-800/60 text-[11px] text-amber-300 space-y-1 hidden">
+            <div class="font-medium flex items-center gap-1">
+              <span>⚠️ 发现疑似重复文献</span>
+            </div>
+            <div id="quick-import-duplicate-details" class="text-amber-400/90 space-y-0.5"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="flex items-center justify-between pt-2 border-t border-slate-800">
+        <button id="btn-cancel-quick-import" type="button" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-xs transition">取消</button>
+        <div class="flex items-center gap-2">
+          <button id="btn-quick-import-inbox-only" type="button" disabled class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded text-xs transition disabled:opacity-40 disabled:cursor-not-allowed">仅存入收件箱</button>
+          <button id="btn-quick-import-topic" type="button" disabled class="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-xs font-medium transition shadow-md disabled:opacity-40 disabled:cursor-not-allowed">导入并加入当前主题</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- In-Canvas Evidence Quick Popover / Reader Floating Layer -->
+  <div id="canvas-evidence-popover" role="dialog" aria-modal="true" aria-labelledby="evidence-popover-title" class="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 hidden backdrop-blur-xs">
+    <div id="evidence-popover-panel" class="bg-slate-900 border border-indigo-900/80 rounded-xl max-w-lg w-full p-5 space-y-3.5 shadow-2xl">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-2.5">
+        <div class="min-w-0 flex items-center gap-2">
+          <span class="w-2 h-2 rounded-full bg-indigo-400"></span>
+          <h3 id="evidence-popover-title" class="text-xs font-semibold text-slate-200 truncate">PDF 原文证据核验</h3>
+          <span id="evidence-popover-page-badge" class="px-1.5 py-0.5 rounded bg-indigo-950 text-indigo-300 border border-indigo-800 text-[10px] font-mono shrink-0">p.1</span>
+        </div>
+        <button id="btn-close-evidence-popover" type="button" class="text-slate-400 hover:text-slate-200 text-lg leading-none" aria-label="关闭">&times;</button>
+      </div>
+
+      <div class="space-y-2 text-xs">
+        <div id="evidence-popover-doc-title" class="font-medium text-slate-300 text-[11px] truncate"></div>
+        <div id="evidence-popover-quote-box" class="p-3 bg-slate-950 border border-indigo-900/60 rounded-lg text-slate-200 text-xs leading-relaxed font-serif select-text max-h-48 overflow-y-auto custom-scrollbar"></div>
+      </div>
+
+      <div class="flex items-center justify-between pt-2 border-t border-slate-800 text-xs">
+        <span class="text-[11px] text-slate-500">支持按 Esc 快速关闭浮层</span>
+        <div class="flex items-center gap-2">
+          <button id="btn-dismiss-evidence-popover" type="button" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-xs transition">关闭</button>
+          <button id="btn-evidence-popover-jump" type="button" class="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-xs font-medium transition shadow-md flex items-center gap-1">
+            <span>完整阅读 ↗</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Toast Notification Container -->
   <div id="toast-container" aria-live="polite" aria-atomic="true" class="fixed bottom-4 right-4 z-50 flex flex-col gap-2 pointer-events-none"></div>
 
@@ -669,12 +1114,16 @@
 
     let allItems = [];
     let currentSelectedCollection = 'all';
+    let currentLibraryView = 'all';
+    let topicLibraryLoadToken = 0;
     let currentItem = null;
     let currentAttachment = null;
     let currentDocumentLibrary = null;
     let currentReaderInstance = null;
     let currentAnnotationsMap = new Map(); // key -> { version, data }
     const clientAnnotationIdMap = new Map(); // clientId (e.g. REBD-1057) -> serverItemKey
+    let documentMetas = new Map(); // itemKey -> meta object
+    let currentEditingMetaItem = null;
     let canvasWorkspace = null;
     let canvasBoard = null;
     let canvasNodes = new Map();
@@ -1020,6 +1469,7 @@
     }
 
     async function handleLogout() {
+      documentMetas.clear();
       try {
         await fetch('/auth/logout', { method: 'POST' });
       } catch (e) {
@@ -1112,6 +1562,175 @@
         toast.classList.add('opacity-0', 'translate-y-2');
         setTimeout(() => toast.remove(), 300);
       }, duration);
+    }
+
+    // --- Document Metadata & Chinese Title Extraction ---
+    function docMetaKey(libraryType = 'user', libraryId = config.userId, itemKey = '') {
+      const type = libraryType || 'user';
+      const id = libraryId || config.userId || '';
+      return `${type}:${id}:${itemKey}`;
+    }
+
+    function rememberDocumentMetas(metas) {
+      if (!Array.isArray(metas)) return 0;
+      for (const meta of metas) {
+        if (!meta?.itemKey) continue;
+        documentMetas.set(docMetaKey(meta.libraryType, meta.libraryId, meta.itemKey), meta);
+        const entry = inboxEntries.find(candidate => candidate.itemKey === meta.itemKey
+          && candidate.libraryType === meta.libraryType
+          && String(candidate.libraryId) === String(meta.libraryId));
+        if (entry) {
+          entry.cleanTitle = meta.cleanTitle;
+          entry.institution = meta.institution;
+        }
+      }
+      return metas.length;
+    }
+
+    function openDocMetaModal(item) {
+      if (!item) return;
+      currentEditingMetaItem = item;
+      const libType = item.libraryType || currentDocumentLibrary?.libraryType || 'user';
+      const libId = item.libraryId || currentDocumentLibrary?.libraryId || config.userId;
+      const meta = documentMetas.get(docMetaKey(libType, libId, item.key));
+      const rawName = item.data?.title || item.data?.filename || '';
+      document.getElementById('doc-meta-item-key').value = item.key;
+      document.getElementById('input-doc-meta-clean-title').value = meta?.cleanTitle || rawName;
+      document.getElementById('input-doc-meta-institution').value = meta?.institution || '';
+      document.getElementById('input-doc-meta-year').value = meta?.year || '';
+      document.getElementById('input-doc-meta-report-title').value = meta?.reportTitle || '';
+      document.getElementById('input-doc-meta-subtitle').value = meta?.subtitle || '';
+      document.getElementById('input-doc-meta-summary').value = meta?.summary || '';
+      document.getElementById('doc-meta-modal').classList.remove('hidden');
+    }
+
+    function closeDocMetaModal() {
+      document.getElementById('doc-meta-modal').classList.add('hidden');
+      currentEditingMetaItem = null;
+    }
+
+    async function saveDocMetaModal() {
+      if (!currentEditingMetaItem) return;
+      const itemKey = document.getElementById('doc-meta-item-key').value;
+      const cleanTitle = document.getElementById('input-doc-meta-clean-title').value.trim();
+      if (!cleanTitle) {
+        showToast('易读中文名不能为空', 'error');
+        return;
+      }
+      const institution = document.getElementById('input-doc-meta-institution').value.trim();
+      const year = document.getElementById('input-doc-meta-year').value.trim();
+      const reportTitle = document.getElementById('input-doc-meta-report-title').value.trim();
+      const subtitle = document.getElementById('input-doc-meta-subtitle').value.trim();
+      const summary = document.getElementById('input-doc-meta-summary').value.trim();
+
+      const libType = currentEditingMetaItem.libraryType || currentDocumentLibrary?.libraryType || 'user';
+      const libId = currentEditingMetaItem.libraryId || currentDocumentLibrary?.libraryId || config.userId;
+
+      try {
+        const res = await fetch('/canvas/documents/metadata', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            libraryType: libType,
+            libraryId: libId,
+            itemKey,
+            cleanTitle,
+            institution,
+            year,
+            reportTitle,
+            subtitle,
+            summary
+          })
+        });
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          throw new Error(errData.message || `HTTP ${res.status}`);
+        }
+        const updated = await res.json();
+        if (updated.data) {
+          documentMetas.set(docMetaKey(updated.data.libraryType, updated.data.libraryId, updated.data.itemKey), updated.data);
+          renderItems();
+          renderInboxEntries();
+          if (currentItem?.key === itemKey) {
+            document.getElementById('current-doc-title').textContent = updated.data.cleanTitle;
+          }
+          showToast('研报中文名已更新', 'success');
+          closeDocMetaModal();
+        }
+      } catch (err) {
+        showToast(`保存元数据失败: ${errorMessage(err)}`, 'error');
+      }
+    }
+
+    async function extractDocumentChineseMetadata(item, { force = false } = {}) {
+      if (!item) return null;
+      const metaKey = item.key;
+      const filename = item.data?.filename || item.filename || '';
+      const rawTitle = item.data?.title || item.title || '';
+      const libType = item.libraryType || currentDocumentLibrary?.libraryType || 'user';
+      const libId = item.libraryId || currentDocumentLibrary?.libraryId || config.userId;
+
+      let textSnippet = '';
+      if (currentReaderInstance && currentItem?.key === metaKey) {
+        try {
+          const pdfDoc = currentReaderInstance._primaryView?._iframeWindow?.PDFViewerApplication?.pdfDocument;
+          if (pdfDoc) {
+            const pageCount = pdfDoc.numPages || 1;
+            const extractPages = Math.min(3, pageCount);
+            for (let p = 0; p < extractPages; p++) {
+              const pageData = await pdfDoc.getPageData({ pageIndex: p });
+              textSnippet += `\n--- Page ${p + 1} ---\n` + pdfPageText(pageData);
+            }
+          }
+        } catch (e) {
+          // ignore extraction error, textSnippet will be empty and AI will use title/filename
+        }
+      }
+
+      showToast('正在使用 AI 识别研报机构与中文标题...', 'info');
+      try {
+        const res = await fetch('/canvas/documents/extract-metadata', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            libraryType: libType,
+            libraryId: libId,
+            itemKey: metaKey,
+            attachmentKey: currentAttachment?.key || null,
+            attachmentVersion: currentAttachment?.version ?? null,
+            filename,
+            rawTitle,
+            textSnippet: textSnippet.slice(0, 10_000),
+            forceRefresh: force
+          })
+        });
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          throw new Error(errData.message || `HTTP ${res.status}`);
+        }
+        const result = await res.json();
+        if (result.data) {
+          documentMetas.set(docMetaKey(result.data.libraryType, result.data.libraryId, result.data.itemKey), result.data);
+          renderItems();
+          renderInboxEntries();
+          if (currentItem?.key === metaKey) {
+            document.getElementById('current-doc-title').textContent = result.data.cleanTitle;
+          }
+          if (currentEditingMetaItem?.key === metaKey) {
+            document.getElementById('input-doc-meta-clean-title').value = result.data.cleanTitle || '';
+            document.getElementById('input-doc-meta-institution').value = result.data.institution || '';
+            document.getElementById('input-doc-meta-year').value = result.data.year || '';
+            document.getElementById('input-doc-meta-report-title').value = result.data.reportTitle || '';
+            document.getElementById('input-doc-meta-subtitle').value = result.data.subtitle || '';
+            document.getElementById('input-doc-meta-summary').value = result.data.summary || '';
+          }
+          showToast(`已识别：${result.data.cleanTitle}`, 'success');
+          return result.data;
+        }
+      } catch (err) {
+        showToast(`识别研报标题失败: ${errorMessage(err)}`, 'error');
+      }
+      return null;
     }
 
     // --- Settings Modal Handling ---
@@ -1270,6 +1889,74 @@
       setCanvasSaveState(event.currentTarget.checked ? '自动划线中译已开启' : '自动划线中译已关闭', 'ok');
     };
 
+    // Topic Workspace & Settings Bindings
+    document.getElementById('select-topic-workspace')?.addEventListener('change', e => {
+      switchTopicWorkspace(e.target.value);
+    });
+    document.getElementById('btn-library-view-all')?.addEventListener('click', () => switchLibraryView('all'));
+    document.getElementById('btn-library-view-topics')?.addEventListener('click', () => switchLibraryView('topics'));
+    document.getElementById('select-library-topic')?.addEventListener('change', async event => {
+      const workspaceId = event.target.value;
+      if (workspaceId && workspaceId !== canvasWorkspace?.id) await switchTopicWorkspace(workspaceId);
+      else await loadTopicLibraryDocuments();
+    });
+    document.getElementById('btn-manage-library-topic')?.addEventListener('click', () => openTopicSettingsModal('docs'));
+    document.getElementById('btn-open-topic-settings')?.addEventListener('click', () => openTopicSettingsModal('meta'));
+    document.getElementById('btn-close-topic-settings')?.addEventListener('click', closeTopicSettingsModal);
+    document.querySelectorAll('.topic-tab').forEach(btn => {
+      btn.addEventListener('click', () => switchTopicSettingsTab(btn.dataset.tab));
+    });
+    document.getElementById('btn-save-topic-meta')?.addEventListener('click', saveTopicMetadata);
+    document.getElementById('btn-delete-topic')?.addEventListener('click', deleteCurrentTopic);
+    document.getElementById('btn-submit-bind-collection')?.addEventListener('click', submitAddCollectionBinding);
+
+    // Research Inbox & Batch Topic Bindings
+    document.getElementById('btn-open-inbox')?.addEventListener('click', openInboxModal);
+    document.getElementById('btn-close-inbox')?.addEventListener('click', closeInboxModal);
+    document.getElementById('btn-inbox-scan-now')?.addEventListener('click', scanAlteroInbox);
+    document.getElementById('btn-inbox-generate-topics-ai')?.addEventListener('click', generateTopicsWithAi);
+    document.getElementById('btn-inbox-classify-ai')?.addEventListener('click', classifyInboxWithAi);
+    document.getElementById('btn-inbox-accept-ai')?.addEventListener('click', acceptAllAiSuggestions);
+    document.querySelectorAll('.inbox-state-tab').forEach(btn => {
+      btn.addEventListener('click', () => {
+        currentInboxState = btn.dataset.state;
+        document.querySelectorAll('.inbox-state-tab').forEach(b => {
+          const isSelected = b.dataset.state === currentInboxState;
+          b.className = `inbox-state-tab px-2.5 py-1 rounded font-medium transition ${
+            isSelected ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-slate-200'
+          }`;
+        });
+        loadInboxEntries();
+      });
+    });
+    document.getElementById('input-inbox-search')?.addEventListener('input', renderInboxEntries);
+    document.getElementById('checkbox-inbox-select-all')?.addEventListener('change', e => {
+      if (e.target.checked) {
+        inboxEntries.forEach(entry => inboxSelectedIds.add(entry.id));
+      } else {
+        inboxSelectedIds.clear();
+      }
+      renderInboxEntries();
+    });
+    document.getElementById('btn-inbox-batch-assign')?.addEventListener('click', () => openBatchTopicsModal([...inboxSelectedIds]));
+    document.getElementById('btn-inbox-batch-reopen')?.addEventListener('click', () => executeInboxBatchAction('reopen'));
+    document.getElementById('btn-inbox-batch-defer')?.addEventListener('click', () => executeInboxBatchAction('defer'));
+    document.getElementById('btn-inbox-batch-ignore')?.addEventListener('click', () => executeInboxBatchAction('ignore'));
+
+    document.getElementById('btn-close-batch-topics')?.addEventListener('click', closeBatchTopicsModal);
+    document.getElementById('btn-cancel-batch-topics')?.addEventListener('click', closeBatchTopicsModal);
+    document.getElementById('btn-create-topic-quick')?.addEventListener('click', quickCreateTopicInBatch);
+    document.getElementById('btn-confirm-batch-topics')?.addEventListener('click', confirmBatchTopicAssignment);
+    document.getElementById('input-new-topic-quick')?.addEventListener('keydown', e => {
+      if (e.key === 'Enter') quickCreateTopicInBatch();
+    });
+
+    document.getElementById('btn-toggle-canvas-max')?.addEventListener('click', toggleCanvasMaximize);
+    document.getElementById('btn-canvas-cross-report')?.addEventListener('click', () => openCrossReportRelationsModal());
+    document.getElementById('btn-close-cross-report')?.addEventListener('click', closeCrossReportRelationsModal);
+    document.getElementById('btn-cancel-cross-report')?.addEventListener('click', closeCrossReportRelationsModal);
+    document.getElementById('btn-expand-selected-relations')?.addEventListener('click', expandSelectedCrossReportRelations);
+
     document.getElementById('btn-test-conn').onclick = () => {
       const api = document.getElementById('input-api').value.trim();
       const userId = document.getElementById('input-user-id').value.trim();
@@ -1300,6 +1987,7 @@
       localStorage.setItem('altcanvas_user_id', config.userId);
       sessionStorage.setItem('altcanvas_key', config.apiKey);
 
+      documentMetas.clear();
       closeSettingsModal();
       showToast('配置已保存，正在重新加载文库...', 'success');
       loadCollectionsAndLibrary();
@@ -1307,6 +1995,7 @@
 
     // --- Collections & Library Loading ---
     async function loadCollectionsAndLibrary() {
+      documentMetas.clear();
       if (!config.userId) {
         document.getElementById('items-container').innerHTML = `
           <div class="text-center text-slate-500 py-12 px-4 space-y-3">
@@ -1326,10 +2015,12 @@
         const userId = encodeURIComponent(config.userId);
         const colUrl = getApiUrl(`/users/${userId}/collections`);
         const itemUrl = getApiUrl(`/users/${userId}/items/top?limit=100`);
+        const metaUrl = `/canvas/documents/metadata?libraryType=user&libraryId=${userId}`;
 
-        const [colRes, itemsRes] = await Promise.all([
+        const [colRes, itemsRes, metasRes] = await Promise.all([
           fetch(colUrl, { headers: getHeaders(), signal: libraryController.signal }),
-          fetch(itemUrl, { headers: getHeaders(), signal: libraryController.signal })
+          fetch(itemUrl, { headers: getHeaders(), signal: libraryController.signal }),
+          fetch(metaUrl, { signal: libraryController.signal }).catch(() => null)
         ]);
 
         if (colRes.status === 401 || itemsRes.status === 401) {
@@ -1344,6 +2035,19 @@
         if (colRes.status === 403 || itemsRes.status === 403) {
           container.innerHTML = '<div class="text-center text-amber-400 py-12 px-4 text-xs">当前登录缺少读取文库所需的权限，请退出后重新授权。</div>';
           return;
+        }
+
+        if (metasRes && metasRes.ok) {
+          try {
+            const metasData = await metasRes.json();
+            if (Array.isArray(metasData?.data)) {
+              for (const meta of metasData.data) {
+                if (meta?.itemKey) {
+                  documentMetas.set(docMetaKey(meta.libraryType, meta.libraryId, meta.itemKey), meta);
+                }
+              }
+            }
+          } catch {}
         }
 
         if (colRes.ok) {
@@ -1415,30 +2119,144 @@
         const isSelected = currentItem?.key === item.key;
         const isPdfAttachment = item.data?.itemType === 'attachment' && item.data?.contentType === 'application/pdf';
 
-        const div = document.createElement('button');
-        div.type = 'button';
+        const div = document.createElement('div');
+        div.role = 'button';
+        div.tabIndex = 0;
         div.className = `w-full text-left p-2.5 rounded cursor-pointer text-xs transition border ${
           isSelected
             ? 'bg-blue-950/60 border-blue-600/80 text-blue-100 shadow-md'
             : 'bg-slate-950/40 hover:bg-slate-900 border-slate-900 hover:border-slate-800 text-slate-300'
-        } group`;
+        } group relative`;
 
-        const title = item.data?.title || item.data?.filename || '无标题文档';
+        const itemLibType = item.libraryType || currentDocumentLibrary?.libraryType || 'user';
+        const itemLibId = item.libraryId || currentDocumentLibrary?.libraryId || config.userId;
+        const meta = documentMetas.get(docMetaKey(itemLibType, itemLibId, item.key));
+        const rawName = item.data?.title || item.data?.filename || '无标题文档';
+        const displayTitle = meta?.cleanTitle || rawName;
         const typeLabel = isPdfAttachment ? 'PDF 附件' : (item.data?.itemType || 'document');
         const numChildren = item.meta?.numChildren || 0;
 
         div.innerHTML = `
-          <div class="font-medium ${isSelected ? 'text-blue-300' : 'group-hover:text-blue-400 text-slate-200'} line-clamp-2">${escapeHTML(title)}</div>
+          <div class="flex items-start justify-between gap-1.5">
+            <div class="font-medium ${isSelected ? 'text-blue-300' : 'group-hover:text-blue-400 text-slate-200'} line-clamp-2 leading-snug flex-1">${escapeHTML(displayTitle)}</div>
+            <button type="button" class="btn-item-edit-meta p-0.5 text-slate-500 hover:text-blue-400 opacity-0 group-hover:opacity-100 transition flex-shrink-0" title="编辑易读中文名" aria-label="编辑研报元数据">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
+            </button>
+          </div>
+          ${meta?.cleanTitle && rawName !== meta.cleanTitle ? `<div class="text-[10px] text-slate-500 truncate mt-0.5" title="${escapeHTML(rawName)}">${escapeHTML(rawName)}</div>` : ''}
           <div class="flex items-center justify-between mt-1.5 text-[11px] text-slate-500">
-            <span class="px-1.5 py-0.2 rounded bg-slate-900 border border-slate-800 text-[10px] text-slate-400">${escapeHTML(typeLabel)}</span>
-            <div class="flex items-center gap-1.5 font-mono text-[10px]">
+            <div class="flex items-center gap-1 overflow-hidden">
+              <span class="px-1.5 py-0.2 rounded bg-slate-900 border border-slate-800 text-[10px] text-slate-400 flex-shrink-0">${escapeHTML(typeLabel)}</span>
+              ${meta?.institution ? `<span class="px-1.5 py-0.2 rounded bg-indigo-950/70 border border-indigo-800/60 text-[10px] text-indigo-300 truncate max-w-[90px]" title="${escapeHTML(meta.institution)}">🏛️ ${escapeHTML(meta.institution)}</span>` : ''}
+              ${meta?.year ? `<span class="px-1 py-0.2 rounded bg-slate-900 text-[10px] text-slate-400 font-mono">${escapeHTML(meta.year)}</span>` : ''}
+            </div>
+            <div class="flex items-center gap-1.5 font-mono text-[10px] flex-shrink-0">
               ${numChildren > 0 ? `<span class="text-slate-400">📎 ${numChildren}</span>` : ''}
               <span class="text-slate-500">${escapeHTML(item.key)}</span>
             </div>
           </div>
         `;
-        div.onclick = () => openItem(item);
+        div.onclick = (e) => {
+          if (e.target.closest('.btn-item-edit-meta')) {
+            e.stopPropagation();
+            openDocMetaModal(item);
+            return;
+          }
+          openItem(item);
+        };
+        div.onkeydown = (e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            openItem(item);
+          }
+        };
         container.appendChild(div);
+      }
+    }
+
+    function switchLibraryView(view) {
+      currentLibraryView = view === 'topics' ? 'topics' : 'all';
+      const showingTopics = currentLibraryView === 'topics';
+      document.getElementById('library-all-panel').classList.toggle('hidden', showingTopics);
+      document.getElementById('items-container').classList.toggle('hidden', showingTopics);
+      document.getElementById('library-topics-panel').classList.toggle('hidden', !showingTopics);
+      document.getElementById('topic-library-items').classList.toggle('hidden', !showingTopics);
+      document.querySelectorAll('.library-view-tab').forEach(button => {
+        const selected = button.id === (showingTopics ? 'btn-library-view-topics' : 'btn-library-view-all');
+        button.setAttribute('aria-selected', String(selected));
+        button.className = `library-view-tab flex-1 px-2.5 py-1.5 rounded text-xs font-medium transition ${selected
+          ? (showingTopics ? 'bg-indigo-600 text-white' : 'bg-blue-600 text-white')
+          : 'text-slate-400 hover:text-slate-200'}`;
+      });
+      if (showingTopics) void loadTopicLibraryDocuments();
+    }
+
+    async function resolveTopicLibraryPdf(doc) {
+      const docLib = normalizeLibraryContext(doc);
+      let item = docLib.libraryType === 'user' && docLib.libraryId === String(config.userId)
+        ? allItems.find(candidate => candidate.key === doc.itemKey)
+        : null;
+      if (!item) {
+        const itemUrl = getApiUrl(`${libraryApiPrefix(docLib)}/items/${encodeURIComponent(doc.itemKey)}`);
+        const response = await fetch(itemUrl, { headers: getHeaders() });
+        if (!response.ok) return null;
+        item = await response.json();
+      }
+
+      if (item.data?.itemType === 'attachment' && item.data?.contentType === 'application/pdf') {
+        return { doc, item, attachment: item };
+      }
+      const childrenUrl = getApiUrl(`${libraryApiPrefix(docLib)}/items/${encodeURIComponent(doc.itemKey)}/children`);
+      const childrenResponse = await fetch(childrenUrl, { headers: getHeaders() });
+      if (!childrenResponse.ok) return null;
+      const children = await childrenResponse.json();
+      const attachment = Array.isArray(children)
+        ? children.find(child => child.data?.contentType === 'application/pdf')
+        : null;
+      return attachment ? { doc, item, attachment } : null;
+    }
+
+    async function loadTopicLibraryDocuments() {
+      const container = document.getElementById('topic-library-items');
+      const count = document.getElementById('topic-library-count');
+      if (!container || !canvasWorkspace) return;
+      const loadToken = ++topicLibraryLoadToken;
+      container.innerHTML = '<div class="text-center text-slate-500 py-12 text-xs animate-pulse">正在筛选主题 PDF…</div>';
+      count.textContent = '加载中';
+      try {
+        const docs = await canvasFetch(`/workspaces/${canvasWorkspace.id}/documents`);
+        const resolved = (await Promise.all(docs.map(doc => resolveTopicLibraryPdf(doc).catch(() => null)))).filter(Boolean);
+        if (loadToken !== topicLibraryLoadToken) return;
+        count.textContent = `${resolved.length} 篇`;
+        container.replaceChildren();
+        if (!resolved.length) {
+          container.innerHTML = '<div class="text-center text-slate-500 py-12 px-3 text-xs leading-relaxed">该主题下暂无可阅读的 PDF。<br>可在“收件箱”中先完成 AI 分类并采纳建议。</div>';
+          return;
+        }
+
+        for (const { doc, item, attachment } of resolved) {
+          const docLib = normalizeLibraryContext(doc);
+          const meta = documentMetas.get(docMetaKey(docLib.libraryType, docLib.libraryId, doc.itemKey));
+          const rawTitle = item.data?.title || item.data?.filename || `文献 #${doc.itemKey}`;
+          const displayTitle = meta?.cleanTitle || rawTitle;
+          const row = document.createElement('button');
+          row.type = 'button';
+          row.className = 'w-full text-left p-2.5 rounded text-xs transition border bg-slate-950/40 hover:bg-slate-900 border-slate-900 hover:border-indigo-800 text-slate-300 group';
+          row.innerHTML = `
+            <div class="font-medium text-slate-200 group-hover:text-indigo-300 line-clamp-2 leading-snug">${escapeHTML(displayTitle)}</div>
+            ${meta?.cleanTitle && meta.cleanTitle !== rawTitle ? `<div class="text-[10px] text-slate-500 truncate mt-0.5" title="${escapeHTML(rawTitle)}">${escapeHTML(rawTitle)}</div>` : ''}
+            <div class="flex items-center justify-between gap-2 mt-1.5 text-[10px] text-slate-500">
+              <span class="px-1.5 py-0.5 rounded bg-indigo-950/70 border border-indigo-900 text-indigo-300">PDF</span>
+              <span class="font-mono truncate">${escapeHTML(attachment.data?.filename || attachment.key || '')}</span>
+            </div>`;
+          row.onclick = () => openItem(item, doc);
+          container.appendChild(row);
+        }
+      } catch (err) {
+        if (loadToken !== topicLibraryLoadToken) return;
+        count.textContent = '读取失败';
+        container.innerHTML = `<div class="text-center text-rose-400 py-10 px-3 text-xs">主题 PDF 加载失败：${escapeHTML(errorMessage(err))}</div>`;
+        reportApplicationError('topics.library-load', err);
       }
     }
 
@@ -1456,7 +2274,13 @@
       renderItems(); // Update active selection state
       if (mobileMedia.matches) setMobilePane('reader');
 
-      document.getElementById('current-doc-title').textContent = item.data?.title || item.data?.filename || item.key;
+      const currentDocLibType = currentDocumentLibrary?.libraryType || 'user';
+      const currentDocLibId = currentDocumentLibrary?.libraryId || config.userId;
+      const meta = documentMetas.get(docMetaKey(currentDocLibType, currentDocLibId, item.key));
+      const displayTitle = meta?.cleanTitle || item.data?.title || item.data?.filename || item.key;
+      document.getElementById('current-doc-title').textContent = displayTitle;
+      document.getElementById('btn-doc-edit-title')?.classList.remove('hidden');
+      document.getElementById('btn-doc-ai-title')?.classList.remove('hidden');
 
       const loadingOverlay = document.getElementById('reader-loading');
       const loadingText = document.getElementById('reader-loading-text');
@@ -1481,6 +2305,10 @@
 
         if (!pdfAttachment) {
           loadingOverlay.classList.add('hidden');
+          document.getElementById('reader-placeholder').classList.remove('hidden');
+          document.getElementById('reader-wrapper').classList.add('hidden');
+          document.getElementById('reader-placeholder-title').textContent = '该条目未关联可用的 PDF 附件';
+          document.getElementById('reader-placeholder-subtitle').textContent = '请检查 Altero/Zotero 中是否已上传该研报的 PDF 文件。';
           showToast('该条目未关联可用的 PDF 附件', 'error');
           return;
         }
@@ -1535,6 +2363,10 @@
         if (err?.name === 'AbortError' || requestId !== openRequestId) return;
         reportApplicationError('reader.open', err);
         loadingOverlay.classList.add('hidden');
+        document.getElementById('reader-placeholder').classList.remove('hidden');
+        document.getElementById('reader-wrapper').classList.add('hidden');
+        document.getElementById('reader-placeholder-title').textContent = 'PDF 加载失败';
+        document.getElementById('reader-placeholder-subtitle').textContent = errorMessage(err);
         showToast(`打开失败: ${errorMessage(err)}`, 'error');
       }
     }
@@ -2216,6 +3048,1099 @@
     });
 
 
+    let userWorkspaces = [];
+    let currentTopicTab = 'meta';
+    let inboxEntries = [];
+    let inboxSelectedIds = new Set();
+    let currentInboxState = 'new';
+    let inboxScanInFlight = false;
+    let canvasMaximized = false;
+
+    // --- Topic Workspaces & Management ---
+    async function loadTopicWorkspaces(preferredWorkspaceId = null) {
+      if (config.mode !== 'bff' || !config.user) return [];
+      try {
+        userWorkspaces = await canvasFetch('/workspaces');
+        if (!userWorkspaces.length) {
+          const created = await canvasFetch('/workspaces', { method: 'POST', body: { name: '我的研究主题' } });
+          userWorkspaces = [created];
+        }
+        renderTopicWorkspaceSelector(preferredWorkspaceId);
+        return userWorkspaces;
+      } catch (err) {
+        reportApplicationError('topics.load', err);
+        return [];
+      }
+    }
+
+    function renderTopicWorkspaceSelector(selectedId = null) {
+      const currentId = selectedId || canvasWorkspace?.id || userWorkspaces[0]?.id;
+      for (const selectId of ['select-topic-workspace', 'select-library-topic']) {
+        const select = document.getElementById(selectId);
+        if (!select) continue;
+        select.replaceChildren();
+        for (const ws of userWorkspaces) {
+          const option = document.createElement('option');
+          option.value = ws.id;
+          option.textContent = ws.name;
+          if (ws.id === currentId) option.selected = true;
+          select.appendChild(option);
+        }
+      }
+    }
+
+    async function switchTopicWorkspace(workspaceId) {
+      if (!workspaceId || canvasWorkspace?.id === workspaceId) return;
+      try {
+        setCanvasSaveState('切换主题…');
+        const target = userWorkspaces.find(w => w.id === workspaceId) || await canvasFetch(`/workspaces/${workspaceId}`);
+        canvasWorkspace = target;
+        localStorage.setItem(`altcanvas.activeWorkspace.${config.userId}`, workspaceId);
+
+        let boards = await canvasFetch(`/workspaces/${workspaceId}/boards`);
+        if (!boards.length) {
+          const createdBoard = await canvasFetch(`/workspaces/${workspaceId}/boards`, {
+            method: 'POST', body: { name: `${canvasWorkspace.name} · 分析画板` }
+          });
+          boards = [createdBoard];
+        }
+        canvasBoard = boards[0];
+        localStorage.setItem(`altcanvas.canvasBoard.${config.userId}`, canvasBoard.id);
+
+        await loadCanvasSnapshot();
+        renderTopicWorkspaceSelector(workspaceId);
+        if (currentLibraryView === 'topics') await loadTopicLibraryDocuments();
+        showToast(`已切换至主题「${canvasWorkspace.name}」`, 'info');
+      } catch (err) {
+        reportApplicationError('topics.switch', err);
+        showToast(`切换主题失败: ${errorMessage(err)}`, 'error');
+      }
+    }
+
+    async function openTopicSettingsModal(initialTab = 'meta') {
+      if (!canvasWorkspace) return;
+      currentTopicTab = initialTab;
+      const modal = document.getElementById('topic-settings-modal');
+      modal.classList.remove('hidden');
+
+      // Fetch fresh workspace info with latest version
+      try {
+        canvasWorkspace = await canvasFetch(`/workspaces/${canvasWorkspace.id}`);
+      } catch {}
+
+      document.getElementById('input-topic-name').value = canvasWorkspace.name || '';
+      document.getElementById('input-topic-desc').value = canvasWorkspace.description || '';
+      document.getElementById('input-topic-question').value = canvasWorkspace.researchQuestion || '';
+      document.getElementById('input-topic-inclusion').value = canvasWorkspace.inclusionRules || '';
+      document.getElementById('input-topic-exclusion').value = canvasWorkspace.exclusionRules || '';
+
+      switchTopicSettingsTab(currentTopicTab);
+    }
+
+    function closeTopicSettingsModal() {
+      document.getElementById('topic-settings-modal').classList.add('hidden');
+    }
+
+    function switchTopicSettingsTab(tab) {
+      currentTopicTab = tab;
+      document.querySelectorAll('.topic-tab').forEach(btn => {
+        const isCurrent = btn.dataset.tab === tab;
+        btn.className = `topic-tab px-3 py-1.5 rounded font-medium transition ${
+          isCurrent ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-slate-200'
+        }`;
+      });
+      document.getElementById('topic-tab-meta').classList.toggle('hidden', tab !== 'meta');
+      document.getElementById('topic-tab-bindings').classList.toggle('hidden', tab !== 'bindings');
+      document.getElementById('topic-tab-docs').classList.toggle('hidden', tab !== 'docs');
+
+      if (tab === 'bindings') {
+        loadTopicBindings();
+        loadAlteroCollectionsForBinding();
+      } else if (tab === 'docs') {
+        loadTopicDocuments();
+      }
+    }
+
+    async function saveTopicMetadata() {
+      if (!canvasWorkspace) return;
+      const name = document.getElementById('input-topic-name').value.trim();
+      const description = document.getElementById('input-topic-desc').value.trim();
+      const researchQuestion = document.getElementById('input-topic-question').value.trim();
+      const inclusionRules = document.getElementById('input-topic-inclusion').value.trim();
+      const exclusionRules = document.getElementById('input-topic-exclusion').value.trim();
+
+      if (!name) return showToast('主题名称不能为空', 'error');
+
+      try {
+        const updated = await canvasFetch(`/workspaces/${canvasWorkspace.id}`, {
+          method: 'PATCH',
+          headers: { 'If-Match': `W/"${canvasWorkspace.version}"` },
+          body: { name, description, researchQuestion, inclusionRules, exclusionRules }
+        });
+        canvasWorkspace = updated;
+        const idx = userWorkspaces.findIndex(w => w.id === updated.id);
+        if (idx >= 0) userWorkspaces[idx] = updated;
+        renderTopicWorkspaceSelector(updated.id);
+        showToast('主题属性已保存', 'success');
+      } catch (err) {
+        reportApplicationError('topics.save-meta', err);
+        showToast(`保存主题属性失败: ${errorMessage(err)}`, 'error');
+      }
+    }
+
+    async function deleteCurrentTopic() {
+      if (!canvasWorkspace) return;
+      if (userWorkspaces.length <= 1) return showToast('至少需保留一个研究主题', 'error');
+      if (!confirm(`确认删除研究主题「${canvasWorkspace.name}」？其下的画板与分析将被移除（Altero 原始文献不受影响）。`)) return;
+
+      try {
+        await canvasFetch(`/workspaces/${canvasWorkspace.id}`, {
+          method: 'DELETE',
+          headers: { 'If-Match': `W/"${canvasWorkspace.version}"` }
+        });
+        showToast(`主题「${canvasWorkspace.name}」已删除`, 'success');
+        userWorkspaces = userWorkspaces.filter(w => w.id !== canvasWorkspace.id);
+        closeTopicSettingsModal();
+        await switchTopicWorkspace(userWorkspaces[0]?.id);
+      } catch (err) {
+        reportApplicationError('topics.delete', err);
+        showToast(`删除主题失败: ${errorMessage(err)}`, 'error');
+      }
+    }
+
+    // --- Collection Bindings ---
+    async function loadTopicBindings() {
+      if (!canvasWorkspace) return;
+      const listContainer = document.getElementById('topic-bindings-list');
+      listContainer.innerHTML = '<div class="text-center text-slate-500 py-4 text-xs">加载绑定中…</div>';
+      try {
+        const bindings = await canvasFetch(`/workspaces/${canvasWorkspace.id}/collection-bindings`);
+        if (!bindings.length) {
+          listContainer.innerHTML = '<div class="text-center text-slate-500 py-6 text-xs">暂无绑定的 Collection</div>';
+          return;
+        }
+        listContainer.replaceChildren();
+        for (const b of bindings) {
+          const item = document.createElement('div');
+          item.className = 'p-2.5 rounded bg-slate-950/80 border border-slate-800 flex items-center justify-between gap-2 text-xs';
+          const syncedDate = b.lastSyncedAt ? new Date(b.lastSyncedAt).toLocaleString('zh-CN', { hour12: false }) : '从未同步';
+          item.innerHTML = `
+            <div class="min-w-0 flex-1">
+              <div class="font-medium text-slate-200 flex items-center gap-1.5">
+                <span>📁 Collection: <strong>${escapeHTML(b.collectionKey)}</strong></span>
+                <span class="text-[10px] px-1.5 py-0.2 rounded ${b.mode === 'inbound' ? 'bg-indigo-950 text-indigo-300 border border-indigo-800' : 'bg-purple-950 text-purple-300 border border-purple-800'} font-mono">${escapeHTML(b.mode)}</span>
+              </div>
+              <div class="text-[10px] text-slate-500 mt-0.5 font-mono">上次同步: ${escapeHTML(syncedDate)} · 版本: ${b.lastLibraryVersion ?? 'n/a'}</div>
+            </div>
+            <div class="flex items-center gap-1.5 shrink-0">
+              <button type="button" class="btn-sync-binding px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-indigo-300 text-[11px] transition">🔄 立即同步</button>
+              <button type="button" class="btn-remove-binding px-2 py-1 rounded bg-slate-900 hover:bg-rose-950 text-slate-400 hover:text-rose-300 text-[11px] transition">解绑</button>
+            </div>
+          `;
+          item.querySelector('.btn-sync-binding').onclick = () => syncCollectionBinding(b.id);
+          item.querySelector('.btn-remove-binding').onclick = () => removeCollectionBinding(b.id, b.version);
+          listContainer.appendChild(item);
+        }
+      } catch (err) {
+        reportApplicationError('topics.bindings-load', err);
+        listContainer.innerHTML = `<div class="text-rose-400 text-xs py-4 text-center">读取绑定失败: ${escapeHTML(err.message)}</div>`;
+      }
+    }
+
+    async function loadAlteroCollectionsForBinding() {
+      const select = document.getElementById('select-bind-collection');
+      if (!select) return;
+      select.innerHTML = '<option value="">正在读取 Altero 集合…</option>';
+      try {
+        const allCollections = [];
+        const seenKeys = new Set();
+        let start = 0;
+        const limit = 100;
+        const maxPages = 50;
+        let completed = false;
+
+        for (let page = 0; page < maxPages; page++) {
+          const res = await fetch(getApiUrl(`${libraryApiPrefix()}/collections?limit=${limit}&start=${start}`), { headers: getHeaders() });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const chunk = await res.json();
+          if (!Array.isArray(chunk)) throw new Error('Invalid collections response format');
+
+          const totalHeader = res.headers.get('Total-Results');
+          const total = totalHeader !== null && !isNaN(Number(totalHeader)) ? Number(totalHeader) : null;
+          const hasTotal = total !== null && Number.isFinite(total);
+
+          if (chunk.length === 0) {
+            if (hasTotal && start < total) {
+              throw new Error(`Premature end of collections stream: expected ${total}, got ${start}`);
+            }
+            completed = true;
+            break;
+          }
+
+          for (const col of chunk) {
+            const k = col?.key || col?.data?.key;
+            if (k) {
+              if (seenKeys.has(k)) {
+                throw new Error(`Duplicate collection key ${k} received at offset ${start}`);
+              }
+              seenKeys.add(k);
+            }
+            allCollections.push(col);
+          }
+
+          start += chunk.length;
+
+          if (hasTotal && start < total && chunk.length < limit) {
+            throw new Error(`Premature end of collections stream: expected ${total}, got ${start}`);
+          }
+
+          if (chunk.length < limit || (hasTotal && start >= total)) {
+            completed = true;
+            break;
+          }
+        }
+
+        if (!completed) {
+          throw new Error(`Collections count exceeded safety limit of ${maxPages} pages`);
+        }
+
+        select.replaceChildren();
+        if (!allCollections.length) {
+          select.innerHTML = '<option value="">(文库中暂无 Collection)</option>';
+          return;
+        }
+        for (const col of allCollections) {
+          const opt = document.createElement('option');
+          opt.value = col.key || col.data?.key;
+          opt.textContent = `${col.data?.name || col.key} (${col.key || col.data?.key})`;
+          select.appendChild(opt);
+        }
+      } catch (err) {
+        reportApplicationError('topics.collections-load', err);
+        select.innerHTML = `<option value="">(无法读取 Collection 列表: ${escapeHTML(err.message)})</option>`;
+      }
+    }
+
+    async function submitAddCollectionBinding() {
+      if (!canvasWorkspace) return;
+      const collectionKey = document.getElementById('select-bind-collection').value;
+      const mode = document.getElementById('select-bind-mode').value;
+      if (!collectionKey) return showToast('请选择要绑定的 Collection', 'error');
+
+      try {
+        await canvasFetch(`/workspaces/${canvasWorkspace.id}/collection-bindings`, {
+          method: 'POST',
+          body: { libraryType: 'user', libraryId: String(config.userId), collectionKey, mode }
+        });
+        showToast('Collection 绑定成功', 'success');
+        loadTopicBindings();
+      } catch (err) {
+        reportApplicationError('topics.bind-collection', err);
+        showToast(`绑定 Collection 失败: ${errorMessage(err)}`, 'error');
+      }
+    }
+
+    async function syncCollectionBinding(bindingId) {
+      try {
+        setCanvasSaveState('同步 Collection…');
+        const result = await canvasFetch(`/collection-bindings/${bindingId}/sync`, { method: 'POST' });
+        showToast(`Collection 同步完成（新增/更新 ${result?.syncedCount ?? 0} 篇文献）`, 'success');
+        loadTopicBindings();
+        loadTopicDocuments();
+        loadInboxEntries();
+        setCanvasSaveState('已同步', 'ok');
+      } catch (err) {
+        reportApplicationError('topics.sync-binding', err);
+        showToast(`同步失败: ${errorMessage(err)}`, 'error');
+      }
+    }
+
+    async function removeCollectionBinding(bindingId, version) {
+      if (!confirm('确认解除与该 Collection 的绑定？已加入主题的文献不会被删除。')) return;
+      try {
+        await canvasFetch(`/collection-bindings/${bindingId}`, {
+          method: 'DELETE',
+          headers: { 'If-Match': `W/"${version}"` }
+        });
+        showToast('已解除绑定', 'success');
+        loadTopicBindings();
+      } catch (err) {
+        reportApplicationError('topics.remove-binding', err);
+        showToast(`解绑失败: ${errorMessage(err)}`, 'error');
+      }
+    }
+
+    // --- Topic Documents ---
+    async function loadTopicDocuments() {
+      if (!canvasWorkspace) return;
+      const listContainer = document.getElementById('topic-docs-list');
+      const countTag = document.getElementById('topic-docs-count');
+      listContainer.innerHTML = '<div class="text-center text-slate-500 py-6 text-xs">加载文献中…</div>';
+      try {
+        const docs = await canvasFetch(`/workspaces/${canvasWorkspace.id}/documents`);
+        countTag.textContent = `共 ${docs.length} 篇`;
+        if (!docs.length) {
+          listContainer.innerHTML = '<div class="text-center text-slate-500 py-8 text-xs">当前主题暂未归类任何文献</div>';
+          return;
+        }
+        listContainer.replaceChildren();
+        for (const doc of docs) {
+          const item = document.createElement('div');
+          item.className = 'p-2.5 rounded bg-slate-950/80 border border-slate-800 flex items-center justify-between gap-2 text-xs';
+          const docLib = normalizeLibraryContext(doc);
+          const matchItem = isSameLibrary(docLib, currentDocumentLibrary)
+            ? allItems.find(i => i.key === doc.itemKey) : null;
+          const title = matchItem?.data?.title || `文献 #${doc.itemKey}`;
+          item.innerHTML = `
+            <div class="min-w-0 flex-1">
+              <div class="font-medium text-slate-200 truncate" title="${escapeHTML(title)}">${escapeHTML(title)}</div>
+              <div class="text-[10px] text-slate-500 flex items-center gap-2 mt-0.5">
+                <span class="font-mono">${escapeHTML(docLib.libraryType)}:${escapeHTML(docLib.libraryId)}#${escapeHTML(doc.itemKey)}</span>
+                <span class="px-1.5 py-0.2 rounded bg-slate-900 border border-slate-800 text-slate-400 font-mono">${escapeHTML(doc.status)}</span>
+                <span class="text-slate-600">分析: ${escapeHTML(doc.analysisStatus)}</span>
+              </div>
+            </div>
+            <div class="flex items-center gap-1.5 shrink-0">
+              <button type="button" class="btn-open-topic-doc px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-blue-300 text-[11px] transition">打开阅读</button>
+              <button type="button" class="btn-remove-topic-doc px-2 py-1 rounded bg-slate-900 hover:bg-rose-950 text-slate-400 hover:text-rose-300 text-[11px] transition">移出</button>
+            </div>
+          `;
+          item.querySelector('.btn-open-topic-doc').onclick = async () => {
+            closeTopicSettingsModal();
+            let targetItem = matchItem;
+            if (!targetItem) {
+              try {
+                const itemUrl = getApiUrl(`${libraryApiPrefix(docLib)}/items/${encodeURIComponent(doc.itemKey)}`);
+                const res = await fetch(itemUrl, { headers: getHeaders() });
+                if (res.ok) targetItem = await res.json();
+              } catch (e) {
+                console.warn('Failed to fetch topic document directly:', e);
+              }
+            }
+            if (targetItem) {
+              await openItem(targetItem, doc);
+            } else {
+              showToast(`无法在文库中找到文献 #${doc.itemKey}`, 'error');
+            }
+          };
+          item.querySelector('.btn-remove-topic-doc').onclick = () => removeTopicDocument(doc.id, doc.version);
+          listContainer.appendChild(item);
+        }
+      } catch (err) {
+        reportApplicationError('topics.docs-load', err);
+        listContainer.innerHTML = `<div class="text-rose-400 text-xs py-4 text-center">读取主题文献失败: ${escapeHTML(err.message)}</div>`;
+      }
+    }
+
+    async function removeTopicDocument(docId, version) {
+      if (!confirm('确认将此文献移出当前研究主题？（Altero 原始条目与附件不会被删除）')) return;
+      try {
+        await canvasFetch(`/topic-documents/${docId}`, {
+          method: 'DELETE',
+          headers: { 'If-Match': `W/"${version}"` }
+        });
+        showToast('已从主题移出', 'success');
+        loadTopicDocuments();
+      } catch (err) {
+        reportApplicationError('topics.remove-doc', err);
+        showToast(`移除失败: ${errorMessage(err)}`, 'error');
+      }
+    }
+
+    // --- Research Inbox ---
+    let inboxNextCursor = null;
+    let inboxAiClassifications = new Map();
+    let inboxClassifyInFlight = false;
+
+    let inboxGenerateTopicsInFlight = false;
+
+    async function openInboxEntryForReading(entry) {
+      if (!entry) return;
+      closeInboxModal();
+      let targetItem = allItems.find(i => i.key === entry.itemKey && (String(i.libraryId || config.userId) === String(entry.libraryId || config.userId)));
+      if (!targetItem) {
+        try {
+          const itemUrl = getApiUrl(`${libraryApiPrefix(entry)}/items/${encodeURIComponent(entry.itemKey)}`);
+          const res = await fetch(itemUrl, { headers: getHeaders() });
+          if (res.ok) {
+            targetItem = await res.json();
+          }
+        } catch (e) {
+          console.warn('Failed to fetch inbox item directly:', e);
+        }
+      }
+      if (targetItem) {
+        await openItem(targetItem, entry);
+      } else {
+        const fallbackItem = {
+          key: entry.itemKey,
+          libraryType: entry.libraryType || 'user',
+          libraryId: entry.libraryId || config.userId,
+          data: {
+            title: entry.title,
+            itemType: 'journalArticle',
+            abstractNote: entry.abstractNote || ''
+          }
+        };
+        await openItem(fallbackItem, entry);
+      }
+    }
+
+    async function generateTopicsWithAi() {
+      if (inboxGenerateTopicsInFlight) return;
+      if (!aiConfig.configured) {
+        showToast('请先配置 AI 服务端点再进行主题提炼', 'info');
+        openSettingsModal();
+        return;
+      }
+      if (!inboxEntries.length) {
+        showToast('收件箱中暂无文献可供提炼主题', 'info');
+        return;
+      }
+
+      inboxGenerateTopicsInFlight = true;
+      const btn = document.getElementById('btn-inbox-generate-topics-ai');
+      const originalText = btn ? btn.innerHTML : '';
+      if (btn) {
+        btn.innerHTML = '<span class="w-3.5 h-3.5 border-2 border-purple-400 border-t-transparent rounded-full animate-spin"></span><span>AI 提炼中…</span>';
+        btn.disabled = true;
+      }
+
+      try {
+        const targetIds = inboxSelectedIds.size ? [...inboxSelectedIds] : inboxEntries.map(e => e.id);
+        const result = await canvasFetch('/inbox/generate-topics', {
+          method: 'POST',
+          body: { entryIds: targetIds, maxTopics: 5 }
+        });
+
+        const createdWorkspaces = result?.createdWorkspaces || [];
+        const classifications = result?.classifications || {};
+        const namedCount = rememberDocumentMetas(result?.documentMetas);
+
+        await loadTopicWorkspaces();
+
+        let recommendedCount = 0;
+        for (const [entryId, list] of Object.entries(classifications)) {
+          if (Array.isArray(list) && list.length) {
+            inboxAiClassifications.set(entryId, list);
+            recommendedCount++;
+          }
+        }
+
+        renderInboxEntries();
+        const acceptBtn = document.getElementById('btn-inbox-accept-ai');
+        if (acceptBtn) acceptBtn.disabled = recommendedCount === 0;
+
+        if (createdWorkspaces.length > 0) {
+          const names = createdWorkspaces.map(w => `「${w.name}」`).join('、');
+          showToast(`✨ AI 已创建 ${createdWorkspaces.length} 个核心主题：${names}，完成分类并生成 ${namedCount} 个中文名`, 'success');
+        } else {
+          showToast(`✨ 已为 ${recommendedCount} 篇文献匹配主题，并生成 ${namedCount} 个中文名`, 'success');
+        }
+      } catch (err) {
+        reportApplicationError('inbox.generate-topics', err);
+        showToast(`AI 提炼主题失败: ${errorMessage(err)}`, 'error');
+      } finally {
+        inboxGenerateTopicsInFlight = false;
+        if (btn) {
+          btn.innerHTML = originalText;
+          btn.disabled = false;
+        }
+      }
+    }
+
+    async function classifyInboxWithAi() {
+      if (inboxClassifyInFlight) return;
+      if (!aiConfig.configured) {
+        showToast('请先配置 AI 服务端点再进行智能分类', 'info');
+        openSettingsModal();
+        return;
+      }
+      if (!inboxEntries.length) {
+        showToast('收件箱中暂无文献可供分类', 'info');
+        return;
+      }
+      if (!userWorkspaces.length) {
+        showToast('尚未创建任何研究主题，已自动启动【AI 智能提炼主题体系】...', 'info');
+        await generateTopicsWithAi();
+        return;
+      }
+
+      inboxClassifyInFlight = true;
+      const btn = document.getElementById('btn-inbox-classify-ai');
+      const originalText = btn.innerHTML;
+      btn.innerHTML = '<span class="w-3.5 h-3.5 border-2 border-purple-400 border-t-transparent rounded-full animate-spin"></span><span>AI 分析中…</span>';
+      btn.disabled = true;
+
+      try {
+        const targetIds = inboxSelectedIds.size ? [...inboxSelectedIds] : inboxEntries.map(e => e.id);
+        const result = await canvasFetch('/inbox/classify', {
+          method: 'POST',
+          body: { entryIds: targetIds }
+        });
+
+        const classifications = result?.classifications || {};
+        const namedCount = rememberDocumentMetas(result?.documentMetas);
+        let recommendedCount = 0;
+        for (const [entryId, list] of Object.entries(classifications)) {
+          if (Array.isArray(list) && list.length) {
+            inboxAiClassifications.set(entryId, list);
+            recommendedCount++;
+          }
+        }
+
+        renderInboxEntries();
+        const acceptBtn = document.getElementById('btn-inbox-accept-ai');
+        if (acceptBtn) acceptBtn.disabled = recommendedCount === 0;
+
+        showToast(`AI 分类完成：${recommendedCount} 篇获得主题建议，${namedCount} 篇已生成中文名`, 'success');
+      } catch (err) {
+        reportApplicationError('inbox.classify', err);
+        showToast(`AI 分类失败: ${errorMessage(err)}`, 'error');
+      } finally {
+        inboxClassifyInFlight = false;
+        btn.innerHTML = originalText;
+        btn.disabled = false;
+      }
+    }
+
+    async function acceptAllAiSuggestions() {
+      if (!inboxAiClassifications.size) return;
+      const topicToEntries = new Map();
+
+      for (const [entryId, suggestions] of inboxAiClassifications) {
+        for (const s of suggestions) {
+          if (s.confidence >= 0.7 && s.workspaceId) {
+            const list = topicToEntries.get(s.workspaceId) || [];
+            list.push(entryId);
+            topicToEntries.set(s.workspaceId, list);
+          }
+        }
+      }
+
+      if (!topicToEntries.size) {
+        showToast('未找到高置信度 (≥70%) 的 AI 推荐项', 'info');
+        return;
+      }
+
+      let totalProcessed = 0;
+      let failedCount = 0;
+      const succeededEntryIds = new Set();
+
+      for (const [workspaceId, entryIds] of topicToEntries) {
+        try {
+          const res = await canvasFetch('/inbox/batch-action', {
+            method: 'POST',
+            body: { entryIds, action: 'accept', targetWorkspaceIds: [workspaceId] }
+          });
+          const count = res?.processed || entryIds.length;
+          totalProcessed += count;
+          for (const id of entryIds) {
+            const currentList = inboxAiClassifications.get(id) || [];
+            const remaining = currentList.filter(s => s.workspaceId !== workspaceId);
+            if (remaining.length) {
+              inboxAiClassifications.set(id, remaining);
+            } else {
+              inboxAiClassifications.delete(id);
+            }
+          }
+        } catch (e) {
+          failedCount++;
+          console.warn('Accept suggestion error for topic:', workspaceId, e);
+        }
+      }
+
+      document.getElementById('btn-inbox-accept-ai').disabled = inboxAiClassifications.size === 0;
+
+      if (failedCount > 0) {
+        showToast(`已采纳归类 ${totalProcessed} 项文献，${failedCount} 个主题处理失败`, 'error');
+      } else {
+        showToast(`已一键采纳 AI 建议并归类 ${totalProcessed} 项文献`, 'success');
+      }
+      await loadInboxEntries();
+      loadTopicDocuments();
+      if (typeof currentLibraryView !== 'undefined' && currentLibraryView === 'topics') await loadTopicLibraryDocuments();
+    }
+
+    async function loadInboxEntries(append = false) {
+      if (config.mode !== 'bff' || !config.user) return;
+      try {
+        const stateParam = currentInboxState === 'all' ? '' : `state=${currentInboxState}`;
+        const cursorParam = append && inboxNextCursor ? `cursor=${encodeURIComponent(inboxNextCursor)}` : '';
+        const query = [stateParam, cursorParam].filter(Boolean).join('&');
+        const url = `/inbox${query ? `?${query}` : ''}`;
+
+        const res = await canvasFetch(url, { includeMeta: true });
+        const newEntries = Array.isArray(res?.data) ? res.data : (Array.isArray(res) ? res : []);
+        const meta = res?.meta || {};
+
+        inboxNextCursor = meta.nextCursor || null;
+
+        if (append) {
+          inboxEntries.push(...newEntries);
+        } else {
+          inboxEntries = newEntries;
+          inboxSelectedIds.clear();
+        }
+
+        const unreadCount = meta.unreadCount !== undefined ? meta.unreadCount : (inboxEntries.filter(e => e.state === 'new').length);
+        const badge = document.getElementById('inbox-unread-badge');
+        badge.textContent = String(unreadCount);
+        badge.classList.toggle('hidden', unreadCount === 0);
+        document.getElementById('inbox-count-tag').textContent = `${meta.totalCount !== undefined ? meta.totalCount : inboxEntries.length} 条`;
+
+        renderInboxEntries();
+      } catch (err) {
+        reportApplicationError('inbox.load', err);
+      }
+    }
+
+    function renderInboxEntries() {
+      const container = document.getElementById('inbox-items-container');
+      const searchKeyword = (document.getElementById('input-inbox-search')?.value || '').trim().toLowerCase();
+      const countLabel = document.getElementById('inbox-showing-count');
+
+      const filtered = inboxEntries.filter(entry => {
+        if (!searchKeyword) return true;
+        const meta = documentMetas.get(docMetaKey(entry.libraryType, entry.libraryId, entry.itemKey));
+        const cleanTitle = (entry.cleanTitle || meta?.cleanTitle || '').toLowerCase();
+        const institution = (entry.institution || meta?.institution || '').toLowerCase();
+        const titleMatch = (entry.title || '').toLowerCase().includes(searchKeyword) || cleanTitle.includes(searchKeyword);
+        const institutionMatch = institution.includes(searchKeyword);
+        const tagMatch = (entry.tags || []).some(t => String(t).toLowerCase().includes(searchKeyword));
+        const authorMatch = (entry.creators || []).some(c => (typeof c === 'string' ? c : `${c.firstName || ''} ${c.lastName || ''} ${c.name || ''}`).toLowerCase().includes(searchKeyword));
+        const yearMatch = entry.year ? String(entry.year).includes(searchKeyword) : false;
+        return titleMatch || institutionMatch || tagMatch || authorMatch || yearMatch;
+      });
+
+      countLabel.textContent = `显示 ${filtered.length} 项`;
+      container.replaceChildren();
+
+      if (!filtered.length) {
+        const emptyDiv = document.createElement('div');
+        emptyDiv.className = 'text-center text-slate-500 py-12 text-xs';
+        emptyDiv.textContent = searchKeyword ? '当前页未匹配到文献' : '收件箱暂无文献';
+        container.appendChild(emptyDiv);
+      } else {
+        for (const entry of filtered) {
+          const item = document.createElement('div');
+          const isSelected = inboxSelectedIds.has(entry.id);
+          item.className = `p-3 rounded-lg border transition ${
+            isSelected ? 'bg-indigo-950/40 border-indigo-700/60' : 'bg-slate-900/80 border-slate-800/80 hover:border-slate-700'
+          } flex items-start gap-3 text-xs`;
+
+          const creatorStr = (entry.creators || []).slice(0, 3).map(c => {
+            if (typeof c === 'string') return c;
+            return c.name || `${c.lastName || ''} ${c.firstName || ''}`.trim();
+          }).filter(Boolean).join(', ') + ((entry.creators || []).length > 3 ? ' 等' : '');
+
+          const suggestions = inboxAiClassifications.get(entry.id) || [];
+          const aiSuggestionsHtml = suggestions.length ? `
+            <div class="flex items-center gap-1.5 flex-wrap pt-1">
+              ${suggestions.map(s => `
+                <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-purple-950/90 border border-purple-700 text-purple-200 text-[10px]" title="${escapeHTML(s.reason)}">
+                  <span>✨ 推荐: <strong>${escapeHTML(s.workspaceName)}</strong> (${Math.round(s.confidence * 100)}%)</span>
+                  <button type="button" class="btn-quick-accept-ai hover:text-emerald-300 text-purple-300 underline cursor-pointer font-medium" data-entry-id="${entry.id}" data-ws-id="${s.workspaceId}">采纳</button>
+                </span>
+              `).join('')}
+            </div>
+          ` : '';
+
+          const meta = documentMetas.get(docMetaKey(entry.libraryType, entry.libraryId, entry.itemKey));
+          const cleanTitle = entry.cleanTitle || meta?.cleanTitle;
+          const displayTitle = cleanTitle || entry.title || `条目 #${entry.itemKey}`;
+          const institution = entry.institution || meta?.institution;
+
+          item.innerHTML = `
+            <div class="pt-0.5">
+              <input type="checkbox" class="inbox-item-checkbox rounded border-slate-700 bg-slate-950 text-indigo-600 focus:ring-0 cursor-pointer" ${isSelected ? 'checked' : ''} data-entry-id="${entry.id}">
+            </div>
+            <div class="min-w-0 flex-1 space-y-1">
+              <div class="font-medium text-slate-200 text-sm leading-snug flex items-start justify-between gap-2">
+                <span class="btn-inbox-title-read hover:text-indigo-300 transition cursor-pointer font-medium" title="点击立即在中心区域打开此研报 PDF">${escapeHTML(displayTitle)}</span>
+                <span class="text-[10px] px-1.5 py-0.2 rounded font-mono shrink-0 ${
+                  entry.state === 'new' ? 'bg-blue-950 text-blue-300 border border-blue-800' :
+                  entry.state === 'accepted' ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' :
+                  entry.state === 'deferred' ? 'bg-amber-950 text-amber-300 border border-amber-800' : 'bg-slate-800 text-slate-400'
+                }">${escapeHTML(entry.state)}</span>
+              </div>
+              ${cleanTitle && entry.title && cleanTitle !== entry.title ? `<div class="text-[10px] text-slate-500 truncate" title="${escapeHTML(entry.title)}">${escapeHTML(entry.title)}</div>` : ''}
+              <div class="text-[11px] text-slate-400 flex items-center gap-2 flex-wrap">
+                ${institution ? `<span class="px-1.5 py-0.2 rounded bg-indigo-950/80 border border-indigo-800/80 text-indigo-300 text-[10px]">🏛️ ${escapeHTML(institution)}</span>` : ''}
+                ${creatorStr ? `<span>👤 ${escapeHTML(creatorStr)}</span>` : ''}
+                ${entry.year ? `<span>📅 ${entry.year}</span>` : ''}
+                <span class="font-mono text-slate-500">${escapeHTML(entry.libraryType)}:${escapeHTML(entry.libraryId)}#${escapeHTML(entry.itemKey)}</span>
+              </div>
+              ${entry.abstractNote ? `<p class="text-slate-400 text-[11px] line-clamp-2 leading-relaxed font-sans">${escapeHTML(entry.abstractNote)}</p>` : ''}
+              <div class="flex items-center gap-1.5 flex-wrap pt-1">
+                ${(entry.collectionKeys || []).map(k => `<span class="text-[9px] px-1.5 py-0.2 rounded bg-slate-950 border border-slate-800 text-slate-400">📁 ${escapeHTML(k)}</span>`).join('')}
+                ${(entry.tags || []).map(t => `<span class="text-[9px] px-1.5 py-0.2 rounded bg-indigo-950/60 border border-indigo-900/60 text-indigo-300">🏷️ ${escapeHTML(t)}</span>`).join('')}
+              </div>
+              ${aiSuggestionsHtml}
+            </div>
+            <div class="flex flex-col gap-1 shrink-0">
+              <button type="button" class="btn-entry-read px-2 py-1 bg-indigo-950/90 hover:bg-indigo-900 text-indigo-300 border border-indigo-800 rounded text-[11px] transition shadow-sm" title="立即在中心区域打开此研报 PDF">📖 阅读</button>
+              <button type="button" class="btn-entry-assign px-2 py-1 bg-indigo-600/80 hover:bg-indigo-600 text-white rounded text-[11px] transition shadow-sm" title="将该文献归类至指定主题">归类至主题</button>
+              ${entry.state === 'new' ? `
+                <button type="button" class="btn-entry-defer px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-[10px] transition">暂缓</button>
+                <button type="button" class="btn-entry-ignore px-2 py-1 bg-slate-900 hover:bg-slate-800 text-slate-500 hover:text-rose-300 rounded text-[10px] transition">忽略</button>
+              ` : `
+                <button type="button" class="btn-entry-reopen px-2 py-1 bg-blue-950 hover:bg-blue-900 text-blue-300 border border-blue-800 rounded text-[10px] transition" title="重新放回待处理；已归入的主题不会被移除">重新处理</button>
+              `}
+            </div>
+          `;
+
+          item.querySelector('.inbox-item-checkbox').onchange = (e) => {
+            if (e.target.checked) inboxSelectedIds.add(entry.id);
+            else inboxSelectedIds.delete(entry.id);
+            updateInboxSelectionUI();
+          };
+
+          item.querySelectorAll('.btn-quick-accept-ai').forEach(btn => {
+            btn.onclick = (e) => {
+              e.stopPropagation();
+              const wsId = btn.dataset.wsId;
+              const entryId = btn.dataset.entryId;
+              executeInboxBatchAction('accept', [wsId], [entryId]);
+            };
+          });
+
+          item.querySelector('.btn-inbox-title-read').onclick = () => openInboxEntryForReading(entry);
+          item.querySelector('.btn-entry-read').onclick = () => openInboxEntryForReading(entry);
+          item.querySelector('.btn-entry-assign').onclick = () => openBatchTopicsModal([entry.id]);
+          const deferButton = item.querySelector('.btn-entry-defer');
+          const ignoreButton = item.querySelector('.btn-entry-ignore');
+          const reopenButton = item.querySelector('.btn-entry-reopen');
+          if (deferButton) deferButton.onclick = () => executeInboxBatchAction('defer', [], [entry.id]);
+          if (ignoreButton) ignoreButton.onclick = () => executeInboxBatchAction('ignore', [], [entry.id]);
+          if (reopenButton) reopenButton.onclick = () => executeInboxBatchAction('reopen', [], [entry.id]);
+
+          container.appendChild(item);
+        }
+      }
+
+      if (inboxNextCursor) {
+        const loadMoreDiv = document.createElement('div');
+        loadMoreDiv.className = 'pt-2 pb-2 text-center';
+        const loadMoreBtn = document.createElement('button');
+        loadMoreBtn.type = 'button';
+        loadMoreBtn.className = 'px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-xs transition';
+        loadMoreBtn.textContent = '加载更多…';
+        loadMoreBtn.onclick = () => loadInboxEntries(true);
+        loadMoreDiv.appendChild(loadMoreBtn);
+        container.appendChild(loadMoreDiv);
+      }
+
+      updateInboxSelectionUI();
+    }
+
+    function updateInboxSelectionUI() {
+      const count = inboxSelectedIds.size;
+      document.getElementById('inbox-selected-count').textContent = String(count);
+      document.getElementById('btn-inbox-batch-assign').disabled = count === 0;
+      document.getElementById('btn-inbox-batch-defer').disabled = count === 0;
+      document.getElementById('btn-inbox-batch-ignore').disabled = count === 0;
+      const selectedEntries = inboxEntries.filter(entry => inboxSelectedIds.has(entry.id));
+      document.getElementById('btn-inbox-batch-reopen').disabled = !selectedEntries.some(entry => entry.state !== 'new');
+
+      const selectAllCheckbox = document.getElementById('checkbox-inbox-select-all');
+      if (selectAllCheckbox) {
+        selectAllCheckbox.checked = inboxEntries.length > 0 && inboxEntries.every(e => inboxSelectedIds.has(e.id));
+      }
+    }
+
+    function openInboxModal() {
+      document.getElementById('inbox-modal').classList.remove('hidden');
+      loadInboxEntries();
+    }
+
+    function closeInboxModal() {
+      document.getElementById('inbox-modal').classList.add('hidden');
+    }
+
+    async function scanAlteroInbox() {
+      if (inboxScanInFlight) return;
+      inboxScanInFlight = true;
+      const btn = document.getElementById('btn-inbox-scan-now');
+      const originalText = btn.innerHTML;
+      btn.innerHTML = '<span class="w-3.5 h-3.5 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin"></span><span>扫描中…</span>';
+      btn.disabled = true;
+
+      try {
+        const checkpointKey = `altcanvas.scanCheckpoint.${config.userId}`;
+        const lastCheckpoint = Number(localStorage.getItem(checkpointKey) || 0);
+        const body = lastCheckpoint > 0 ? { since: lastCheckpoint } : {};
+
+        const result = await canvasFetch('/inbox/scan', { method: 'POST', body });
+        if (result?.lastLibraryVersion && result.lastLibraryVersion > 0) {
+          localStorage.setItem(checkpointKey, String(result.lastLibraryVersion));
+        }
+
+        showToast(`增量扫描完成：发现 ${result?.scanned ?? 0} 篇文献，新增/更新 ${result?.upsertedCount ?? 0} 篇`, 'success');
+        await loadInboxEntries();
+      } catch (err) {
+        reportApplicationError('inbox.scan', err);
+        showToast(`扫描 Altero 失败: ${errorMessage(err)}`, 'error');
+      } finally {
+        inboxScanInFlight = false;
+        btn.innerHTML = originalText;
+        btn.disabled = false;
+      }
+    }
+
+    async function executeInboxBatchAction(action, targetWorkspaceIds = [], explicitEntryIds = null) {
+      const requestedEntryIds = explicitEntryIds || [...inboxSelectedIds];
+      const entryIds = action === 'reopen'
+        ? requestedEntryIds.filter(id => inboxEntries.some(entry => entry.id === id && entry.state !== 'new'))
+        : requestedEntryIds;
+      if (!entryIds.length) return;
+
+      try {
+        const result = await canvasFetch('/inbox/batch-action', {
+          method: 'POST',
+          body: { entryIds, action, targetWorkspaceIds }
+        });
+        const actionLabels = { accept: '归类至主题', defer: '暂缓', ignore: '忽略', reopen: '重新放回待处理' };
+        showToast(`已成功${actionLabels[action] || '处理'} ${result?.processed ?? entryIds.length} 篇文献`, 'success');
+        inboxSelectedIds.clear();
+        await loadInboxEntries();
+        if (action === 'accept') {
+          loadTopicDocuments();
+        }
+      } catch (err) {
+        reportApplicationError('inbox.batch-action', err);
+        showToast(`批量操作失败: ${errorMessage(err)}`, 'error');
+      }
+    }
+
+    // --- Batch Topics Modal ---
+    let pendingBatchAssignEntryIds = [];
+
+    function openBatchTopicsModal(entryIds) {
+      pendingBatchAssignEntryIds = entryIds;
+      const modal = document.getElementById('batch-topics-modal');
+      document.getElementById('batch-assign-doc-count').textContent = String(entryIds.length);
+      modal.classList.remove('hidden');
+      renderBatchTopicsList();
+    }
+
+    function closeBatchTopicsModal() {
+      document.getElementById('batch-topics-modal').classList.add('hidden');
+      pendingBatchAssignEntryIds = [];
+    }
+
+    function renderBatchTopicsList() {
+      const container = document.getElementById('batch-topics-list');
+      container.replaceChildren();
+
+      if (!userWorkspaces.length) {
+        container.innerHTML = '<div class="text-slate-500 py-4 text-center text-xs">暂无可用的研究主题</div>';
+        return;
+      }
+
+      for (const ws of userWorkspaces) {
+        const label = document.createElement('label');
+        label.className = 'flex items-center gap-2.5 p-2 rounded bg-slate-900 border border-slate-800 hover:border-indigo-600 cursor-pointer text-xs transition';
+        const isCurrent = canvasWorkspace?.id === ws.id;
+        label.innerHTML = `
+          <input type="checkbox" value="${ws.id}" class="batch-topic-checkbox rounded border-slate-700 bg-slate-950 text-indigo-600 focus:ring-0" ${isCurrent ? 'checked' : ''}>
+          <div class="min-w-0 flex-1">
+            <div class="font-medium text-slate-200">${escapeHTML(ws.name)}</div>
+            ${ws.description ? `<div class="text-[10px] text-slate-500 truncate">${escapeHTML(ws.description)}</div>` : ''}
+          </div>
+        `;
+        container.appendChild(label);
+      }
+    }
+
+    async function quickCreateTopicInBatch() {
+      const input = document.getElementById('input-new-topic-quick');
+      const name = input.value.trim();
+      if (!name) return showToast('请输入主题名称', 'error');
+
+      try {
+        const created = await canvasFetch('/workspaces', { method: 'POST', body: { name } });
+        userWorkspaces.push(created);
+        input.value = '';
+        renderBatchTopicsList();
+        renderTopicWorkspaceSelector();
+        showToast(`已创建主题「${name}」`, 'success');
+      } catch (err) {
+        reportApplicationError('topics.quick-create', err);
+        showToast(`创建主题失败: ${errorMessage(err)}`, 'error');
+      }
+    }
+
+    async function confirmBatchTopicAssignment() {
+      const selectedTopicIds = [...document.querySelectorAll('.batch-topic-checkbox:checked')].map(cb => cb.value);
+      if (!selectedTopicIds.length) return showToast('请至少选择一个目标研究主题', 'error');
+
+      await executeInboxBatchAction('accept', selectedTopicIds, pendingBatchAssignEntryIds);
+      closeBatchTopicsModal();
+    }
+
+    // --- Panes Maximize Toggle ---
+    function toggleCanvasMaximize() {
+      canvasMaximized = !canvasMaximized;
+      const libPane = document.getElementById('library-pane');
+      const readerPane = document.getElementById('reader-pane');
+      const dividerLib = document.getElementById('divider-library');
+      const dividerAnn = document.getElementById('divider-annotations');
+      const label = document.getElementById('label-canvas-maximize');
+
+      if (canvasMaximized) {
+        libPane.classList.add('hidden');
+        readerPane.classList.add('hidden');
+        if (dividerLib) dividerLib.classList.add('hidden');
+        if (dividerAnn) dividerAnn.classList.add('hidden');
+        document.getElementById('annotations-pane').style.width = '100%';
+        label.textContent = '分栏视图';
+      } else {
+        libPane.classList.remove('hidden');
+        readerPane.classList.remove('hidden');
+        if (dividerLib) dividerLib.classList.remove('hidden');
+        if (dividerAnn) dividerAnn.classList.remove('hidden');
+        document.getElementById('annotations-pane').style.width = '';
+        label.textContent = '全屏画板';
+      }
+    }
+
+    // --- Cross-Report Relations & Progressive Expansion ---
+    let currentCrossReportFocalNode = null;
+    let currentCrossReportRelations = [];
+
+    async function openCrossReportRelationsModal(focalNode = null) {
+      if (!canvasWorkspace || !canvasBoard) {
+        showToast('请先选择一个有效的研究主题与画板', 'info');
+        return;
+      }
+
+      currentCrossReportFocalNode = focalNode || (canvasSelectedNodeIds.size === 1 ? canvasNodes.get([...canvasSelectedNodeIds][0]) : null);
+      const modal = document.getElementById('cross-report-modal');
+      const focalTextEl = document.getElementById('cross-report-focal-text');
+      const listEl = document.getElementById('cross-report-relations-list');
+      const countTag = document.getElementById('cross-report-count-tag');
+      modal.classList.remove('hidden');
+
+      const focalText = currentCrossReportFocalNode
+        ? `${currentCrossReportFocalNode.title ? `【${currentCrossReportFocalNode.title}】 ` : ''}${currentCrossReportFocalNode.body}`
+        : '主题内全景跨报告观点与证据关联';
+      focalTextEl.textContent = focalText;
+      listEl.innerHTML = '<div class="text-center text-slate-500 py-8 text-xs"><span class="inline-block w-4 h-4 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin mr-2"></span>正在检索主题内跨报告观点与证据…</div>';
+      countTag.textContent = '分析中…';
+
+      try {
+        const sourceRef = currentCrossReportFocalNode?.sourceRefId ? canvasSources.get(currentCrossReportFocalNode.sourceRefId) : null;
+        const focalDocument = sourceRef ? {
+          libraryType: sourceRef.libraryType,
+          libraryId: sourceRef.libraryId,
+          itemKey: sourceRef.itemKey,
+          attachmentKey: sourceRef.attachmentKey
+        } : (currentItem ? {
+          libraryType: currentDocumentLibrary?.libraryType || 'user',
+          libraryId: String(currentDocumentLibrary?.libraryId || config.userId),
+          itemKey: currentItem.data?.parentItem || currentItem.key
+        } : null);
+
+        const res = await canvasFetch(`/workspaces/${canvasWorkspace.id}/related-knowledge`, {
+          method: 'POST',
+          body: {
+            focalText: currentCrossReportFocalNode ? currentCrossReportFocalNode.body : canvasWorkspace.researchQuestion || canvasWorkspace.name,
+            focalDocument,
+            limit: 6
+          }
+        });
+
+        currentCrossReportRelations = res?.relations || [];
+        countTag.textContent = `${currentCrossReportRelations.length} 项发现`;
+        renderCrossReportRelationsList();
+      } catch (err) {
+        reportApplicationError('cross-report.discover', err);
+        listEl.innerHTML = `<div class="text-center text-rose-400 py-8 text-xs">检索跨报告关联失败: ${escapeHTML(err.message)}</div>`;
+        countTag.textContent = '失败';
+      }
+    }
+
+    function closeCrossReportRelationsModal() {
+      document.getElementById('cross-report-modal').classList.add('hidden');
+      currentCrossReportFocalNode = null;
+      currentCrossReportRelations = [];
+    }
+
+    function renderCrossReportRelationsList() {
+      const listEl = document.getElementById('cross-report-relations-list');
+      if (!currentCrossReportRelations.length) {
+        listEl.innerHTML = '<div class="text-center text-slate-500 py-8 text-xs">当前主题内其他研报中暂未发现直接关联观点（请先对主题内其他文献执行“理解全文”）</div>';
+        return;
+      }
+
+      const relationBadges = {
+        supports: ['bg-emerald-950 text-emerald-300 border-emerald-800', '支持 / 支撑'],
+        contradicts: ['bg-rose-950 text-rose-300 border-rose-800', '反驳 / 冲突 / 质疑'],
+        extends: ['bg-blue-950 text-blue-300 border-blue-800', '补充 / 拓展'],
+        same_method: ['bg-purple-950 text-purple-300 border-purple-800', '相似方法'],
+        context_differs: ['bg-amber-950 text-amber-300 border-amber-800', '情境差异'],
+        related: ['bg-indigo-950 text-indigo-300 border-indigo-800', '相关观点']
+      };
+
+      listEl.replaceChildren();
+      for (const [idx, item] of currentCrossReportRelations.entries()) {
+        const u = item.unit;
+        const [badgeClass, badgeLabel] = relationBadges[item.relationType] || relationBadges.related;
+        const row = document.createElement('div');
+        row.className = 'p-3 rounded-lg bg-slate-950 border border-slate-800/80 hover:border-slate-700 flex items-start gap-2.5 text-xs';
+        row.innerHTML = `
+          <div class="pt-0.5">
+            <input type="checkbox" class="relation-select-cb rounded border-slate-700 bg-slate-900 text-indigo-600 focus:ring-0 cursor-pointer" data-idx="${idx}" checked>
+          </div>
+          <div class="min-w-0 flex-1 space-y-1">
+            <div class="flex items-center justify-between gap-2">
+              <span class="font-medium text-slate-200">《${escapeHTML(u.documentTitle || u.itemKey)}》 · p.${u.pageStart || 1}</span>
+              <span class="text-[10px] px-1.5 py-0.2 rounded border font-mono ${badgeClass}">${escapeHTML(badgeLabel)} (${Math.round((item.confidence || 0.6) * 100)}%)</span>
+            </div>
+            <div class="text-slate-300 text-[11px] font-sans leading-relaxed">${escapeHTML(u.body)}</div>
+            ${u.evidenceQuote ? `<div class="text-[10px] text-indigo-300/80 bg-indigo-950/40 p-1.5 rounded border border-indigo-900/40 font-mono">“${escapeHTML(u.evidenceQuote)}”</div>` : ''}
+            <div class="text-[10px] text-slate-400">💡 ${escapeHTML(item.reason || '跨报告语义关联')}</div>
+          </div>
+        `;
+        listEl.appendChild(row);
+      }
+    }
+
+    async function expandSelectedCrossReportRelations() {
+      if (!currentCrossReportFocalNode || !canvasBoard) {
+        showToast('请先选择画板上的焦点卡片以展开关联', 'info');
+        return;
+      }
+
+      const selectedIdxs = [...document.querySelectorAll('.relation-select-cb:checked')].map(cb => Number(cb.dataset.idx));
+      if (!selectedIdxs.length) {
+        showToast('请至少勾选一项需要展开的观点', 'info');
+        return;
+      }
+
+      const selectedUnits = selectedIdxs.map(i => currentCrossReportRelations[i]).filter(Boolean);
+      setCanvasSaveState('正在展开跨报告卡片…');
+      try {
+        const res = await canvasFetch(`/boards/${canvasBoard.id}/expand-related`, {
+          method: 'POST',
+          body: {
+            focalNodeId: currentCrossReportFocalNode.id,
+            relatedUnits: selectedUnits
+          }
+        });
+
+        closeCrossReportRelationsModal();
+        await loadCanvasSnapshot();
+        setCanvasSaveState(`已展开 ${res?.createdNodes?.length || selectedUnits.length} 张跨报告卡片`, 'ok');
+        showToast(`已展开 ${res?.createdNodes?.length || selectedUnits.length} 张跨报告卡片至画板`, 'success');
+      } catch (err) {
+        reportApplicationError('cross-report.expand', err);
+        setCanvasSaveState('展开失败', 'error');
+        showToast(`展开失败: ${errorMessage(err)}`, 'error');
+      }
+    }
+
     // --- Persistent Spatial Canvas ----------------------------------------
     function setCanvasSaveState(label, tone = 'muted') {
       const element = document.getElementById('canvas-save-state');
@@ -2239,6 +4164,9 @@
         err.status = response.status;
         err.code = payload?.error?.code;
         throw err;
+      }
+      if (options.includeMeta) {
+        return payload;
       }
       return payload?.data;
     }
@@ -2358,10 +4286,16 @@
       }
       try {
         setCanvasSaveState('初始化…');
-        let workspaces = await canvasFetch('/workspaces');
-        canvasWorkspace = workspaces[0] || await canvasFetch('/workspaces', {
-          method: 'POST', body: { name: '我的研究工作区' }
+        const preferredWorkspaceId = localStorage.getItem(`altcanvas.activeWorkspace.${config.userId}`);
+        userWorkspaces = await canvasFetch('/workspaces');
+        canvasWorkspace = userWorkspaces.find(w => w.id === preferredWorkspaceId) || userWorkspaces[0] || await canvasFetch('/workspaces', {
+          method: 'POST', body: { name: '我的研究主题' }
         });
+        if (!userWorkspaces.some(w => w.id === canvasWorkspace.id)) {
+          userWorkspaces.unshift(canvasWorkspace);
+        }
+        renderTopicWorkspaceSelector(canvasWorkspace.id);
+
         let boards = await canvasFetch(`/workspaces/${canvasWorkspace.id}/boards`);
         const preferredBoardId = localStorage.getItem(`altcanvas.canvasBoard.${config.userId}`);
         canvasBoard = boards.find(board => board.id === preferredBoardId) || boards[0]
@@ -2370,6 +4304,7 @@
           });
         localStorage.setItem(`altcanvas.canvasBoard.${config.userId}`, canvasBoard.id);
         await loadCanvasSnapshot();
+        await loadInboxEntries();
       } catch (err) {
         reportApplicationError('canvas.initialize', err);
         canvasReady = false;
@@ -2497,10 +4432,14 @@
         ? `<button type="button" class="canvas-node-jump-page block w-full mt-2 p-2 rounded border border-indigo-900/70 bg-indigo-950/30 text-left text-[10px] leading-relaxed text-indigo-200 hover:border-indigo-700" title="在 PDF 中定位并高亮这段逐字原文">“${escapeHTML(sourceRef.quoteSnapshot)}”</button>`
         : '';
       let footerHtml = '';
+      const crossReportBtnHtml = `<button type="button" class="canvas-node-cross-report text-indigo-400 hover:text-indigo-300 underline cursor-pointer" title="发现本卡片与主题内其他研报的跨报告关联">🔗 相关观点</button>`;
+      const quickVerifyBtnHtml = sourceRef ? `<button type="button" class="canvas-node-quick-verify text-indigo-400 hover:text-indigo-300 underline cursor-pointer" title="原位快速核验该观点在 PDF 中的证据引用与段落">🔍 核验</button>` : '';
       if (node.type === 'ai_output') {
-        footerHtml = `<div class="mt-2 pt-1.5 border-t border-purple-900/50 text-[9px] text-purple-400 font-mono flex items-center justify-between gap-2"><span>✨ AI 智能生成</span><span class="flex gap-2">${sourceRef?.annotationKey ? '<span class="text-emerald-400" title="证据已转为正式 PDF 批注">已转批注 ✓</span>' : (evidenceConvertibleSource(sourceRef) ? '<button type="button" class="canvas-node-annotate text-emerald-400 hover:text-emerald-300 underline cursor-pointer" title="把这条证据转成正式 PDF 批注并关联到本卡片">转批注</button>' : '')}${sourceRef?.attachmentKey ? `<button type="button" class="canvas-node-jump-page text-indigo-300 hover:text-indigo-200 underline cursor-pointer" title="在 PDF 中定位并高亮逐字引用">原文 p.${escapeHTML(displayPageLabel || '1')} ↗</button>` : ''}<button type="button" class="canvas-node-focus-sources text-purple-300 hover:text-purple-200 underline cursor-pointer" title="在画板上高亮关联的输入卡片">溯源输入</button></span></div>`;
+        footerHtml = `<div class="mt-2 pt-1.5 border-t border-purple-900/50 text-[9px] text-purple-400 font-mono flex items-center justify-between gap-2"><span>✨ AI 智能生成</span><span class="flex gap-2">${quickVerifyBtnHtml}${crossReportBtnHtml}${sourceRef?.annotationKey ? '<span class="text-emerald-400" title="证据已转为正式 PDF 批注">已转批注 ✓</span>' : (evidenceConvertibleSource(sourceRef) ? '<button type="button" class="canvas-node-annotate text-emerald-400 hover:text-emerald-300 underline cursor-pointer" title="把这条证据转成正式 PDF 批注并关联到本卡片">转批注</button>' : '')}${sourceRef?.attachmentKey ? `<button type="button" class="canvas-node-jump-page text-indigo-300 hover:text-indigo-200 underline cursor-pointer" title="在 PDF 中定位并高亮逐字引用">原文 p.${escapeHTML(displayPageLabel || '1')} ↗</button>` : ''}<button type="button" class="canvas-node-focus-sources text-purple-300 hover:text-purple-200 underline cursor-pointer" title="在画板上高亮关联的输入卡片">溯源输入</button></span></div>`;
       } else if (sourceRef?.annotationKey) {
-        footerHtml = `<div class="mt-2 pt-1.5 border-t border-slate-800 text-[9px] text-slate-500 font-mono flex items-center justify-between"><span>#${escapeHTML(sourceRef.annotationKey)}</span>${sourceRef.itemKey ? `<span class="text-slate-600">Doc #${escapeHTML(sourceRef.itemKey)}</span>` : ''}</div>`;
+        footerHtml = `<div class="mt-2 pt-1.5 border-t border-slate-800 text-[9px] text-slate-500 font-mono flex items-center justify-between"><span>#${escapeHTML(sourceRef.annotationKey)}</span><span class="flex items-center gap-2">${quickVerifyBtnHtml}${crossReportBtnHtml}${sourceRef.itemKey ? `<span class="text-slate-600">Doc #${escapeHTML(sourceRef.itemKey)}</span>` : ''}</span></div>`;
+      } else {
+        footerHtml = `<div class="mt-2 pt-1.5 border-t border-slate-800 text-[9px] text-slate-500 font-mono flex items-center justify-end">${quickVerifyBtnHtml}${crossReportBtnHtml}</div>`;
       }
 
       element.innerHTML = `
@@ -2552,6 +4491,14 @@
       element.querySelector('.canvas-node-focus-sources')?.addEventListener('click', event => {
         event.stopPropagation();
         focusAiInputSources(node.id);
+      });
+      element.querySelector('.canvas-node-cross-report')?.addEventListener('click', event => {
+        event.stopPropagation();
+        openCrossReportRelationsModal(node);
+      });
+      element.querySelector('.canvas-node-quick-verify')?.addEventListener('click', event => {
+        event.stopPropagation();
+        openQuickEvidencePopover(node, sourceRef);
       });
       element.querySelector('.canvas-resize-handle').addEventListener('pointerdown', event => beginCanvasNodeResize(event, node, element));
       element.addEventListener('click', event => {
@@ -2750,7 +4697,7 @@
         setCanvasSaveState('保存中…');
         const node = await canvasFetch(`/boards/${canvasBoard.id}/nodes`, {
           method: 'POST',
-          body: { type: 'manual_note', ...position, width: 280, height: 180, zIndex: canvasNodes.size + 1, title: '', body: '' }
+          body: { type: 'manual_note', ...position, width: 280, height: 100, zIndex: canvasNodes.size + 1, title: '', body: '' }
         });
         canvasNodes.set(node.id, node);
         renderCanvas();
@@ -2785,7 +4732,8 @@
           const body = bodyParts.join('\n\n') || '空白标注';
           const textLen = body.length;
           const cardWidth = textLen > 200 ? 360 : 310;
-          const cardHeight = Math.min(360, Math.max(190, 110 + Math.ceil(textLen / Math.floor(cardWidth / 14)) * 18));
+          const charsPerLine = Math.floor(cardWidth / 13);
+          const cardHeight = Math.min(380, Math.max(76, 68 + Math.ceil(textLen / charsPerLine) * 18));
           const node = await canvasFetch(`/boards/${canvasBoard.id}/nodes`, {
             method: 'POST',
             body: {
@@ -2958,7 +4906,18 @@
       return Boolean(sourceRef?.attachmentKey && sourceRef?.quoteSnapshot && !sourceRef?.annotationKey);
     }
 
+    async function waitForCanvasLayoutIdle(timeoutMs = 5000) {
+      clearTimeout(canvasLayoutTimer);
+      canvasLayoutTimer = null;
+      const deadline = Date.now() + timeoutMs;
+      while (canvasSaveInFlight && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+      if (canvasSaveInFlight) throw new Error('画板布局仍在保存，请稍后重试');
+    }
+
     async function convertOneEvidence(node, sourceRef, pageDataCache) {
+      await waitForCanvasLayoutIdle();
       const activeNode = canvasNodes.get(node.id) || node;
       const pageIndex = getAnnotationPageIndex(sourceRef);
       const quote = cleanAnnotationText(sourceRef.quoteSnapshot);
@@ -3539,7 +5498,12 @@
       let pageData = pageDataCache?.get(pageIndex);
       if (!pageData) {
         pageData = await pdfDocument.getPageData({ pageIndex });
-        pageDataCache?.set(pageIndex, pageData);
+        if (pageDataCache) {
+          pageDataCache.set(pageIndex, pageData);
+          // Character-layer objects are much larger than their extracted text.
+          // Keep only the two most recently used pages during batch conversion.
+          while (pageDataCache.size > 2) pageDataCache.delete(pageDataCache.keys().next().value);
+        }
       }
       const chars = Array.isArray(pageData?.chars) ? pageData.chars : [];
       let haystack = '';
@@ -3594,10 +5558,19 @@
       const pageCount = Number(pdfDocument?.numPages || pdfDocument?.pdfInfo?.numPages
         || pdfApplication?.pagesCount || pdfApplication?.pdfViewer?.pagesCount || 0);
       if (!pdfDocument?.getPageData || !pageCount) throw new Error('当前 PDF 尚未完成文本层初始化');
+      const maxTextChars = 600_000;
+      const maxRequestBytes = 700 * 1024;
       const pages = [];
+      let textChars = 0;
+      let estimatedRequestBytes = 0;
       for (let pageIndex = 0; pageIndex < pageCount; pageIndex++) {
         setCanvasSaveState(`提取 PDF 文本 ${pageIndex + 1}/${pageCount}…`);
         const text = pdfPageText(await pdfDocument.getPageData({ pageIndex }));
+        textChars += text.length;
+        estimatedRequestBytes += new Blob([text]).size + 48;
+        if (textChars > maxTextChars || estimatedRequestBytes > maxRequestBytes) {
+          throw new Error(`PDF 可提取文本超过全文分析上限（${maxTextChars} 字符），已停止继续读取以保护浏览器内存`);
+        }
         pages.push({ pageNumber: pageIndex + 1, text });
         await new Promise(resolve => setTimeout(resolve));
       }
@@ -3615,23 +5588,46 @@
       updateCanvasAiToolbar();
       try {
         const attachmentKey = currentAttachment.key;
-        const pages = await extractCurrentPdfPages();
-        if (currentAttachment?.key !== attachmentKey) throw new Error('分析期间打开的 PDF 已发生变化');
-        const title = currentItem.data?.title || currentAttachment.data?.title || currentAttachment.data?.filename || 'PDF 全文理解';
-        setCanvasSaveState(`AI 正在分块理解 ${pages.length} 页全文…`);
+        const attachmentVersion = Number(currentAttachment.data?.version ?? currentAttachment.version ?? 0) || null;
         const library = normalizeLibraryContext(currentDocumentLibrary);
-        const result = await canvasFetch(`/boards/${canvasBoard.id}/ai/document-map`, {
+        const title = currentItem.data?.title || currentAttachment.data?.title || currentAttachment.data?.filename || 'PDF 全文理解';
+
+        // Lightweight cache-first check to skip page extraction if already analyzed
+        setCanvasSaveState('正在检查全文分析缓存…');
+        const cacheProbe = await canvasFetch(`/boards/${canvasBoard.id}/ai/document-map`, {
           method: 'POST',
           body: {
             title,
             document: {
               ...library,
               itemKey: currentItem.data?.parentItem || currentItem.key,
-              attachmentKey
+              attachmentKey,
+              attachmentVersion
             },
-            pages
+            checkOnly: true
           }
         });
+
+        let result = cacheProbe;
+        if (!cacheProbe?.cached) {
+          const pages = await extractCurrentPdfPages();
+          if (currentAttachment?.key !== attachmentKey) throw new Error('分析期间打开的 PDF 已发生变化');
+          setCanvasSaveState(`AI 正在分块理解 ${pages.length} 页全文…`);
+          result = await canvasFetch(`/boards/${canvasBoard.id}/ai/document-map`, {
+            method: 'POST',
+            body: {
+              title,
+              document: {
+                ...library,
+                itemKey: currentItem.data?.parentItem || currentItem.key,
+                attachmentKey,
+                attachmentVersion
+              },
+              pages
+            }
+          });
+        }
+
         await loadCanvasSnapshot();
         if (canvasBoard) {
           canvasBoard.viewport = { x: 20, y: 20, zoom: .75 };
@@ -3640,7 +5636,12 @@
         }
         canvasSelectedNodeIds = new Set((result?.nodes || []).map(node => node.id));
         renderCanvasSelectedState();
-        setCanvasSaveState(`全文理解画板已生成（${result?.nodes?.length || 0} 张卡片）`, 'ok');
+        if (result?.cached) {
+          showToast('✨ 已直接复用现有全文分析图谱', 'success');
+          setCanvasSaveState(`✨ 已复用全文分析（生成 ${result?.nodes?.length || 0} 张卡片）`, 'ok');
+        } else {
+          setCanvasSaveState(`全文理解画板已生成（${result?.nodes?.length || 0} 张卡片）`, 'ok');
+        }
       } catch (err) {
         reportApplicationError('canvas.ai-document', err);
         setCanvasSaveState(`全文理解失败：${errorMessage(err)}`, 'error');
@@ -3784,6 +5785,149 @@
       }
     }
 
+    let currentEvidencePopoverSourceRef = null;
+
+    function openQuickEvidencePopover(node, sourceRef) {
+      if (!sourceRef) return;
+      currentEvidencePopoverSourceRef = sourceRef;
+      const popover = document.getElementById('canvas-evidence-popover');
+      const titleEl = document.getElementById('evidence-popover-doc-title');
+      const quoteBox = document.getElementById('evidence-popover-quote-box');
+      const pageBadge = document.getElementById('evidence-popover-page-badge');
+
+      const meta = getCachedDocumentMeta({ libraryType: sourceRef.libraryType, libraryId: sourceRef.libraryId, itemKey: sourceRef.itemKey });
+      const displayTitle = meta?.cleanTitle || node.title || `文献 #${sourceRef.itemKey}`;
+      const displayPage = sourceRef.pageLabel || (sourceRef.position?.pageIndex !== undefined ? sourceRef.position.pageIndex + 1 : '1');
+      const displayQuote = sourceRef.quoteSnapshot || sourceRef.position?.textQuote || node.body || '无摘录快照';
+
+      titleEl.textContent = displayTitle;
+      pageBadge.textContent = `p.${displayPage}`;
+      quoteBox.textContent = `“${displayQuote}”`;
+
+      popover.classList.remove('hidden');
+    }
+
+    function closeQuickEvidencePopover() {
+      const popover = document.getElementById('canvas-evidence-popover');
+      if (popover) popover.classList.add('hidden');
+      currentEvidencePopoverSourceRef = null;
+    }
+
+    let currentResolvedImport = null;
+
+    function openQuickImportModal() {
+      const modal = document.getElementById('quick-import-modal');
+      const queryInput = document.getElementById('input-quick-import-query');
+      const resultCard = document.getElementById('quick-import-result-card');
+      const btnInboxOnly = document.getElementById('btn-quick-import-inbox-only');
+      const btnTopic = document.getElementById('btn-quick-import-topic');
+      const dupWarning = document.getElementById('quick-import-duplicate-warning');
+
+      queryInput.value = '';
+      resultCard.classList.add('hidden');
+      dupWarning.classList.add('hidden');
+      btnInboxOnly.disabled = true;
+      btnTopic.disabled = true;
+      currentResolvedImport = null;
+
+      modal.classList.remove('hidden');
+      queryInput.focus();
+    }
+
+    function closeQuickImportModal() {
+      const modal = document.getElementById('quick-import-modal');
+      if (modal) modal.classList.add('hidden');
+      currentResolvedImport = null;
+    }
+
+    async function resolveQuickImport() {
+      const queryInput = document.getElementById('input-quick-import-query');
+      const val = (queryInput.value || '').trim();
+      if (!val) {
+        showToast('请输入 DOI、arXiv 编号或文献 URL', 'error');
+        return;
+      }
+
+      const resolveBtn = document.getElementById('btn-quick-import-resolve');
+      const resultCard = document.getElementById('quick-import-result-card');
+      const titleEl = document.getElementById('quick-import-result-title');
+      const metaEl = document.getElementById('quick-import-result-meta');
+      const abstractEl = document.getElementById('quick-import-result-abstract');
+      const badgeEl = document.getElementById('quick-import-source-badge');
+      const dupWarning = document.getElementById('quick-import-duplicate-warning');
+      const dupDetails = document.getElementById('quick-import-duplicate-details');
+      const btnInboxOnly = document.getElementById('btn-quick-import-inbox-only');
+      const btnTopic = document.getElementById('btn-quick-import-topic');
+
+      resolveBtn.disabled = true;
+      resolveBtn.textContent = '解析中…';
+
+      try {
+        const res = await canvasFetch('/imports/resolve', {
+          method: 'POST',
+          body: { input: val }
+        });
+
+        currentResolvedImport = res.resolved;
+        titleEl.textContent = res.resolved.title || '未命名文献';
+        badgeEl.textContent = (res.resolved.sourceType || 'DOI').toUpperCase();
+
+        const authorNames = (res.resolved.creators || []).map(c => c.name || `${c.firstName || ''} ${c.lastName || ''}`.trim()).filter(Boolean).slice(0, 3).join(', ');
+        const yearStr = res.resolved.year ? `${res.resolved.year} 年` : '年份未知';
+        const publisherStr = res.resolved.publisher || '';
+        metaEl.innerHTML = `<span>👤 ${escapeHTML(authorNames || '未知作者')}</span><span>📅 ${escapeHTML(yearStr)}</span>${publisherStr ? `<span>🏛️ ${escapeHTML(publisherStr)}</span>` : ''}${res.resolved.pdfUrl ? '<span class="text-emerald-400">📄 含开源 PDF</span>' : ''}`;
+
+        abstractEl.textContent = res.resolved.abstractNote ? `摘要：${res.resolved.abstractNote}` : '（无摘要）';
+        resultCard.classList.remove('hidden');
+
+        if (Array.isArray(res.duplicateCandidates) && res.duplicateCandidates.length > 0) {
+          dupWarning.classList.remove('hidden');
+          dupDetails.innerHTML = res.duplicateCandidates.map(c => `<div>· <strong>${escapeHTML(c.title)}</strong> (${escapeHTML(c.matchReason)})</div>`).join('');
+        } else {
+          dupWarning.classList.add('hidden');
+        }
+
+        btnInboxOnly.disabled = false;
+        btnTopic.disabled = false;
+      } catch (err) {
+        showToast(`解析失败: ${errorMessage(err)}`, 'error');
+      } finally {
+        resolveBtn.disabled = false;
+        resolveBtn.textContent = '🔍 解析';
+      }
+    }
+
+    async function executeQuickImport(targetWorkspaceId = null) {
+      if (!currentResolvedImport) return;
+      const btnInboxOnly = document.getElementById('btn-quick-import-inbox-only');
+      const btnTopic = document.getElementById('btn-quick-import-topic');
+      btnInboxOnly.disabled = true;
+      btnTopic.disabled = true;
+
+      try {
+        const payload = {
+          resolved: currentResolvedImport,
+          targetWorkspaceId: targetWorkspaceId || undefined
+        };
+        await canvasFetch('/imports', {
+          method: 'POST',
+          body: payload
+        });
+
+        showToast(targetWorkspaceId ? '已成功导入并加入当前主题！' : '已成功导入至研究收件箱！', 'success');
+        closeQuickImportModal();
+
+        // Refresh topic documents or inbox if open
+        if (targetWorkspaceId && currentTopicWorkspaceId === targetWorkspaceId) {
+          await loadTopicDocumentsForWorkspace(targetWorkspaceId);
+        }
+      } catch (err) {
+        showToast(`导入失败: ${errorMessage(err)}`, 'error');
+        btnInboxOnly.disabled = false;
+        btnTopic.disabled = false;
+      }
+    }
+
     function setCanvasZoom(nextZoom, anchorX, anchorY) {
       if (!canvasReady) return;
       const surface = document.getElementById('canvas-cards');
@@ -3890,6 +6034,8 @@
 
       document.getElementById('btn-canvas-add-note').onclick = addCanvasNote;
       document.getElementById('btn-canvas-import').onclick = importCurrentAnnotations;
+      document.getElementById('btn-canvas-quick-import').onclick = openQuickImportModal;
+      document.getElementById('btn-inbox-quick-import')?.addEventListener('click', openQuickImportModal);
       document.getElementById('btn-canvas-export-json').onclick = exportCurrentBoard;
       document.getElementById('input-canvas-import-file').onchange = event => {
         const file = event.target.files?.[0];
@@ -3961,6 +6107,48 @@
     document.getElementById('login-modal').addEventListener('click', event => {
       if (event.target === event.currentTarget) closeLoginModal();
     });
+    document.getElementById('doc-meta-modal')?.addEventListener('click', event => {
+      if (event.target === event.currentTarget) closeDocMetaModal();
+    });
+    document.getElementById('btn-doc-edit-title')?.addEventListener('click', () => {
+      if (currentItem) openDocMetaModal(currentItem);
+    });
+    document.getElementById('btn-doc-ai-title')?.addEventListener('click', () => {
+      if (currentItem) extractDocumentChineseMetadata(currentItem, { force: true });
+    });
+    document.getElementById('btn-close-doc-meta')?.addEventListener('click', closeDocMetaModal);
+    document.getElementById('btn-cancel-doc-meta')?.addEventListener('click', closeDocMetaModal);
+    document.getElementById('btn-save-doc-meta')?.addEventListener('click', saveDocMetaModal);
+    document.getElementById('btn-doc-meta-ai-extract')?.addEventListener('click', () => {
+      if (currentEditingMetaItem) extractDocumentChineseMetadata(currentEditingMetaItem, { force: true });
+    });
+    document.getElementById('btn-close-quick-import')?.addEventListener('click', closeQuickImportModal);
+    document.getElementById('btn-cancel-quick-import')?.addEventListener('click', closeQuickImportModal);
+    document.getElementById('btn-quick-import-resolve')?.addEventListener('click', resolveQuickImport);
+    document.getElementById('input-quick-import-query')?.addEventListener('keydown', event => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        resolveQuickImport();
+      }
+    });
+    document.getElementById('btn-quick-import-inbox-only')?.addEventListener('click', () => executeQuickImport(null));
+    document.getElementById('btn-quick-import-topic')?.addEventListener('click', () => executeQuickImport(currentTopicWorkspaceId));
+    document.getElementById('quick-import-modal')?.addEventListener('click', event => {
+      if (event.target === event.currentTarget) closeQuickImportModal();
+    });
+
+    document.getElementById('btn-close-evidence-popover')?.addEventListener('click', closeQuickEvidencePopover);
+    document.getElementById('btn-dismiss-evidence-popover')?.addEventListener('click', closeQuickEvidencePopover);
+    document.getElementById('btn-evidence-popover-jump')?.addEventListener('click', () => {
+      if (currentEvidencePopoverSourceRef) {
+        jumpToDocumentSource(currentEvidencePopoverSourceRef);
+        closeQuickEvidencePopover();
+      }
+    });
+    document.getElementById('canvas-evidence-popover')?.addEventListener('click', event => {
+      if (event.target === event.currentTarget) closeQuickEvidencePopover();
+    });
+
     document.addEventListener('keydown', event => {
       const editing = event.target.closest?.('input, textarea, select, [contenteditable="true"]');
       const canvasFocused = Boolean(event.target.closest?.('#canvas-cards'));
@@ -4005,7 +6193,22 @@
         return;
       }
       if (event.key === 'Escape') {
-        if (!document.getElementById('provenance-modal').classList.contains('hidden')) {
+        if (!document.getElementById('canvas-evidence-popover').classList.contains('hidden')) {
+          closeQuickEvidencePopover();
+        } else if (!document.getElementById('quick-import-modal').classList.contains('hidden')) {
+          closeQuickImportModal();
+        } else if (!document.getElementById('cross-report-modal').classList.contains('hidden')) {
+          closeCrossReportRelationsModal();
+          document.getElementById('btn-canvas-cross-report')?.focus();
+        } else if (!document.getElementById('inbox-modal').classList.contains('hidden')) {
+          closeInboxModal();
+          document.getElementById('btn-open-inbox')?.focus();
+        } else if (!document.getElementById('batch-topics-modal').classList.contains('hidden')) {
+          closeBatchTopicsModal();
+        } else if (!document.getElementById('topic-settings-modal').classList.contains('hidden')) {
+          closeTopicSettingsModal();
+          document.getElementById('btn-open-topic-settings')?.focus();
+        } else if (!document.getElementById('provenance-modal').classList.contains('hidden')) {
           document.getElementById('provenance-modal').classList.add('hidden');
           document.getElementById('btn-canvas-history').focus();
         } else if (!document.getElementById('ai-modal').classList.contains('hidden')) {
