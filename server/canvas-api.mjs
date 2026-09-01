@@ -87,10 +87,12 @@ async function streamUploadToFile(req, targetDir, maxBytes = MAX_UPLOAD_BYTES) {
       const boundary = (boundaryMatch[1] || boundaryMatch[2]).trim();
       const boundaryBuffer = Buffer.from(`--${boundary}`);
       const doubleCrlf = Buffer.from('\r\n\r\n');
+      const MAX_TEXT_FIELD_BYTES = 65536; // 64 KiB limit for text fields like workspaceId
 
       let state = 'SEEK_BOUNDARY';
       let buffer = Buffer.alloc(0);
       let currentFieldName = null;
+      let hasCompletedFile = false;
 
       for await (const chunk of req) {
         totalBytes += chunk.length;
@@ -129,6 +131,11 @@ async function streamUploadToFile(req, targetDir, maxBytes = MAX_UPLOAD_BYTES) {
               state = 'FIELD_DATA';
             }
           } else if (state === 'FIELD_DATA') {
+            if (buffer.length > MAX_TEXT_FIELD_BYTES) {
+              const err = new Error('Form text field exceeds maximum length (64KB)');
+              err.status = 400;
+              throw err;
+            }
             const nextBoundaryIdx = buffer.indexOf(boundaryBuffer);
             if (nextBoundaryIdx === -1) {
               break;
@@ -156,11 +163,18 @@ async function streamUploadToFile(req, targetDir, maxBytes = MAX_UPLOAD_BYTES) {
               if (!firstChunk && fileData.length > 0) firstChunk = fileData.slice(0, 5);
               hash.update(fileData);
               await safeWrite(fileData);
+              hasCompletedFile = true;
               buffer = buffer.slice(nextBoundaryIdx + boundaryBuffer.length);
               state = 'HEADERS';
             }
           }
         }
+      }
+
+      if (!hasCompletedFile || state === 'FILE_DATA' || state === 'FIELD_DATA') {
+        const err = new Error('Multipart payload was truncated or ended prematurely before completing file stream');
+        err.status = 400;
+        throw err;
       }
     } else {
       for await (const chunk of req) {

@@ -415,12 +415,13 @@ assert.match(html, /throw new Error\('Native library does not support Zotero API
   assert.equal(annotationsMap.has('ann-OLD'), false, 'In-flight response for old document must not overwrite active annotations map');
 
   // 4. Test openItem error handling on initial annotation fetch failure (HTTP 500)
+  // Assert previous document A annotations are cleared and not retained in a mixed state
   let readerPlaceholderTitle = '';
   let toastErrorShown = '';
   const mockOpenItemDom = {
     'current-doc-title': { textContent: '' },
-    'btn-doc-edit-title': { classList: { remove: () => {} } },
-    'btn-doc-ai-title': { classList: { remove: () => {} } },
+    'btn-doc-edit-title': { classList: { remove: () => {}, add: () => {} } },
+    'btn-doc-ai-title': { classList: { remove: () => {}, add: () => {} } },
     'reader-loading': { classList: { remove: () => {}, add: () => {} } },
     'reader-loading-text': { textContent: '' },
     'reader-placeholder': { classList: { remove: () => {}, add: () => {} } },
@@ -442,8 +443,12 @@ assert.match(html, /throw new Error\('Native library does not support Zotero API
     `return (async () => { ${openItemFnMatch[1]} })();`
   );
 
+  // Document A already had annotations in memory
+  const docAAnnotations = new Map([['doc-A-ann', { version: 1, data: { text: 'Doc A Note' } }]]);
+  const docAClientMap = new Map([['client-A', 'doc-A-ann']]);
+
   await openItemRunner(
-    0, null, null, null, () => {},
+    0, null, { key: 'doc-A' }, null, () => {},
     null, s => s, () => '/users/0', () => {}, { matches: false }, () => {},
     { userId: '42' }, new Map(), () => '',
     { getElementById: id => mockOpenItemDom[id] || { textContent: '', classList: { add: () => {}, remove: () => {} } } },
@@ -452,14 +457,16 @@ assert.match(html, /throw new Error\('Native library does not support Zotero API
       return { ok: true, json: async () => ({}) };
     },
     s => s, () => ({}), (msg) => { toastErrorShown = msg; },
-    null, new Map(), new Map(), () => ({}), () => 0,
+    { key: 'att-A' }, docAAnnotations, docAClientMap, () => ({}), () => 0,
     s => s, () => {}, async () => {}, () => {}, err => err.message,
-    { key: 'doc-1', isNative: true, children: [{ key: 'att-1', data: { contentType: 'application/pdf' }, isNative: true }] },
+    { key: 'doc-B', isNative: true, children: [{ key: 'att-B', data: { contentType: 'application/pdf' }, isNative: true }] },
     { libraryType: 'native', libraryId: 'local' }
   );
 
   assert.equal(readerPlaceholderTitle, 'PDF 加载失败', 'Annotation fetch failure on initial open must trigger error state');
   assert.match(toastErrorShown, /500/, 'Toast must report actual error status');
+  assert.equal(docAAnnotations.size, 0, 'Opening doc B failure must clear doc A annotations to prevent cross-doc mixed state');
+  assert.equal(docAClientMap.size, 0, 'Opening doc B failure must clear client annotation mapping');
 }
 
 assert.match(html, /function isSameLibrary\(/,

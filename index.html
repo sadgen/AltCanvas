@@ -2499,6 +2499,19 @@
           document.getElementById('reader-wrapper').classList.add('hidden');
           document.getElementById('reader-placeholder-title').textContent = '该条目未关联可用的 PDF 附件';
           document.getElementById('reader-placeholder-subtitle').textContent = '请检查文献是否已上传关联的 PDF 文件。';
+
+          // Atomic cleanup on failure: avoid cross-document mixed state
+          currentItem = null;
+          currentAttachment = null;
+          currentAnnotationsMap.clear();
+          clientAnnotationIdMap.clear();
+          renderAnnotationCards();
+          document.getElementById('current-doc-title').textContent = '';
+          document.getElementById('btn-doc-edit-title')?.classList.add('hidden');
+          document.getElementById('btn-doc-ai-title')?.classList.add('hidden');
+          renderItems();
+          updateCanvasAiToolbar();
+
           showToast('该条目未关联可用的 PDF 附件', 'error');
           return;
         }
@@ -2584,6 +2597,19 @@
         document.getElementById('reader-wrapper').classList.add('hidden');
         document.getElementById('reader-placeholder-title').textContent = 'PDF 加载失败';
         document.getElementById('reader-placeholder-subtitle').textContent = errorMessage(err);
+
+        // Atomic cleanup on failure: avoid cross-document mixed state
+        currentItem = null;
+        currentAttachment = null;
+        currentAnnotationsMap.clear();
+        clientAnnotationIdMap.clear();
+        renderAnnotationCards();
+        document.getElementById('current-doc-title').textContent = '';
+        document.getElementById('btn-doc-edit-title')?.classList.add('hidden');
+        document.getElementById('btn-doc-ai-title')?.classList.add('hidden');
+        renderItems();
+        updateCanvasAiToolbar();
+
         showToast(`打开失败: ${errorMessage(err)}`, 'error');
       }
     }

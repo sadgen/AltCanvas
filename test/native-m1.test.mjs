@@ -623,6 +623,39 @@ try {
   assert.ok(fragmentedRes.payload.data.topicDocument, 'Trailing targetWorkspaceId in fragmented multipart must associate topic');
   assert.equal(fragmentedRes.payload.data.topicDocument.workspaceId, thirdTopic.id);
 
+  // 17. [P1 Regression] Truncated Multipart Payload rejection (missing closing boundary or severed file/field)
+  // Case A: Severed mid-file (no boundary at all)
+  const truncatedFileBody = Buffer.from(
+    `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="truncated.pdf"\r\nContent-Type: application/pdf\r\n\r\n%PDF-1.7\n1 0 obj\n`
+  );
+  const truncFileRes = await call(handler, '/canvas/native/upload', {
+    method: 'POST',
+    cookie: newCookie,
+    headers: {
+      'content-type': `multipart/form-data; boundary=${boundary}`
+    },
+    body: truncatedFileBody
+  });
+  assert.equal(truncFileRes.statusCode, 400, 'Multipart truncated during FILE_DATA must be rejected with 400');
+  assert.match(truncFileRes.payload.error.message, /truncated/);
+
+  // Case B: Severed mid-field (file complete, but field unclosed)
+  const truncatedFieldBody = Buffer.from(
+    `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="ok.pdf"\r\nContent-Type: application/pdf\r\n\r\n` +
+    '%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF' +
+    `\r\n--${boundary}\r\nContent-Disposition: form-data; name="targetWorkspaceId"\r\n\r\nws-unclosed-value`
+  );
+  const truncFieldRes = await call(handler, '/canvas/native/upload', {
+    method: 'POST',
+    cookie: newCookie,
+    headers: {
+      'content-type': `multipart/form-data; boundary=${boundary}`
+    },
+    body: truncatedFieldBody
+  });
+  assert.equal(truncFieldRes.statusCode, 400, 'Multipart truncated during FIELD_DATA must be rejected with 400');
+  assert.match(truncFieldRes.payload.error.message, /truncated/);
+
   // 10. Persistence across Store & Process Restart & [P1 Regression] Blob Reference Count on Delete
   store.close();
   const reopenedStore = new CanvasStore(dbPath);
