@@ -1,10 +1,12 @@
+import http from 'node:http';
+import https from 'node:https';
 import dns from 'node:dns/promises';
 import { isPrivateNetworkHost } from './security.mjs';
 
 const REQUEST_TIMEOUT_MS = 10_000;
 const MAX_RESPONSE_BYTES = 1024 * 1024; // 1 MB
 
-export async function validateExternalUrl(rawUrl, { allowPrivate = false } = {}) {
+export async function validateExternalUrl(rawUrl, { allowPrivate = false, lookupFn = dns.lookup } = {}) {
   let parsed;
   try {
     parsed = new URL(rawUrl);
@@ -21,17 +23,21 @@ export async function validateExternalUrl(rawUrl, { allowPrivate = false } = {})
   }
 
   const hostname = parsed.hostname;
+  const validatedAddresses = [];
   if (!allowPrivate) {
     if (isPrivateNetworkHost(hostname)) {
       throw new Error(`Forbidden address: ${hostname} is a private or loopback host`);
     }
 
     try {
-      const addresses = await dns.lookup(hostname, { all: true, verbatim: true });
-      for (const record of addresses) {
-        if (isPrivateNetworkHost(record.address)) {
-          throw new Error(`Forbidden address: ${hostname} resolves to private IP ${record.address}`);
+      const addresses = await lookupFn(hostname, { all: true, verbatim: true });
+      const addrList = Array.isArray(addresses) ? addresses : [addresses];
+      for (const record of addrList) {
+        const addr = typeof record === 'string' ? record : record?.address;
+        if (addr && isPrivateNetworkHost(addr)) {
+          throw new Error(`Forbidden address: ${hostname} resolves to private IP ${addr}`);
         }
+        if (addr) validatedAddresses.push(typeof record === 'string' ? { address: record, family: record.includes(':') ? 6 : 4 } : record);
       }
     } catch (err) {
       if (err.message.includes('Forbidden address')) throw err;
@@ -39,7 +45,7 @@ export async function validateExternalUrl(rawUrl, { allowPrivate = false } = {})
     }
   }
 
-  return parsed.toString();
+  return { url: parsed.toString(), parsed, validatedAddresses };
 }
 
 export function extractDoi(input) {
@@ -58,53 +64,122 @@ export function extractArxivId(input) {
   return match ? match[1] : null;
 }
 
-export async function safeFetchText(url, options = {}, { allowPrivate = false } = {}) {
-  const safeUrl = await validateExternalUrl(url, { allowPrivate });
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), options.timeout || REQUEST_TIMEOUT_MS);
+function requestWithPinnedIp(parsedUrl, pinnedAddress, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
+  return new Promise((resolve, reject) => {
+    const isHttps = parsedUrl.protocol === 'https:';
+    const requester = isHttps ? https.request : http.request;
+    const headers = {
+      'User-Agent': 'AltCanvas/1.0 (Research Assistant; mailto:support@altcanvas.local)',
+      'Accept': options.accept || 'text/html,application/xhtml+xml,application/xml,application/json;q=0.9,*/*;q=0.8',
+      'Host': parsedUrl.host,
+      ...(options.headers || {})
+    };
 
-  try {
-    const res = await fetch(safeUrl, {
-      ...options,
-      signal: controller.signal,
-      headers: {
-        'User-Agent': 'AltCanvas/1.0 (Research Assistant; mailto:support@altcanvas.local)',
-        'Accept': options.accept || 'text/html,application/xhtml+xml,application/xml,application/json;q=0.9,*/*;q=0.8',
-        ...(options.headers || {})
-      }
+    const reqOptions = {
+      protocol: parsedUrl.protocol,
+      hostname: parsedUrl.hostname,
+      port: parsedUrl.port || (isHttps ? 443 : 80),
+      path: `${parsedUrl.pathname}${parsedUrl.search}`,
+      method: options.method || 'GET',
+      headers,
+      lookup: (h, opt, cb) => {
+        if (pinnedAddress?.address) {
+          cb(null, pinnedAddress.address, pinnedAddress.family || 4);
+        } else {
+          cb(null, h, 4);
+        }
+      },
+      servername: parsedUrl.hostname
+    };
+
+    const req = requester(reqOptions, (res) => {
+      resolve(res);
     });
 
-    if (!res.ok) {
-      throw new Error(`Upstream returned HTTP ${res.status} ${res.statusText}`);
+    req.on('error', reject);
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(new Error(`Request timed out after ${timeoutMs}ms`));
+    });
+
+    if (options.body) {
+      req.write(options.body);
+    }
+    req.end();
+  });
+}
+
+export async function safeFetchText(url, options = {}, { allowPrivate = false, maxRedirects = 5, lookupFn = dns.lookup, transportFn = null } = {}) {
+  let currentUrl = url;
+  let redirectsCount = 0;
+
+  while (true) {
+    const validation = await validateExternalUrl(currentUrl, { allowPrivate, lookupFn });
+    const parsed = validation.parsed;
+    const validatedAddresses = validation.validatedAddresses;
+
+    let res;
+    if (typeof transportFn === 'function') {
+      res = await transportFn(currentUrl, options, { parsed, validatedAddresses });
+    } else {
+      let lastErr = null;
+      const addrCandidates = validatedAddresses.length ? validatedAddresses : [null];
+      for (const addr of addrCandidates) {
+        try {
+          res = await requestWithPinnedIp(parsed, addr, options, options.timeout || REQUEST_TIMEOUT_MS);
+          break;
+        } catch (err) {
+          lastErr = err;
+        }
+      }
+      if (!res) {
+        throw lastErr || new Error(`Connection to ${parsed.hostname} failed on all resolved addresses`);
+      }
     }
 
-    const reader = res.body?.getReader();
-    if (!reader) {
+    const statusCode = res.status || res.statusCode || 200;
+    if ([301, 302, 303, 307, 308].includes(statusCode)) {
+      redirectsCount++;
+      if (redirectsCount > maxRedirects) {
+        throw new Error(`Too many redirects (limit: ${maxRedirects})`);
+      }
+      const location = (res.headers && typeof res.headers.get === 'function')
+        ? res.headers.get('location')
+        : (res.headers?.['location'] || null);
+      if (!location) {
+        throw new Error(`Redirect status HTTP ${statusCode} without Location header`);
+      }
+      currentUrl = new URL(location, currentUrl).toString();
+      continue;
+    }
+
+    if (statusCode < 200 || statusCode >= 300) {
+      throw new Error(`Upstream returned HTTP ${statusCode} ${res.statusMessage || res.statusText || ''}`);
+    }
+
+    if (typeof res.text === 'function') {
       const text = await res.text();
-      return text.slice(0, MAX_RESPONSE_BYTES);
+      if (Buffer.byteLength(text, 'utf8') > MAX_RESPONSE_BYTES) {
+        const err = new Error(`Response body exceeds maximum allowed size (${MAX_RESPONSE_BYTES} bytes)`);
+        err.status = 413;
+        throw err;
+      }
+      return text;
     }
 
     const chunks = [];
     let bytesRead = 0;
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      bytesRead += value.byteLength;
-      chunks.push(value);
+    for await (const chunk of res) {
+      const buf = Buffer.from(chunk);
+      bytesRead += buf.length;
       if (bytesRead > MAX_RESPONSE_BYTES) {
-        controller.abort();
-        break;
+        if (typeof res.destroy === 'function') res.destroy();
+        const err = new Error(`Response body exceeds maximum allowed size (${MAX_RESPONSE_BYTES} bytes)`);
+        err.status = 413;
+        throw err;
       }
+      chunks.push(buf);
     }
-    const combined = new Uint8Array(bytesRead);
-    let offset = 0;
-    for (const chunk of chunks) {
-      combined.set(chunk, offset);
-      offset += chunk.byteLength;
-    }
-    return new TextDecoder().decode(combined);
-  } finally {
-    clearTimeout(timer);
+    return Buffer.concat(chunks).toString('utf8');
   }
 }
 
@@ -315,9 +390,9 @@ export function findDuplicateCandidates(store, actorKey, metadata) {
     const doiRows = store.db.prepare(`
       SELECT * FROM inbox_entries
       WHERE owner_key = ? AND deleted_at IS NULL
-        AND (abstract_note LIKE ? OR title LIKE ?)
+        AND (doi = ? OR doi LIKE ? OR abstract_note LIKE ? OR title LIKE ?)
       LIMIT 20
-    `).all(actorKey, `%${targetDoi}%`, `%${targetDoi}%`);
+    `).all(actorKey, targetDoi, `%${targetDoi}%`, `%${targetDoi}%`, `%${targetDoi}%`);
 
     for (const entry of doiRows) {
       if (!seenIds.has(entry.id)) {
@@ -328,6 +403,7 @@ export function findDuplicateCandidates(store, actorKey, metadata) {
           title: entry.title,
           cleanTitle: entry.clean_title || null,
           year: entry.year,
+          doi: entry.doi || null,
           state: entry.state,
           matchReason: `DOI 匹配 (${targetDoi})`,
           targetType: 'inbox'
@@ -375,6 +451,32 @@ export function findDuplicateCandidates(store, actorKey, metadata) {
           state: entry.state,
           matchReason: '标题高度相似',
           targetType: 'inbox'
+        });
+      }
+    }
+  }
+
+  // 3. Also check document_metas
+  if (targetDoi) {
+    const metaDoiRows = store.db.prepare(`
+      SELECT * FROM document_metas
+      WHERE owner_key = ? AND (doi = ? OR doi LIKE ? OR summary LIKE ?)
+      LIMIT 20
+    `).all(actorKey, targetDoi, `%${targetDoi}%`, `%${targetDoi}%`);
+    for (const dm of metaDoiRows) {
+      const key = `meta_${dm.id}`;
+      if (!seenIds.has(key)) {
+        seenIds.add(key);
+        candidates.push({
+          id: dm.id,
+          itemKey: dm.item_key,
+          title: dm.clean_title || dm.report_title || '已分析文献',
+          cleanTitle: dm.clean_title || null,
+          year: dm.year ? Number(dm.year) : null,
+          doi: dm.doi || null,
+          state: 'analyzed',
+          matchReason: `DOI 匹配 (${targetDoi})`,
+          targetType: 'document_meta'
         });
       }
     }

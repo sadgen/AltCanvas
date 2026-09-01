@@ -16,6 +16,7 @@ import { generateCodeChallenge, formatFetchError } from '../server/auth.mjs';
 import { extractZoteroIdentity, verifyIdToken } from '../server/oidc.mjs';
 import { isAllowedApiPath } from '../server/proxy-api.mjs';
 import { hasScope, isPrivateNetworkHost, isSameOriginRequest } from '../server/security.mjs';
+import { validateExternalUrl, safeFetchText } from '../server/import-resolver.mjs';
 
 console.log('🧪 Running AltCanvas BFF Unit Tests...');
 
@@ -113,6 +114,52 @@ assert.equal(sanitizeAlteroUrl('http://[::ffff:127.0.0.1]'), defaultFallback);
 // Valid public domains
 assert.equal(sanitizeAlteroUrl('https://my-valid-altero.com/'), 'https://my-valid-altero.com');
 assert.equal(sanitizeAlteroUrl('https://altero.example.org:8443'), 'https://altero.example.org:8443');
+
+// Test import-resolver safeFetchText SSRF and redirect defenses
+const mockPublicLookup = async (hostname) => {
+  if (hostname === '127.0.0.1' || hostname === 'localhost') return [{ address: '127.0.0.1', family: 4 }];
+  if (hostname === '169.254.169.254') return [{ address: '169.254.169.254', family: 4 }];
+  return [{ address: '93.184.216.34', family: 4 }];
+};
+
+await assert.rejects(async () => {
+  await validateExternalUrl('http://127.0.0.1:8080', { lookupFn: mockPublicLookup });
+}, /Forbidden address/);
+
+await assert.rejects(async () => {
+  await validateExternalUrl('http://admin:secret@example.com', { lookupFn: mockPublicLookup });
+}, /Embedded URL credentials/);
+
+await assert.rejects(async () => {
+  await validateExternalUrl('ftp://example.com', { lookupFn: mockPublicLookup });
+}, /Only http: and https: protocols/);
+
+// Test redirect to private host rejection
+await assert.rejects(async () => {
+  await safeFetchText('https://example.com/redirect-to-private', {}, {
+    allowPrivate: false,
+    lookupFn: mockPublicLookup,
+    transportFn: async (u) => {
+      return {
+        status: 302,
+        statusText: 'Found',
+        headers: new Headers({ 'Location': 'http://169.254.169.254/latest/meta-data' })
+      };
+    }
+  });
+}, /Forbidden address/);
+
+// Test response size limit (>1MB) rejection
+await assert.rejects(async () => {
+  await safeFetchText('https://example.com/oversized-payload', {}, {
+    allowPrivate: true,
+    lookupFn: mockPublicLookup,
+    transportFn: async () => {
+      const hugeBuffer = Buffer.alloc(1024 * 1024 + 100);
+      return [hugeBuffer];
+    }
+  });
+}, /exceeds maximum allowed size/);
 
 if (originalAllowPrivateHosts === undefined) delete process.env.ALLOW_PRIVATE_HOSTS;
 else process.env.ALLOW_PRIVATE_HOSTS = originalAllowPrivateHosts;
