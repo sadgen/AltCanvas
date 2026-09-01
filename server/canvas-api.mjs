@@ -39,9 +39,14 @@ async function streamUploadToFile(req, targetDir, maxBytes = MAX_UPLOAD_BYTES) {
   const hash = crypto.createHash('sha256');
 
   const contentType = String(req.headers['content-type'] || '');
-  let originalFilename = req.headers['x-filename']
-    ? decodeURIComponent(String(req.headers['x-filename']))
-    : 'document.pdf';
+  let originalFilename = 'document.pdf';
+  if (req.headers['x-filename']) {
+    try {
+      originalFilename = decodeURIComponent(String(req.headers['x-filename']));
+    } catch {
+      originalFilename = String(req.headers['x-filename']);
+    }
+  }
   let targetWorkspaceId = req.headers['x-target-workspace-id'] || null;
   let forceNew = req.headers['x-force-new'] === 'true';
 
@@ -62,7 +67,7 @@ async function streamUploadToFile(req, targetDir, maxBytes = MAX_UPLOAD_BYTES) {
       await new Promise((resolve, reject) => {
         const onDrain = () => { cleanupListeners(); resolve(); };
         const onError = (err) => { cleanupListeners(); reject(err); };
-        const onClose = () => { cleanupListeners(); resolve(); };
+        const onClose = () => { cleanupListeners(); reject(new Error('Upload stream closed prematurely during write')); };
         const cleanupListeners = () => {
           writeStream.removeListener('drain', onDrain);
           writeStream.removeListener('error', onError);
@@ -1102,7 +1107,8 @@ export function createCanvasHandler(store, {
             data: {
               document: importResult.document,
               attachment: importResult.attachment,
-              blob: importResult.blob
+              blob: importResult.blob,
+              topicDocument: importResult.topicDocument
             },
             message: '该文献已在文库中'
           });

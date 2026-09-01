@@ -2787,11 +2787,23 @@ export class CanvasStore {
       const existingDoc = this.findDocumentByBlobHash(actorKey, sha256);
       if (existingDoc && !forceNew) {
         const blob = this.getBlob(sha256);
+        let topicDoc = null;
+        if (targetWorkspaceId) {
+          topicDoc = this.addTopicDocument(actorKey, targetWorkspaceId, {
+            libraryType: 'native',
+            libraryId: 'local',
+            itemKey: existingDoc.id,
+            attachmentKey: existingDoc.attachments?.[0]?.id || null,
+            status: 'accepted',
+            origin: 'native_upload'
+          });
+        }
         return {
           duplicate: true,
           document: existingDoc,
           attachment: existingDoc.attachments?.[0] || null,
-          blob
+          blob,
+          topicDocument: topicDoc
         };
       }
 

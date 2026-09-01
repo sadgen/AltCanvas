@@ -657,12 +657,12 @@
 - ✅ 10. HTTP Range 测试：200 全量流、HEAD 零 body、304 If-None-Match、206 `bytes=0-100`、206 `bytes=100-`、206 `bytes=-50` 后缀、416 越界 Range；
 - ✅ 11. 跨用户数据隔离：User B 访问 User A 的文档、附件文件、批注均严格返回 404；
 - ✅ 12. 原生批注生命周期：创建、读取、PATCH 428/412 并发控制、修改成功、DELETE、[P2 回归] RESTORE 强制校验 If-Match（缺失返回 428，陈旧返回 412）；
-- ✅ 13. [P1 回归] 前端 `normalizeLibraryContext` 与 `libraryApiPrefix` 完整保留 `native` 文库类型，`libraryApiPrefix` 拒绝 native 避免生成伪 Zotero 路径；
-- ✅ 14. [P1 回归] Native 跨文献跳转（`jumpToSourceAnnotation` / `jumpToDocumentSource`）直接调用原生文献 API 与附件打开，消除伪代理路径；
-- ✅ 15. [P1 回归] 前端 Native 批注保存/修改/删除检查 HTTP 状态码，412/500/失败时自动触发 `reloadAndSyncReaderAnnotations` 重置并同步 Reader 内存状态，杜绝前端与数据库分叉；
-- ✅ 16. [P1 回归] 上传事务失败补偿：若因非法主题或其他 DB 异常导致事务失败，自动回滚并删除新移动的 Blob 文件，杜绝孤儿文件残留；
-- ✅ 17. [P2 回归] 上传流 `safeWrite` 监听 `drain`/`error`/`close` 全事件生命周期，中途网络中断或写入异常及时失败并清理；
-- ✅ 18. [P2 回归] `importNativeUploadedDocument` 移除对主题关联的静默 catch，严格保障主题关联原子性；
+- ✅ 13. [P0 回归] `openItem` 与 `initReaderEngine` 彻底消除对 `libraryApiPrefix` 的无条件前置调用，仅在 Zotero/Altero 路径计算代理前缀，Native 模式完全不调用 `libraryApiPrefix`，彻底阻断 P0 打开报错；
+- ✅ 14. [P0 回归] `openNativeDocument` 修正为调用 `openItem`，构造标准原生文献与附件嵌套结构（`children: [attData]`），上传成功与查重命中后均可无缝直接进入中央 Reader；
+- ✅ 15. [P1 回归] `reloadAndSyncReaderAnnotations` 请求失败时抛错保留当前批注状态（绝不误清空），并增加 `currentAttachment` 切换竞态保护（防止旧批注写回新文献 Reader）；
+- ✅ 16. [P1 回归] `importNativeUploadedDocument` 在重复上传命中查重时幂等执行目标主题关联，支持多主题跨上传归类，并在响应中返回 `topicDocument`；
+- ✅ 17. [P2 回归] `streamUploadToFile` 安全解码 `x-filename`（防畸变编码崩溃），并在 `safeWrite` 背压等待触发 `close` 时明确 reject，杜绝写入提前终止被误判为成功；
+- ✅ 18. [P1 回归] 上传事务失败补偿：若因非法主题或其他 DB 异常导致事务失败，自动回滚并删除新移动的 Blob 文件，杜绝孤儿文件残留；
 - ✅ 19. 全文 AI 图谱（`document-map`）基于原生 PDF 成功生成并实例化画板节点；
 - ✅ 20. 数据库关闭并重开后，用户、文献、附件、Blob、批注数据 100% 保真恢复。
 
@@ -684,7 +684,7 @@
 | 里程碑 | 状态 | 说明 |
 |---|---|---|
 | M1 原生 PDF 基础单文献闭环 | **PASS (完成)** | 独立 local 认证、原生流式上传、去重、Range 文件流服务、Reader 批注持久化、全文理解与证据转批注 |
-| M1 审计整改与深层防御闭环 | **PASS (完成)** | P0 认证隔离、Native 跨文献跳转、Reader 错误回滚与重同步、孤儿 Blob 回滚补偿、背压错误生命周期、主题强一致性全覆盖 |
+| M1 审计整改与深层防御闭环 | **PASS (完成)** | P0 认证隔离、P0 原生打开/跳转链路贯通、Reader 错误回滚与重同步、孤儿 Blob 回滚补偿、背压错误生命周期、重复上传主题关联全覆盖 |
 | M2 统一导入管线 | `PENDING` | 下一阶段目标：规范化多源导入（DOI/arXiv/URL/PDF/RIS/BibTeX）与合并策略 |
 | M3 Translation Server 集成 | `PENDING` | 下一阶段目标：内部解析组件集成与 SSRF 安全隔离 |
 | M4 Altero/Zotero 外部迁移器 | `PENDING` | 幂等一次性迁移 |

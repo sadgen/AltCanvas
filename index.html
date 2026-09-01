@@ -2432,8 +2432,7 @@
       currentItem = item;
       currentReaderInstance = null;
       updateCanvasAiToolbar();
-      currentDocumentLibrary = normalizeLibraryContext(libraryContext);
-      const documentLibraryPrefix = libraryApiPrefix(currentDocumentLibrary);
+      currentDocumentLibrary = normalizeLibraryContext(libraryContext || (item?.isNative ? { libraryType: 'native', libraryId: 'local' } : null));
       renderItems(); // Update active selection state
       if (mobileMedia.matches) setMobilePane('reader');
 
@@ -2484,6 +2483,7 @@
           pdfAttachment = item;
         } else {
           // Parent item: query children for PDF attachment
+          const documentLibraryPrefix = libraryApiPrefix(currentDocumentLibrary);
           const childUrl = getApiUrl(`${documentLibraryPrefix}/items/${encodeURIComponent(item.key)}/children`);
           const res = await fetch(childUrl, { headers: getHeaders(), signal });
           if (!res.ok) throw new Error('未能获取子附件');
@@ -2629,16 +2629,17 @@
       
       let fileUrl;
       let readerData;
-      const documentLibraryPrefix = libraryApiPrefix(libraryContext);
       if (libraryContext?.libraryType === 'native' || currentAttachment?.isNative) {
         fileUrl = `/canvas/native/attachments/${encodeURIComponent(attachmentKey)}/file`;
         readerData = { url: fileUrl };
       } else if (config.mode === 'bff') {
+        const documentLibraryPrefix = libraryApiPrefix(libraryContext);
         fileUrl = `/files${documentLibraryPrefix}/items/${encodeURIComponent(attachmentKey)}`;
         // Let PDF.js fetch the same-origin URL directly so it can use HTTP Range
         // requests and avoid buffering the entire document in the parent page.
         readerData = { url: fileUrl };
       } else {
+        const documentLibraryPrefix = libraryApiPrefix(libraryContext);
         fileUrl = `${config.api}${documentLibraryPrefix}/items/${encodeURIComponent(attachmentKey)}/file/content`;
         // Legacy development mode still needs a header-authenticated fetch because
         // PDF.js cannot attach the manually supplied Zotero API key to its requests.
@@ -6840,18 +6841,7 @@
           itemType: doc.itemType || 'journalArticle',
           creators: doc.creators || []
         },
-        isNative: true
-      };
-      const attData = {
-        key: attachment.id,
-        version: attachment.version,
-        data: {
-          key: attachment.id,
-          title: attachment.title || doc.title,
-          contentType: attachment.mimeType || 'application/pdf',
-          filename: attachment.originalFilename || `${doc.title}.pdf`,
-          isNative: true
-        },
+        children: [attData],
         isNative: true
       };
       const nativeLib = {
@@ -6859,7 +6849,7 @@
         libraryId: 'local',
         isNative: true
       };
-      await openDocument(itemData, attData, nativeLib);
+      await openItem(itemData, nativeLib);
     }
 
     async function uploadNativePdfFile(file, forceNew = false) {

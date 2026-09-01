@@ -313,6 +313,13 @@ assert.match(html, /async function reloadAndSyncReaderAnnotations\(/,
 assert.match(html, /setAnnotations\(readerAnnotations\)/,
   'reloadAndSyncReaderAnnotations must update reader in-memory annotations');
 
+assert.doesNotMatch(html, /openDocument\(/,
+  'openNativeDocument must not call undefined openDocument');
+assert.match(html, /await openItem\(itemData, nativeLib\)/,
+  'openNativeDocument must call openItem with nativeLib');
+assert.match(html, /throw new Error\('Native library does not support Zotero API endpoints'\)/,
+  'libraryApiPrefix must strictly reject native library');
+
 console.log('✅ All Canvas UI Tests Passed Successfully!');
 assert.match(html, /function isSameLibrary\(/,
   'cross-library source matching must include the library identity');

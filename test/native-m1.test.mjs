@@ -564,6 +564,36 @@ try {
   await handler(faultyRequest, faultyResponse, new URL('/canvas/native/upload', 'http://127.0.0.1:8088'));
   assert.equal(faultyResponse.statusCode, 500);
 
+  // 14. [P1 Regression] Duplicate PDF Upload into a Target Workspace associates with topic
+  const secondTopic = store.createWorkspace(adminActorKey, { name: 'Second Topic Workspace' });
+  const dupUploadWithTopicRes = await call(handler, '/canvas/native/upload', {
+    method: 'POST',
+    cookie: newCookie,
+    headers: {
+      'content-type': 'application/pdf',
+      'x-filename': 'duplicate_with_topic.pdf',
+      'x-target-workspace-id': secondTopic.id
+    },
+    body: samplePdfContent
+  });
+  assert.equal(dupUploadWithTopicRes.statusCode, 200);
+  assert.equal(dupUploadWithTopicRes.payload.duplicate, true);
+  assert.ok(dupUploadWithTopicRes.payload.data.topicDocument, 'Duplicate upload into workspace must associate topic document');
+  assert.equal(dupUploadWithTopicRes.payload.data.topicDocument.workspaceId, secondTopic.id);
+
+  // 15. [P2 Regression] Upload with malformed URI encoded x-filename is safely handled
+  const malformedFilenamePdf = Buffer.from('%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF');
+  const malformedHeaderRes = await call(handler, '/canvas/native/upload', {
+    method: 'POST',
+    cookie: newCookie,
+    headers: {
+      'content-type': 'application/pdf',
+      'x-filename': '%E0%A4%A' // Incomplete percent-encoding
+    },
+    body: malformedFilenamePdf
+  });
+  assert.equal(malformedHeaderRes.statusCode, 201, 'Malformed x-filename must fallback safely and complete upload');
+
   // 10. Persistence across Store & Process Restart & [P1 Regression] Blob Reference Count on Delete
   store.close();
   const reopenedStore = new CanvasStore(dbPath);
