@@ -322,6 +322,48 @@ assert.match(html, /window\.innerWidth - libraryWidth - READER_MIN - DIVIDERS_WI
 assert.doesNotMatch(html, /ANN_MAX = 700/,
   'the Canvas must not retain the old fixed 700px width ceiling');
 assert.doesNotMatch(html, /研究标注白板 \(Cards\)/);
+assert.match(html, /function autoFitCanvasNodeHeight\(node, element\)/,
+  'card resize handle must support content auto-fit on double click');
+assert.match(html, /拖拽调整大小，双击自适应内容高度/,
+  'card resize handle must provide tooltip for drag and double click auto-fit');
+assert.match(html, /id="canvas-evidence-popover"/,
+  'evidence verification popover must be present in DOM');
+assert.match(html, /function openQuickEvidencePopover\(/);
+assert.match(html, /function openQuickImportModal\(/);
+assert.match(html, /async function resolveQuickImport\(\)/);
+
+// --- Behavioral test: autoFitCanvasNodeHeight execution ---
+{
+  const autoFitMatch = /function autoFitCanvasNodeHeight\(node, element\)\s*\{([\s\S]*?)\n    \}/.exec(scripts[0]);
+  assert.ok(autoFitMatch, 'autoFitCanvasNodeHeight must be extractable from script');
+
+  const mockNode = { id: 'node-1', type: 'manual_note', height: 400 };
+  const mockElement = {
+    style: { height: '400px' },
+    offsetHeight: 142,
+    scrollHeight: 142
+  };
+  let edgesRendered = false;
+  let layoutSaved = false;
+
+  const autoFitRunner = new Function(
+    'node', 'element', 'renderCanvasEdges', 'scheduleCanvasLayoutSave',
+    autoFitMatch[1]
+  );
+
+  autoFitRunner(
+    mockNode,
+    mockElement,
+    () => { edgesRendered = true; },
+    () => { layoutSaved = true; }
+  );
+
+  assert.equal(mockNode.height, 142, 'autoFitCanvasNodeHeight must adjust node.height to measured natural height');
+  assert.equal(mockElement.style.height, '142px', 'autoFitCanvasNodeHeight must update element.style.height');
+  assert.equal(edgesRendered, true, 'autoFitCanvasNodeHeight must trigger renderCanvasEdges');
+  assert.equal(layoutSaved, true, 'autoFitCanvasNodeHeight must schedule layout save');
+}
+
 assert.match(devServer, /style-src-attr 'unsafe-inline'/, 'CSP must permit dynamic Canvas geometry styles');
 assert.match(devServer, /script-src 'self'/, 'script CSP must remain restricted');
 

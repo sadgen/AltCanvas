@@ -4500,7 +4500,16 @@
         event.stopPropagation();
         openQuickEvidencePopover(node, sourceRef);
       });
-      element.querySelector('.canvas-resize-handle').addEventListener('pointerdown', event => beginCanvasNodeResize(event, node, element));
+      const resizeHandle = element.querySelector('.canvas-resize-handle');
+      if (resizeHandle) {
+        resizeHandle.setAttribute('title', '拖拽调整大小，双击自适应内容高度');
+        resizeHandle.addEventListener('pointerdown', event => beginCanvasNodeResize(event, node, element));
+        resizeHandle.addEventListener('dblclick', event => {
+          event.preventDefault();
+          event.stopPropagation();
+          autoFitCanvasNodeHeight(node, element);
+        });
+      }
       element.addEventListener('click', event => {
         if (element.dataset.suppressClick === 'true'
           || event.target.closest('button, input, textarea, select, [contenteditable="true"]')
@@ -4599,6 +4608,21 @@
       };
       window.addEventListener('pointermove', onMove);
       window.addEventListener('pointerup', onUp, { once: true });
+    }
+
+    function autoFitCanvasNodeHeight(node, element) {
+      if (!node || !element) return;
+      const prevHeight = element.style.height;
+      element.style.height = 'auto';
+      const measuredHeight = Math.ceil(element.offsetHeight || element.scrollHeight || 80);
+      element.style.height = prevHeight;
+
+      const minHeight = node.type === 'annotation' ? 76 : (node.type === 'manual_note' ? 80 : (node.type === 'ai_output' ? 88 : 80));
+      const newHeight = Math.min(2000, Math.max(minHeight, measuredHeight));
+      node.height = newHeight;
+      element.style.height = `${newHeight}px`;
+      renderCanvasEdges();
+      scheduleCanvasLayoutSave();
     }
 
     function beginCanvasNodeResize(event, node, element) {
@@ -5608,8 +5632,22 @@
           }
         });
 
-        let result = cacheProbe;
-        if (!cacheProbe?.cached) {
+        let result;
+        if (cacheProbe?.cached) {
+          setCanvasSaveState(cacheProbe?.alreadyOnBoard ? '正在刷新画板分析…' : '正在复用缓存并投影到当前画板…');
+          result = await canvasFetch(`/boards/${canvasBoard.id}/ai/document-map`, {
+            method: 'POST',
+            body: {
+              title,
+              document: {
+                ...library,
+                itemKey: currentItem.data?.parentItem || currentItem.key,
+                attachmentKey,
+                attachmentVersion
+              }
+            }
+          });
+        } else {
           const pages = await extractCurrentPdfPages();
           if (currentAttachment?.key !== attachmentKey) throw new Error('分析期间打开的 PDF 已发生变化');
           setCanvasSaveState(`AI 正在分块理解 ${pages.length} 页全文…`);
