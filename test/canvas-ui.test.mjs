@@ -14,17 +14,41 @@ for (const id of [
   'btn-canvas-add-note', 'btn-canvas-import', 'btn-canvas-connect', 'btn-canvas-ai',
   'btn-canvas-export-json', 'lbl-canvas-import-json', 'input-canvas-import-file',
   'btn-canvas-history', 'provenance-modal', 'provenance-list',
-  'btn-canvas-clear',
+  'btn-canvas-clear', 'btn-canvas-cross-report',
+  'cross-report-modal', 'cross-report-panel', 'btn-close-cross-report', 'cross-report-focal-text', 'cross-report-relations-list', 'btn-cancel-cross-report', 'btn-expand-selected-relations',
   'btn-canvas-ai-translate', 'btn-canvas-ai-synthesize',
   'btn-canvas-ai-document', 'input-ai-auto-translate',
   'ai-modal', 'ai-panel', 'ai-selected-chips', 'input-ai-prompt', 'btn-submit-ai',
   'btn-close-ai', 'btn-cancel-ai', 'btn-open-ai-settings',
   'ai-provider-status', 'ai-provider-name', 'ai-provider-model', 'btn-test-ai-conn',
   'input-ai-base-url', 'input-ai-model', 'input-ai-key', 'btn-clear-ai-config',
-  'btn-canvas-zoom-out', 'btn-canvas-zoom-reset', 'btn-canvas-zoom-in', 'canvas-save-state'
+  'btn-canvas-zoom-out', 'btn-canvas-zoom-reset', 'btn-canvas-zoom-in', 'canvas-save-state',
+  'select-topic-workspace', 'btn-open-topic-settings', 'btn-open-inbox', 'inbox-unread-badge', 'btn-toggle-canvas-max',
+  'inbox-modal', 'inbox-panel', 'btn-close-inbox', 'btn-inbox-scan-now', 'btn-inbox-classify-ai', 'btn-inbox-accept-ai', 'input-inbox-search', 'inbox-items-container',
+  'btn-inbox-batch-assign', 'btn-inbox-batch-defer', 'btn-inbox-batch-ignore',
+  'batch-topics-modal', 'batch-topics-panel', 'btn-close-batch-topics', 'batch-topics-list', 'input-new-topic-quick', 'btn-create-topic-quick', 'btn-confirm-batch-topics',
+  'topic-settings-modal', 'topic-settings-panel', 'btn-close-topic-settings', 'input-topic-name', 'input-topic-desc', 'input-topic-question', 'input-topic-inclusion', 'input-topic-exclusion', 'btn-save-topic-meta', 'btn-delete-topic', 'select-bind-collection', 'select-bind-mode', 'btn-submit-bind-collection', 'topic-bindings-list', 'topic-docs-list',
+  'doc-meta-modal', 'doc-meta-panel', 'btn-close-doc-meta', 'input-doc-meta-clean-title', 'input-doc-meta-institution', 'input-doc-meta-year', 'input-doc-meta-report-title', 'input-doc-meta-subtitle', 'input-doc-meta-summary', 'btn-doc-meta-ai-extract', 'btn-cancel-doc-meta', 'btn-save-doc-meta', 'btn-doc-edit-title', 'btn-doc-ai-title',
+  'btn-canvas-quick-import', 'btn-inbox-quick-import', 'quick-import-modal', 'quick-import-panel', 'btn-close-quick-import', 'input-quick-import-query', 'btn-quick-import-resolve', 'quick-import-result-card', 'btn-cancel-quick-import', 'btn-quick-import-inbox-only', 'btn-quick-import-topic',
+  'canvas-evidence-popover', 'evidence-popover-panel', 'btn-close-evidence-popover', 'evidence-popover-title', 'evidence-popover-page-badge', 'evidence-popover-doc-title', 'evidence-popover-quote-box', 'btn-dismiss-evidence-popover', 'btn-evidence-popover-jump'
 ]) {
   assert.equal((html.match(new RegExp(`id=["']${id}["']`, 'g')) || []).length, 1, `${id} must exist exactly once`);
 }
+
+assert.match(html, /function docMetaKey\(/);
+assert.match(html, /function openDocMetaModal\(/);
+assert.match(html, /async function saveDocMetaModal\(/);
+assert.match(html, /async function extractDocumentChineseMetadata\(/);
+assert.match(html, /btn-item-edit-meta/);
+assert.match(html, /function openQuickEvidencePopover\(/, 'Canvas cards must support in-place evidence quick verification popover');
+assert.match(html, /function openQuickImportModal\(/, 'Canvas and Inbox must support quick DOI/arXiv/URL import');
+assert.match(html, /async function resolveQuickImport\(\)/, 'Quick import must resolve metadata and duplicate detection');
+assert.match(html, /async function executeQuickImport\(/, 'Quick import must execute durable import into workspace or inbox');
+assert.match(html, /canvas-node-quick-verify/, 'Canvas cards with sourceRef must render quick-verify button');
+assert.match(html, /documentMetas\.get\(docMetaKey\(entry\.libraryType, entry\.libraryId, entry\.itemKey\)\)/,
+  'inbox rendering must use composite key to lookup document metadata');
+assert.match(html, /documentMetas\.clear\(\)/,
+  'library reloading and logout must clear in-memory document metadata');
 
 assert.match(html, /async function initCanvasWorkspace\(\)/);
 assert.match(html, /async function importCurrentAnnotations\(\)/);
@@ -64,6 +88,10 @@ assert.match(html, /async function autoTranslatePdfAnnotation\(annotation\)/,
 assert.match(html, /_annotationManager\?\.updateAnnotations\(\[\{/,
   'inline translation must update the existing PDF annotation comment');
 assert.match(html, /async function extractCurrentPdfPages\(\)/);
+assert.match(html, /textChars > maxTextChars \|\| estimatedRequestBytes > maxRequestBytes/,
+  'whole-document extraction must stop at the browser memory boundary before reading every page');
+assert.match(html, /while \(pageDataCache\.size > 2\)/,
+  'batch evidence conversion must keep a bounded PDF character-layer cache');
 assert.match(html, /async function generateCurrentPdfUnderstandingCanvas\(\)/);
 assert.match(html, /sourceRef\.quoteSnapshot \|\| sourceRef\.position\?\.textQuote/,
   'document-map source navigation must use the persisted verbatim quote');
@@ -122,6 +150,9 @@ assert.match(html, /id="btn-canvas-evidence-annotate"/);
 assert.match(html, /async function convertAllEvidenceToAnnotations\(/,
   'evidence-to-annotation batch conversion must be implemented');
 assert.match(html, /async function convertOneEvidence\(/);
+assert.match(html, /async function waitForCanvasLayoutIdle\(/,
+  'evidence conversion must not race an in-flight layout write and repeatedly conflict');
+assert.match(html, /while \(canvasSaveInFlight && Date\.now\(\) < deadline\)/);
 assert.match(html, /canvas-node-annotate/);
 assert.match(html, /已转批注 ✓/);
 assert.match(html, /await waitForAnnotationServerKey\(annotation\.id\)/);
@@ -156,6 +187,112 @@ assert.doesNotMatch(html, /(?:localStorage|sessionStorage)\.setItem\([^\n]*input
   'a personal AI key must never be stored in browser storage');
 assert.match(html, /不会自动发送整篇 PDF/,
   'AI UI must disclose the exact selected-card data boundary');
+
+// --- T1 Topic Workspaces, Research Inbox, and Batch Actions ---
+// --- T3 Cross-Report Relations & Progressive Expansion ---
+assert.match(html, /async function openCrossReportRelationsModal\(/);
+assert.match(html, /function closeCrossReportRelationsModal\(\)/);
+assert.match(html, /async function expandSelectedCrossReportRelations\(\)/);
+assert.match(html, /canvas-node-cross-report/);
+assert.match(html, /\/workspaces\/\$\{canvasWorkspace\.id\}\/related-knowledge/);
+assert.match(html, /\/boards\/\$\{canvasBoard\.id\}\/expand-related/);
+
+assert.match(html, /async function loadTopicWorkspaces\(/);
+assert.match(html, /async function switchTopicWorkspace\(/);
+assert.match(html, /async function openTopicSettingsModal\(/);
+assert.match(html, /async function saveTopicMetadata\(\)/);
+assert.match(html, /async function loadTopicBindings\(\)/);
+assert.match(html, /async function syncCollectionBinding\(/);
+assert.match(html, /async function loadInboxEntries\(/);
+assert.match(html, /function renderInboxEntries\(\)/);
+assert.match(html, /async function scanAlteroInbox\(\)/);
+assert.match(html, /async function classifyInboxWithAi\(\)/);
+assert.match(html, /async function acceptAllAiSuggestions\(\)/);
+assert.match(html, /id="btn-library-view-all"/);
+assert.match(html, /id="btn-library-view-topics"/);
+assert.match(html, /id="select-library-topic"/);
+assert.match(html, /async function loadTopicLibraryDocuments\(\)/);
+assert.match(html, /resolveTopicLibraryPdf/);
+assert.match(html, /rememberDocumentMetas\(result\?\.documentMetas\)/,
+  'AI classification must display Chinese names returned by the same request');
+
+// --- Behavioral test: Directly invoking production acceptAllAiSuggestions from index.html ---
+{
+  const fnMatch = /async function acceptAllAiSuggestions\(\)\s*\{([\s\S]*?)\n    \}/.exec(scripts[0]);
+  assert.ok(fnMatch, 'acceptAllAiSuggestions must be found in script');
+
+  const inboxAiClassifications = new Map();
+  inboxAiClassifications.set('entry-1', [
+    { workspaceId: 'ws-A', workspaceName: 'Topic A', confidence: 0.9 },
+    { workspaceId: 'ws-B', workspaceName: 'Topic B', confidence: 0.85 }
+  ]);
+
+  const calls = [];
+  const toastCalls = [];
+  const mockContext = {
+    inboxAiClassifications,
+    showToast: (msg, type) => toastCalls.push({ msg, type }),
+    canvasFetch: async (path, options) => {
+      calls.push({ path, options });
+      const targetWs = options.body.targetWorkspaceIds[0];
+      if (targetWs === 'ws-A') return { processed: 1 };
+      throw new Error('Network error on Topic B');
+    },
+    document: {
+      getElementById: () => ({ disabled: false })
+    },
+    loadInboxEntries: async () => {},
+    loadTopicDocuments: async () => {},
+    console: { warn: () => {} }
+  };
+
+  const runner = new Function(
+    'inboxAiClassifications', 'showToast', 'canvasFetch', 'document', 'loadInboxEntries', 'loadTopicDocuments', 'console',
+    `return (async () => { ${fnMatch[1]} })();`
+  );
+
+  await runner(
+    mockContext.inboxAiClassifications,
+    mockContext.showToast,
+    mockContext.canvasFetch,
+    mockContext.document,
+    mockContext.loadInboxEntries,
+    mockContext.loadTopicDocuments,
+    mockContext.console
+  );
+
+  assert.equal(calls.length, 2, 'Must attempt both topics');
+  assert.equal(toastCalls.length, 1, 'Must show error toast on partial failure');
+  assert.match(toastCalls[0].msg, /1 个主题处理失败/);
+  assert.equal(inboxAiClassifications.has('entry-1'), true, 'Entry must be retained when Topic B fails');
+  assert.deepEqual(inboxAiClassifications.get('entry-1'), [
+    { workspaceId: 'ws-B', workspaceName: 'Topic B', confidence: 0.85 }
+  ], 'Only failed topic recommendations should remain in the map for retry');
+}
+
+assert.match(html, /async function executeInboxBatchAction\(/);
+assert.match(html, /id="inbox-scroll-region"/);
+assert.match(html, /#inbox-panel\s*\{[\s\S]*height:\s*min\(46rem, calc\(100dvh - 2rem\)\)/,
+  'the inbox must stay within the viewport and scroll only its document region');
+assert.match(html, /id="btn-inbox-batch-reopen"/);
+assert.match(html, /action === 'reopen'/);
+assert.match(html, /已归入的主题不会被移除/);
+assert.match(html, /function openBatchTopicsModal\(/);
+assert.match(html, /async function confirmBatchTopicAssignment\(\)/);
+assert.match(html, /function toggleCanvasMaximize\(\)/);
+assert.match(html, /id="btn-inbox-generate-topics-ai"/);
+assert.match(html, /async function generateTopicsWithAi\(\)/);
+assert.match(html, /async function openInboxEntryForReading\(/);
+assert.match(html, /class="btn-entry-read/);
+assert.match(html, /\/inbox\/scan/);
+assert.match(html, /\/inbox\/classify/);
+assert.match(html, /\/inbox\/generate-topics/);
+assert.match(html, /\/inbox\/batch-action/);
+assert.match(html, /已直接复用现有全文分析图谱/);
+assert.match(html, /async function loadAlteroCollectionsForBinding\(\)/);
+assert.match(html, /const seenKeys = new Set\(\);[\s\S]*Duplicate collection key/);
+assert.match(html, /Collections count exceeded safety limit/);
+assert.match(html, /\/collection-bindings\/\$\{bindingId\}\/sync/);
 assert.match(html, /局域网 HTTP 会明文传输卡片内容与凭据/,
   'AI settings must warn about plaintext private-network transport');
 assert.doesNotMatch(html, /modelConfig:\s*aiConfig/,

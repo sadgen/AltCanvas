@@ -92,6 +92,8 @@ console.log('✅ formatFetchError diagnostics test passed');
 import { sanitizeAlteroUrl, isPrivateHost } from '../server/auth.mjs';
 
 const defaultFallback = process.env.ALTERO_API || 'http://localhost:8000';
+const originalAllowPrivateHosts = process.env.ALLOW_PRIVATE_HOSTS;
+process.env.ALLOW_PRIVATE_HOSTS = 'false';
 
 // IPv4 private ranges
 assert.equal(sanitizeAlteroUrl('http://192.168.5.1'), defaultFallback);
@@ -111,6 +113,9 @@ assert.equal(sanitizeAlteroUrl('http://[::ffff:127.0.0.1]'), defaultFallback);
 // Valid public domains
 assert.equal(sanitizeAlteroUrl('https://my-valid-altero.com/'), 'https://my-valid-altero.com');
 assert.equal(sanitizeAlteroUrl('https://altero.example.org:8443'), 'https://altero.example.org:8443');
+
+if (originalAllowPrivateHosts === undefined) delete process.env.ALLOW_PRIVATE_HOSTS;
+else process.env.ALLOW_PRIVATE_HOSTS = originalAllowPrivateHosts;
 
 console.log('✅ SSRF Protection & URL sanitization (IPv4 & IPv6) passed');
 
