@@ -492,7 +492,7 @@
 
 | 里程碑 | 状态 | 说明 |
 |---|---|---|
-| Schema v10 数据模型 | **完成** | SQLite topic_documents, collection_bindings, inbox_entries (含 attachment_version 与 doi), jobs (含 payload_json), document_analyses, document_metas (含 doi), knowledge_units, knowledge_relations |
+| Schema v11 数据模型 | **完成** | SQLite topic_documents, collection_bindings, inbox_entries (含 attachment_version 与 doi), jobs (含 payload_json), document_analyses, document_metas (含 doi), knowledge_units, knowledge_relations, edges (含 origin 与 projection_key) |
 | T0 兼容性探针框架 | **就绪** | 增量 since、分页遍历、生命周期与版本化安全清理 |
 | T0 真实 PDF 上传/回读实机闸门 | `IN_PROGRESS` | 等待专用存储适配探针闭环，Canvas PDF 拖入保持关闭 |
 | T1 主题工作台与研究收件箱 | **PASS (关闭)** | 增量扫描、研究收件箱、批量多主题归类、Collection 绑定与全屏视图 |
@@ -500,33 +500,36 @@
 | 研报易读中文名与元数据识别 | **PASS (关闭)** | AI 提取机构/研报主标题/年份、SQLite document_metas、文库/收件箱易读中文名渲染与手动编辑 |
 | T3 跨报告观点关联与渐进展开 | **PASS (关闭)** | 知识单元索引、跨报告关系发现（支持/冲突/拓展/情境差异）、安全渐进展开、真实单元核验与精确页码定位 |
 | T4 Canvas 快速导入与 PDF 浮层 | `IN_PROGRESS` | 导入任务持久化/恢复重试机制、多源去重与逐跳重定向安全防护已闭环；等待 T0 真实 PDF 上传/远端 Altero 附件写入探针通过后关闭 |
-| 全文理解画板上下文增强 | **PASS (关闭)** | 画板已有节点上下文注入 Prompt，支持 `existing:<nodeId>` 跨卡片关系生成与 SQLite edges 写入，同文献重复分析原地更新防重叠 |
+| 全文理解画板上下文增强 | **PASS (关闭)** | 两阶段解耦架构，全局基础分析无板级偏向，Stage 2 专属关系推理排除自身节点并保护人工边，同文献重复分析原地更新防重叠 |
 | 卡片紧凑高度与尺寸自适应 | **PASS (关闭)** | 服务端与前端估算基底紧凑化，双击 resize-handle 触发真实内容高度测量（`autoFitCanvasNodeHeight`）并持久化保存 |
 | T5 可逆 AI 收缩 | `就绪 (待启动)` | 下一阶段目标 |
 
-## 2026-09-01 会话（全文理解画板上下文注入、跨卡片连线、防重叠原地更新与 SSRF 防护加固）
+## 2026-09-01 会话（Edge 所有权生命周期隔离、内部人工边保护、冲突迁移 Manual 优先与 Schema v11 约束）
 
-- **画板已有卡片上下文注入全文理解 Prompt 与 `existing:<nodeId>` 规范化** ([`server/canvas-api.mjs`](file:///home/sadgen/Projects/AltCanvas/server/canvas-api.mjs))：
-  - 在 `POST /canvas/boards/:boardId/ai/document-map` 接口读取当前画板已有卡片（id, type, title, body），格式化注入空间画板合成 Prompt，指导模型建立新生成节点与已有卡片的逻辑连线；
-  - `normalizeDocumentGraph` 接收当前画板已有节点 `existingNodeIds`，保留并规范化指向既有卡片的 `existing:<nodeId>` 关系；
-  - `checkOnly: true` 支持结合 `hasDocumentOnBoard` 准确返回 `{ cached, alreadyOnBoard }`，不触发重复多余投影。
-- **`existing:<nodeId>` 跨卡片关系连线真实落库与扩展关系类型支持** ([`server/canvas-store.mjs`](file:///home/sadgen/Projects/AltCanvas/server/canvas-store.mjs))：
-  - `projectDocumentAnalysisToBoard` 解析 `existing:<nodeId>` 映射为真实已有节点 ID，并写入 SQLite `edges` 表；
-  - `EDGE_RELATIONS` 扩充支持 `extends`、`same_method`、`context_differs` 等学术关联类型，与 `knowledge_relations` 严格对齐。
-- **同一文献重复理解原地更新与多文献防重叠偏移布局** ([`server/canvas-store.mjs`](file:///home/sadgen/Projects/AltCanvas/server/canvas-store.mjs))：
-  - 检测当前画板是否已有该文献的 AI 分析节点；若已存在，则对概览、章节、概念、论点卡片进行原地更新（In-place update），更新原文摘录快照与页码，安全替换/刷新内部连线，清理多余节点，避免卡片重复堆叠；
-  - 在新文献投影至已有卡片的画板时，根据现有节点包围盒自动计算 `startOffsetX`，避免固定在 (280, 30) 发生几何重叠。
-- **可恢复导入任务执行 Runner 与多源去重检测** ([`server/canvas-api.mjs`](file:///home/sadgen/Projects/AltCanvas/server/canvas-api.mjs) & [`server/import-resolver.mjs`](file:///home/sadgen/Projects/AltCanvas/server/import-resolver.mjs))：
-  - 任务入队时保存 `payload_json`，创建 `executeImportJob` 异步执行器；
-  - `POST /canvas/imports/:id/retry` 触发真实重试执行；
-  - `findDuplicateCandidates` 同时检索 `inbox_entries` 与 `document_metas` 的 DOI 和标题。
-- **SSRF 逐跳手动重定向防御与严格响应大小限制** ([`server/import-resolver.mjs`](file:///home/sadgen/Projects/AltCanvas/server/import-resolver.mjs))：
-  - `safeFetchText` 设置 `redirect: 'manual'`，实现至多 5 跳的手动重定向循环，每跳目标 URL 均经 `validateExternalUrl` 验证，彻底封堵通过重定向绕过首次校验访问私网 IP（127.0.0.1、169.254.x 等）的安全隐患；
-  - 流式读取若超过 1MB 立即中止并抛出 413 错误，杜绝截断数据导致解析错误。
-- **卡片双击自适应内容高度与交互完善** ([`index.html`](file:///home/sadgen/Projects/AltCanvas/index.html))：
-  - 卡片缩放手柄（`.canvas-resize-handle`）添加 `dblclick` 事件监听，调用 `autoFitCanvasNodeHeight` 测量内容真实高度并自动持久化，提供拖拽与双击提示气泡。
-- **Schema v10 迁移与自动化测试全覆盖** ([`server/canvas-store.mjs`](file:///home/sadgen/Projects/AltCanvas/server/canvas-store.mjs), [`test/canvas.test.mjs`](file:///home/sadgen/Projects/AltCanvas/test/canvas.test.mjs), [`test/bff.test.mjs`](file:///home/sadgen/Projects/AltCanvas/test/bff.test.mjs), [`test/canvas-ui.test.mjs`](file:///home/sadgen/Projects/AltCanvas/test/canvas-ui.test.mjs))：
-  - 覆盖画板上下文注入、`existing:<nodeId>` 真实 Edge 落库、同一画板重复理解原地更新与总节点数不增断言、`checkOnly` 返回 `alreadyOnBoard`、非重叠偏移、关系类型扩展、SSRF 重定向拦截与大小上限、任务重试执行、双击手柄自适应等测试；
+- **Edge 数据模型升级 Schema v11 与所有权隔离** ([`server/canvas-store.mjs`](file:///home/sadgen/Projects/AltCanvas/server/canvas-store.mjs) & [`server/canvas-api.mjs`](file:///home/sadgen/Projects/AltCanvas/server/canvas-api.mjs))：
+  - `edges` 表重构升级为 Schema v11，严格带入 SQLite `CHECK (origin IN ('manual', 'document_map_internal', 'document_map_context', 't3_expand', 'ai_synthesis'))` 约束与 `EDGE_ORIGINS` 白名单校验；
+  - 覆盖所有 AI 写入路径：`createAiSynthesisNode` 标记为 `ai_synthesis`，`/expand-related` 标记为 `t3_expand`，document map 分别标记 `document_map_internal` 与 `document_map_context`；
+  - **内部与外部人工边绝对保护**：重复理解时仅清理 `origin = 'document_map_internal'` 且匹配当前 `projection_key` 的内部 AI 边，用户手工在文档卡片之间建立的内部连线完整保留；遇到同签名关系时，严格保护 `manual` 边的 label、version 与 origin，禁止 AI 静默覆盖。
+- **外部边迁移冲突 Manual-Wins 优先策略与完整行为级测试** ([`server/canvas-store.mjs`](file:///home/sadgen/Projects/AltCanvas/server/canvas-store.mjs) & [`test/canvas.test.mjs`](file:///home/sadgen/Projects/AltCanvas/test/canvas.test.mjs))：
+  - 当缩减旧节点触发外部边重定向迁移至 Overview 时，若目标位置已存在同签名边，实行 **Manual 绝对优先**：若迁移边为 `manual` 则自动替换/删除已有 AI 边，保留人工边的 ID、label、version（递增）并记录 `edge.retargeted` 审计事件；
+  - 构造真实“旧 AI 卡片缩减软删除 + 内部人工边保护 + 迁移冲突 manual 获胜”场景进行行为级断言；
+  - 包含真实的 Schema v10 → v11 存量数据库迁移断言（历史边自动继承 `origin: 'manual'`）。
+- **全文理解两阶段解耦架构（Base Analysis vs. Board Contextual Inference）** ([`server/canvas-api.mjs`](file:///home/sadgen/Projects/AltCanvas/server/canvas-api.mjs) & [`server/canvas-store.mjs`](file:///home/sadgen/Projects/AltCanvas/server/canvas-store.mjs))：
+  - **Stage 1（纯净基础分析）**：AI 全文分块阅读与综合摘要 Prompt 仅输入 PDF 正文笔记，不掺入任何画板已有卡片；产出的 topic-agnostic base graph 存入全局 `document_analyses` 缓存（`promptVersion = 'altcanvas-document-map-v2'`），彻底杜绝全局缓存携带首个画板的语义偏向；
+  - **Stage 2（画板级专属关系推理与同报告自关联排除）**：无论是新生成分析还是跨主题缓存命中，Stage 2 严格过滤掉当前被分析文献自己的所有节点（`focalSourceRefs`），仅针对真正的外部已有卡片进行轻量关系推理，彻底杜绝同报告伪跨卡片关系；
+  - **画板边落库幂等去重**：向 SQLite `edges` 表插入 Stage 2 关系前执行全库签名去重（`(board, source, target, relation)`），重复理解同一文献不会累积重复外部关系边；
+  - 前端 `index.html` 针对 `cached && !alreadyOnBoard` 自动发起免提取正文的缓存投影调用，针对 `cached && alreadyOnBoard` 触发分析刷新。
+- **导入任务文库身份持久化与进程级安全恢复** ([`server/canvas-api.mjs`](file:///home/sadgen/Projects/AltCanvas/server/canvas-api.mjs) & [`server/canvas-store.mjs`](file:///home/sadgen/Projects/AltCanvas/server/canvas-store.mjs))：
+  - 入队时将服务端确认的 `libraryType: 'user'` 与 `libraryId: actor.session.userId` 写入 `payload`；
+  - `executeImportJob` 严格校验 payload 中的文库身份，缺失时抛出异常并标记 `failed`，禁止回退到错误的文库 `'0'`；
+  - 启动时通过 `recoverQueuedAndRunningJobs` 自动拉起冷启动未完任务，基于 Job ID 生成确定性 `IMP_<hash>` 保持重试幂等；`updateJobState` 支持显式 `errorCode: null` 清除错误。
+- **SSRF 真实连接固定 IP 防御（彻底封堵 DNS Rebinding 与移除未固定 fallback）** ([`server/import-resolver.mjs`](file:///home/sadgen/Projects/AltCanvas/server/import-resolver.mjs) & [`test/bff.test.mjs`](file:///home/sadgen/Projects/AltCanvas/test/bff.test.mjs))：
+  - 移除了所有未固定 IP 的 fallback 分支，`safeFetchText` 仅允许直连经 `validateExternalUrl` 验证的公网 IP 列表，逐个尝试直连失败则明确报错；
+  - 严格保持 TLS SNI 和证书校验为原始 `hostname`；逐跳重定向严格重复 DNS 校验与固定连接；测试通过 `transportFn` 注入隔离，绝不降级至常规公网请求。
+- **DOI 全链路持久化与多源检索** ([`server/canvas-store.mjs`](file:///home/sadgen/Projects/AltCanvas/server/canvas-store.mjs) & [`server/import-resolver.mjs`](file:///home/sadgen/Projects/AltCanvas/server/import-resolver.mjs))：
+  - `inbox_entries` 与 `document_metas` 的读写与 row 映射完整覆盖 `doi` 列；`findDuplicateCandidates` 基于 `doi` 列实现精确去重匹配。
+- **自动化测试全覆盖** ([`test/bff.test.mjs`](file:///home/sadgen/Projects/AltCanvas/test/bff.test.mjs), [`test/canvas.test.mjs`](file:///home/sadgen/Projects/AltCanvas/test/canvas.test.mjs), [`test/canvas-ui.test.mjs`](file:///home/sadgen/Projects/AltCanvas/test/canvas-ui.test.mjs))：
+  - 覆盖 v10→v11 真实存量数据库升级断言、内部与外部人工边保护断言、冲突迁移 manual 优先断言、缩减旧节点外部边迁移至 Overview 与自环消除断言、冷启动无 Session 任务恢复与文库 ID 保真断言、全局分析无 existing 关系断言、Stage 2 画板专属关系生成与同一画板连续理解外部边不增加断言、免 pages 缓存跨板投影断言、DOI 列落库与多源去重断言、`autoFitCanvasNodeHeight` 真实函数 DOM 测量调整断言；
   - `npm test` 六套测试全部通过，`git diff --check` 通过。
 
 ## 2026-09-01 会话（T4 阶段：Canvas 快速导入与 PDF 引用浮层核验）
