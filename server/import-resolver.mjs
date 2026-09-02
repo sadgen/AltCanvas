@@ -183,6 +183,133 @@ export async function safeFetchText(url, options = {}, { allowPrivate = false, m
   }
 }
 
+export async function safeDownloadPdfFile(url, targetDir, {
+  allowPrivate = false,
+  maxRedirects = 5,
+  lookupFn = dns.lookup,
+  transportFn = null,
+  maxBytes = 104_857_600 // 100 MiB
+} = {}) {
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const crypto = await import('node:crypto');
+
+  fs.mkdirSync(targetDir, { recursive: true, mode: 0o700 });
+  const tempFileName = `download-${crypto.randomBytes(16).toString('hex')}.tmp`;
+  const tempFilePath = path.join(targetDir, tempFileName);
+  const writeStream = fs.createWriteStream(tempFilePath, { mode: 0o600 });
+  const hash = crypto.createHash('sha256');
+
+  let currentUrl = url;
+  let redirectsCount = 0;
+  let totalBytes = 0;
+  let firstChunk = null;
+
+  const cleanup = () => {
+    try { writeStream.destroy(); } catch {}
+    try { if (fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath); } catch {}
+  };
+
+  try {
+    while (true) {
+      const validation = await validateExternalUrl(currentUrl, { allowPrivate, lookupFn });
+      const parsed = validation.parsed;
+      const validatedAddresses = validation.validatedAddresses;
+
+      let res;
+      if (typeof transportFn === 'function') {
+        res = await transportFn(currentUrl, { accept: 'application/pdf' }, { parsed, validatedAddresses });
+      } else {
+        let lastErr = null;
+        const addrCandidates = validatedAddresses.length ? validatedAddresses : [null];
+        for (const addr of addrCandidates) {
+          try {
+            res = await requestWithPinnedIp(parsed, addr, { accept: 'application/pdf,*/*' }, REQUEST_TIMEOUT_MS);
+            break;
+          } catch (err) {
+            lastErr = err;
+          }
+        }
+        if (!res) throw lastErr || new Error(`Connection to ${parsed.hostname} failed on all resolved addresses`);
+      }
+
+      const statusCode = res.status || res.statusCode || 200;
+      if ([301, 302, 303, 307, 308].includes(statusCode)) {
+        redirectsCount++;
+        if (redirectsCount > maxRedirects) throw new Error(`Too many redirects (limit: ${maxRedirects})`);
+        const location = (res.headers && typeof res.headers.get === 'function')
+          ? res.headers.get('location')
+          : (res.headers?.['location'] || null);
+        if (!location) throw new Error(`Redirect status HTTP ${statusCode} without Location header`);
+        currentUrl = new URL(location, currentUrl).toString();
+        continue;
+      }
+
+      if (statusCode < 200 || statusCode >= 300) {
+        throw new Error(`Upstream PDF server returned HTTP ${statusCode}`);
+      }
+
+      if (typeof res.body?.getReader === 'function') {
+        const reader = res.body.getReader();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const chunk = Buffer.from(value);
+          totalBytes += chunk.length;
+          if (totalBytes > maxBytes) {
+            const err = new Error('PDF file exceeds maximum allowed size (100MB)');
+            err.status = 413;
+            throw err;
+          }
+          if (!firstChunk && chunk.length > 0) firstChunk = chunk.slice(0, 5);
+          hash.update(chunk);
+          writeStream.write(chunk);
+        }
+      } else {
+        for await (const chunk of res) {
+          const buf = Buffer.from(chunk);
+          totalBytes += buf.length;
+          if (totalBytes > maxBytes) {
+            if (typeof res.destroy === 'function') res.destroy();
+            const err = new Error('PDF file exceeds maximum allowed size (100MB)');
+            err.status = 413;
+            throw err;
+          }
+          if (!firstChunk && buf.length > 0) firstChunk = buf.slice(0, 5);
+          hash.update(buf);
+          writeStream.write(buf);
+        }
+      }
+      break;
+    }
+
+    await new Promise((resolve, reject) => {
+      writeStream.end(err => err ? reject(err) : resolve());
+    });
+
+    const fd = fs.openSync(tempFilePath, 'r');
+    const headBuf = Buffer.alloc(5);
+    fs.readSync(fd, headBuf, 0, 5, 0);
+    fs.closeSync(fd);
+    if (!headBuf.toString('ascii').startsWith('%PDF-')) {
+      cleanup();
+      throw new Error('Downloaded file is not a valid PDF (%PDF- header missing)');
+    }
+
+    const sha256 = hash.digest('hex');
+    const stat = fs.statSync(tempFilePath);
+    return {
+      tempFilePath,
+      sha256,
+      sizeBytes: stat.size,
+      mimeType: 'application/pdf'
+    };
+  } catch (err) {
+    cleanup();
+    throw err;
+  }
+}
+
 export async function resolveDoi(doi, { fetchFn = safeFetchText, allowPrivate = false } = {}) {
   const cleanDoi = extractDoi(doi) || doi;
   const endpoint = `https://doi.org/${encodeURIComponent(cleanDoi)}`;

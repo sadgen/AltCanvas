@@ -490,12 +490,12 @@
           </div>
           <div>
             <label for="input-ai-base-url" class="block text-slate-400 mb-1">兼容接口地址</label>
-            <input id="input-ai-base-url" type="url" inputmode="url" autocomplete="url" placeholder="https://api.deepseek.com/v1" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:outline-none focus:border-purple-500 font-mono">
+            <input id="input-ai-base-url" type="url" inputmode="url" autocomplete="url" placeholder="http://127.0.0.1:8317/v1" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:outline-none focus:border-purple-500 font-mono">
             <div class="mt-1 text-[10px] text-amber-500/80">HTTP 仅建议用于 127.0.0.1/localhost；局域网 HTTP 会明文传输卡片内容与凭据。</div>
           </div>
           <div>
             <label for="input-ai-model" class="block text-slate-400 mb-1">模型名称</label>
-            <input id="input-ai-model" type="text" autocomplete="off" spellcheck="false" placeholder="deepseek-chat" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:outline-none focus:border-purple-500 font-mono">
+            <input id="input-ai-model" type="text" autocomplete="off" spellcheck="false" placeholder="gemini-3.7-flash-high" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:outline-none focus:border-purple-500 font-mono">
           </div>
           <div>
             <label for="input-ai-key" class="block text-slate-400 mb-1">API Key</label>
@@ -586,7 +586,7 @@
         </div>
 
         <div class="flex items-center justify-between text-[10px] text-slate-500 bg-slate-950/60 px-2.5 py-1.5 rounded border border-slate-800/80">
-          <span>当前模型: <strong id="ai-current-model-tag" class="text-purple-400 font-mono">deepseek-chat</strong></span>
+          <span>当前模型: <strong id="ai-current-model-tag" class="text-purple-400 font-mono">gemini-3.7-flash-high</strong></span>
           <button id="btn-open-ai-settings" type="button" class="text-indigo-400 hover:text-indigo-300 underline cursor-pointer">配置模型</button>
         </div>
 
@@ -1911,10 +1911,10 @@
       document.getElementById('input-key').value = config.apiKey;
       document.getElementById('legacy-direct-settings').classList.toggle('hidden', config.mode === 'bff');
       document.getElementById('btn-test-conn').classList.toggle('hidden', config.mode === 'bff');
-      document.getElementById('ai-provider-name').textContent = aiConfig.provider || '未配置';
+      document.getElementById('ai-provider-name').textContent = aiConfig.provider ? `${aiConfig.provider}${aiConfig.userConfigured ? ' (个人配置)' : ' (系统默认)'}` : '未配置';
       document.getElementById('ai-provider-model').textContent = aiConfig.model || '未配置';
       document.getElementById('input-ai-base-url').value = aiConfig.baseUrl || '';
-      document.getElementById('input-ai-model').value = aiConfig.userConfigured ? (aiConfig.model || '') : '';
+      document.getElementById('input-ai-model').value = aiConfig.model || '';
       document.getElementById('input-ai-key').value = '';
       document.getElementById('input-ai-key').placeholder = aiConfig.hasApiKey
         ? '已保存 Key；留空保持不变' : '输入 API Key（本地无鉴权模型可留空）';
@@ -1996,11 +1996,11 @@
     async function clearAiConfig() {
       try {
         aiConfig = await canvasFetch('/ai/config', { method: 'DELETE' });
-        document.getElementById('input-ai-base-url').value = '';
-        document.getElementById('input-ai-model').value = '';
+        document.getElementById('input-ai-base-url').value = aiConfig.baseUrl || '';
+        document.getElementById('input-ai-model').value = aiConfig.model || '';
         document.getElementById('input-ai-key').value = '';
         document.getElementById('btn-clear-ai-config').classList.add('hidden');
-        document.getElementById('ai-provider-name').textContent = aiConfig.provider || '未配置';
+        document.getElementById('ai-provider-name').textContent = aiConfig.provider ? `${aiConfig.provider} (系统默认)` : '未配置';
         document.getElementById('ai-provider-model').textContent = aiConfig.model || '未配置';
         updateCanvasAiToolbar();
         setCanvasSaveState(aiConfig.configured ? '已恢复默认 AI 配置' : '个人 AI 配置已清除', 'ok');
@@ -2165,6 +2165,196 @@
     };
 
     // --- Collections & Library Loading ---
+    function nativeDocumentToLibraryItem(doc) {
+      if (!doc) return null;
+      return {
+        key: doc.id,
+        version: doc.version,
+        libraryType: 'native',
+        libraryId: 'local',
+        isNative: true,
+        data: {
+          key: doc.id,
+          itemType: doc.itemType || 'journalArticle',
+          title: doc.title || '未命名文献',
+          creators: doc.creators || [],
+          date: doc.date || '',
+          year: doc.year || '',
+          url: doc.url || '',
+          tags: []
+        },
+        children: (doc.attachments || []).map(attachment => ({
+          key: attachment.id,
+          version: attachment.version,
+          libraryType: 'native',
+          libraryId: 'local',
+          isNative: true,
+          data: {
+            key: attachment.id,
+            itemType: 'attachment',
+            contentType: attachment.mimeType || 'application/pdf',
+            filename: attachment.originalFilename || `${doc.title || 'document'}.pdf`,
+            title: attachment.title || doc.title || 'PDF 附件',
+            isNative: true
+          }
+        }))
+      };
+    }
+
+    function nativeLibraryItemToDocument(item) {
+      if (!item) return null;
+      return {
+        id: item.key,
+        version: item.version,
+        title: item.data?.title || '',
+        itemType: item.data?.itemType || 'journalArticle',
+        creators: item.data?.creators || [],
+        date: item.data?.date || '',
+        year: item.data?.year || '',
+        url: item.data?.url || '',
+        attachments: (item.children || []).map(nativeLibraryChildToAttachment).filter(Boolean)
+      };
+    }
+
+    function nativeLibraryChildToAttachment(child) {
+      if (!child) return null;
+      return {
+        id: child.key,
+        version: child.version,
+        mimeType: child.data?.contentType || 'application/pdf',
+        originalFilename: child.data?.filename || `${child.data?.title || 'document'}.pdf`,
+        title: child.data?.title || '',
+        isNative: true
+      };
+    }
+
+    async function getNativeLibraryItem(documentId, signal = null) {
+      if (!documentId) return null;
+      const cached = allItems.find(i => (i.isNative || i.libraryType === 'native') && i.key === documentId);
+      if (cached) return cached;
+
+      const response = await fetch(`/canvas/native/documents/${encodeURIComponent(documentId)}`, { signal });
+      if (!response.ok) throw new Error(`获取原生文献失败 (HTTP ${response.status})`);
+
+      const payload = await response.json();
+      return nativeDocumentToLibraryItem(payload.data);
+    }
+
+    function renderNativeLibraryError(err) {
+      const container = document.getElementById('items-container');
+      if (!container) return;
+      if (err?.status === 401 || err?.message?.includes('401') || err?.message?.includes('登录会话已过期')) {
+        updateAuthUI(false);
+        container.innerHTML = `
+          <div class="text-center text-slate-500 py-12 px-4 space-y-3">
+            <p class="text-xs text-rose-400">登录会话已过期</p>
+            <a href="/auth/login" class="inline-block px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs transition">重新登录</a>
+          </div>`;
+        return;
+      }
+      if (err?.status === 403 || err?.message?.includes('403') || err?.message?.includes('无法访问本地文库')) {
+        container.innerHTML = '<div class="text-center text-amber-400 py-12 px-4 text-xs">无法访问本地文库</div>';
+        return;
+      }
+      container.innerHTML = `
+        <div class="p-4 text-center space-y-2">
+          <div class="text-rose-400 text-xs">Native 文库加载失败: ${escapeHTML(errorMessage(err))}</div>
+        </div>
+      `;
+    }
+
+    async function loadNativeLibrary(signal) {
+      const [docsRes, metasRes] = await Promise.all([
+        fetch('/canvas/native/documents', { signal }),
+        fetch('/canvas/documents/metadata?libraryType=native&libraryId=local', { signal }).catch(() => null)
+      ]);
+
+      if (docsRes.status === 401) {
+        const err = new Error('登录会话已过期');
+        err.status = 401;
+        throw err;
+      }
+      if (docsRes.status === 403) {
+        const err = new Error('无法访问本地文库');
+        err.status = 403;
+        throw err;
+      }
+      if (!docsRes.ok) {
+        const err = new Error(`HTTP ${docsRes.status}: 未能加载条目`);
+        err.status = docsRes.status;
+        throw err;
+      }
+
+      if (metasRes && metasRes.ok) {
+        try {
+          const metasData = await metasRes.json();
+          if (Array.isArray(metasData?.data)) {
+            for (const meta of metasData.data) {
+              if (meta?.itemKey) {
+                documentMetas.set(docMetaKey(meta.libraryType || 'native', meta.libraryId || 'local', meta.itemKey), meta);
+              }
+            }
+          }
+        } catch {}
+      }
+
+      const docsData = await docsRes.json();
+      const nativeDocs = docsData.data || [];
+      allItems = nativeDocs.map(nativeDocumentToLibraryItem).filter(Boolean);
+      renderCollections([]);
+      renderItems();
+    }
+
+    async function loadExternalLibrary(signal) {
+      const container = document.getElementById('items-container');
+      const userId = encodeURIComponent(config.userId);
+      const colUrl = getApiUrl(`/users/${userId}/collections`);
+      const itemUrl = getApiUrl(`/users/${userId}/items/top?limit=100`);
+      const metaUrl = `/canvas/documents/metadata?libraryType=user&libraryId=${userId}`;
+
+      const [colRes, itemsRes, metasRes] = await Promise.all([
+        fetch(colUrl, { headers: getHeaders(), signal }),
+        fetch(itemUrl, { headers: getHeaders(), signal }),
+        fetch(metaUrl, { signal }).catch(() => null)
+      ]);
+
+      if (colRes.status === 401 || itemsRes.status === 401) {
+        updateAuthUI(false);
+        container.innerHTML = `
+          <div class="text-center text-slate-500 py-12 px-4 space-y-3">
+            <p class="text-xs text-rose-400">登录会话已过期</p>
+            <a href="/auth/login" class="inline-block px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs transition">重新登录</a>
+          </div>`;
+        return;
+      }
+      if (colRes.status === 403 || itemsRes.status === 403) {
+        container.innerHTML = '<div class="text-center text-amber-400 py-12 px-4 text-xs">当前登录缺少读取文库所需的权限，请退出后重新授权。</div>';
+        return;
+      }
+
+      if (metasRes && metasRes.ok) {
+        try {
+          const metasData = await metasRes.json();
+          if (Array.isArray(metasData?.data)) {
+            for (const meta of metasData.data) {
+              if (meta?.itemKey) {
+                documentMetas.set(docMetaKey(meta.libraryType, meta.libraryId, meta.itemKey), meta);
+              }
+            }
+          }
+        } catch {}
+      }
+
+      if (colRes.ok) {
+        const collections = await colRes.json();
+        renderCollections(collections);
+      }
+
+      if (!itemsRes.ok) throw new Error(`HTTP ${itemsRes.status}: 未能加载条目`);
+      allItems = await itemsRes.json();
+      renderItems();
+    }
+
     async function loadCollectionsAndLibrary() {
       documentMetas.clear();
       if (!config.userId) {
@@ -2182,94 +2372,22 @@
       libraryController?.abort();
       libraryController = new AbortController();
 
-      if (config.authMode === 'local' || !config.alteroApi) {
+      const externalEnabled =
+        config.authMode === 'altero' &&
+        config.capabilities?.externalLibrary === true;
+
+      if (!externalEnabled) {
         try {
-          const nativeDocsRes = await fetch('/canvas/native/documents', { signal: libraryController.signal });
-          if (nativeDocsRes.ok) {
-            const docsData = await nativeDocsRes.json();
-            const nativeDocs = docsData.data || [];
-            allLibraryItems = nativeDocs.map(d => ({
-              key: d.id,
-              version: d.version,
-              data: {
-                itemType: d.itemType || 'journalArticle',
-                title: d.title,
-                creators: d.creators || [],
-                date: d.date || '',
-                year: d.year || '',
-                url: d.url || '',
-                tags: []
-              },
-              children: (d.attachments || []).map(a => ({
-                key: a.id,
-                data: {
-                  itemType: 'attachment',
-                  contentType: a.mimeType || 'application/pdf',
-                  filename: a.originalFilename || `${d.title}.pdf`,
-                  title: a.title || d.title,
-                  isNative: true
-                },
-                isNative: true
-              })),
-              isNative: true
-            }));
-            renderCollections([]);
-            renderItems(allLibraryItems);
-            return;
-          }
+          await loadNativeLibrary(libraryController.signal);
         } catch (err) {
           if (err?.name === 'AbortError') return;
-          console.warn('Native docs load error:', err);
+          renderNativeLibraryError(err);
         }
+        return;
       }
 
       try {
-        const userId = encodeURIComponent(config.userId);
-        const colUrl = getApiUrl(`/users/${userId}/collections`);
-        const itemUrl = getApiUrl(`/users/${userId}/items/top?limit=100`);
-        const metaUrl = `/canvas/documents/metadata?libraryType=user&libraryId=${userId}`;
-
-        const [colRes, itemsRes, metasRes] = await Promise.all([
-          fetch(colUrl, { headers: getHeaders(), signal: libraryController.signal }),
-          fetch(itemUrl, { headers: getHeaders(), signal: libraryController.signal }),
-          fetch(metaUrl, { signal: libraryController.signal }).catch(() => null)
-        ]);
-
-        if (colRes.status === 401 || itemsRes.status === 401) {
-          updateAuthUI(false);
-          container.innerHTML = `
-            <div class="text-center text-slate-500 py-12 px-4 space-y-3">
-              <p class="text-xs text-rose-400">登录会话已过期</p>
-              <a href="/auth/login" class="inline-block px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs transition">重新登录</a>
-            </div>`;
-          return;
-        }
-        if (colRes.status === 403 || itemsRes.status === 403) {
-          container.innerHTML = '<div class="text-center text-amber-400 py-12 px-4 text-xs">当前登录缺少读取文库所需的权限，请退出后重新授权。</div>';
-          return;
-        }
-
-        if (metasRes && metasRes.ok) {
-          try {
-            const metasData = await metasRes.json();
-            if (Array.isArray(metasData?.data)) {
-              for (const meta of metasData.data) {
-                if (meta?.itemKey) {
-                  documentMetas.set(docMetaKey(meta.libraryType, meta.libraryId, meta.itemKey), meta);
-                }
-              }
-            }
-          } catch {}
-        }
-
-        if (colRes.ok) {
-          const collections = await colRes.json();
-          renderCollections(collections);
-        }
-
-        if (!itemsRes.ok) throw new Error(`HTTP ${itemsRes.status}: 未能加载条目`);
-        allItems = await itemsRes.json();
-        renderItems();
+        await loadExternalLibrary(libraryController.signal);
       } catch (err) {
         if (err?.name === 'AbortError') return;
         container.innerHTML = `
@@ -2278,7 +2396,7 @@
             <button type="button" class="open-settings-link text-xs text-blue-400 underline">检查连接设置</button>
           </div>
         `;
-        container.querySelector('.open-settings-link').onclick = openSettingsModal;
+        container.querySelector('.open-settings-link')?.addEventListener('click', openSettingsModal);
       }
     }
 
@@ -2405,6 +2523,13 @@
 
     async function resolveTopicLibraryPdf(doc) {
       const docLib = normalizeLibraryContext(doc);
+      if (docLib.libraryType === 'native') {
+        const item = await getNativeLibraryItem(doc.itemKey);
+        if (!item) return null;
+        const attachment = (item.children || []).find(child => child.data?.contentType === 'application/pdf')
+          || (item.data?.itemType === 'attachment' ? item : null);
+        return attachment ? { doc, item, attachment } : null;
+      }
       let item = docLib.libraryType === 'user' && docLib.libraryId === String(config.userId)
         ? allItems.find(candidate => candidate.key === doc.itemKey)
         : null;
@@ -3915,18 +4040,26 @@
           `;
           item.querySelector('.btn-open-topic-doc').onclick = async () => {
             closeTopicSettingsModal();
-            let targetItem = matchItem;
+            let targetItem = allItems.find(i => i.key === doc.itemKey && isSameLibrary(normalizeLibraryContext(i), docLib));
             if (!targetItem) {
-              try {
-                const itemUrl = getApiUrl(`${libraryApiPrefix(docLib)}/items/${encodeURIComponent(doc.itemKey)}`);
-                const res = await fetch(itemUrl, { headers: getHeaders() });
-                if (res.ok) targetItem = await res.json();
-              } catch (e) {
-                console.warn('Failed to fetch topic document directly:', e);
+              if (docLib.libraryType === 'native') {
+                try {
+                  targetItem = await getNativeLibraryItem(doc.itemKey);
+                } catch (e) {
+                  console.warn('Failed to fetch native topic document directly:', e);
+                }
+              } else {
+                try {
+                  const itemUrl = getApiUrl(`${libraryApiPrefix(docLib)}/items/${encodeURIComponent(doc.itemKey)}`);
+                  const res = await fetch(itemUrl, { headers: getHeaders() });
+                  if (res.ok) targetItem = await res.json();
+                } catch (e) {
+                  console.warn('Failed to fetch topic document directly:', e);
+                }
               }
             }
             if (targetItem) {
-              await openItem(targetItem, doc);
+              await openItem(targetItem, docLib);
             } else {
               showToast(`无法在文库中找到文献 #${doc.itemKey}`, 'error');
             }
@@ -3965,32 +4098,49 @@
     async function openInboxEntryForReading(entry) {
       if (!entry) return;
       closeInboxModal();
-      let targetItem = allItems.find(i => i.key === entry.itemKey && (String(i.libraryId || config.userId) === String(entry.libraryId || config.userId)));
+      const entryLibrary = normalizeLibraryContext(entry);
+
+      let targetItem = allItems.find(item =>
+        item.key === entry.itemKey &&
+        isSameLibrary(normalizeLibraryContext(item), entryLibrary)
+      );
+
       if (!targetItem) {
-        try {
-          const itemUrl = getApiUrl(`${libraryApiPrefix(entry)}/items/${encodeURIComponent(entry.itemKey)}`);
-          const res = await fetch(itemUrl, { headers: getHeaders() });
-          if (res.ok) {
-            targetItem = await res.json();
+        if (entryLibrary.libraryType === 'native') {
+          try {
+            targetItem = await getNativeLibraryItem(entry.itemKey);
+          } catch (e) {
+            console.warn('Failed to fetch native inbox item directly:', e);
           }
-        } catch (e) {
-          console.warn('Failed to fetch inbox item directly:', e);
+        } else {
+          try {
+            const itemUrl = getApiUrl(`${libraryApiPrefix(entryLibrary)}/items/${encodeURIComponent(entry.itemKey)}`);
+            const res = await fetch(itemUrl, { headers: getHeaders() });
+            if (res.ok) {
+              targetItem = await res.json();
+            }
+          } catch (e) {
+            console.warn('Failed to fetch inbox item directly:', e);
+          }
         }
       }
       if (targetItem) {
-        await openItem(targetItem, entry);
+        await openItem(targetItem, entryLibrary);
       } else {
+        const isNative = entryLibrary.libraryType === 'native';
         const fallbackItem = {
           key: entry.itemKey,
-          libraryType: entry.libraryType || 'user',
-          libraryId: entry.libraryId || config.userId,
+          libraryType: entryLibrary.libraryType,
+          libraryId: entryLibrary.libraryId,
+          isNative,
           data: {
+            key: entry.itemKey,
             title: entry.title,
             itemType: 'journalArticle',
             abstractNote: entry.abstractNote || ''
           }
         };
-        await openItem(fallbackItem, entry);
+        await openItem(fallbackItem, entryLibrary);
       }
     }
 
@@ -4711,9 +4861,15 @@
       try {
         for (const sourceRef of canvasSources.values()) {
           if (!sourceRef?.annotationKey) continue;
+          const lib = normalizeLibraryContext(sourceRef);
           if (sourceRef.attachmentKey) {
-            const groupKey = `${libraryApiPrefix(sourceRef)}|${sourceRef.attachmentKey}`;
-            const group = attachmentSources.get(groupKey) || { sourceRef, attachmentKey: sourceRef.attachmentKey, sources: [] };
+            const groupKey = `${lib.libraryType}:${lib.libraryId}|${sourceRef.attachmentKey}`;
+            const group = attachmentSources.get(groupKey) || {
+              sourceRef,
+              isNative: lib.libraryType === 'native',
+              attachmentKey: sourceRef.attachmentKey,
+              sources: []
+            };
             group.sources.push(sourceRef);
             attachmentSources.set(groupKey, group);
           } else {
@@ -4722,6 +4878,34 @@
         }
 
         for (const group of attachmentSources.values()) {
+          if (group.isNative) {
+            const annUrl = `/canvas/native/attachments/${encodeURIComponent(group.attachmentKey)}/annotations`;
+            try {
+              const res = await fetch(annUrl, { debugExpectedStatuses: [401, 403, 404] });
+              if ([401, 403].includes(res.status)) {
+                group.sources.forEach(sourceRef => setStatus(sourceRef, 'inaccessible'));
+                continue;
+              }
+              if (res.status === 404) {
+                group.sources.forEach(sourceRef => setStatus(sourceRef, 'deleted'));
+                continue;
+              }
+              if (!res.ok) throw new Error(`来源检查失败 (HTTP ${res.status})`);
+              const annPayload = await res.json();
+              const liveAnnotations = annPayload.data || [];
+              const liveMap = new Map(liveAnnotations.map(item => [item.id, Number(item.version || 0)]));
+              for (const sourceRef of group.sources) {
+                if (!liveMap.has(sourceRef.annotationKey)) setStatus(sourceRef, 'deleted');
+                else if (sourceRef.annotationVersion && liveMap.get(sourceRef.annotationKey) > sourceRef.annotationVersion) setStatus(sourceRef, 'modified');
+                else setStatus(sourceRef, 'intact');
+              }
+            } catch (err) {
+              group.sources.forEach(sourceRef => setStatus(sourceRef, 'error'));
+              reportApplicationError('canvas.source-freshness', err, { method: 'GET', endpoint: annUrl });
+            }
+            continue;
+          }
+
           const annUrl = getApiUrl(`${libraryApiPrefix(group.sourceRef)}/items/${encodeURIComponent(group.attachmentKey)}/children`);
           try {
             const res = await fetch(annUrl, { headers: getHeaders(), debugExpectedStatuses: [401, 403, 404] });
@@ -4750,6 +4934,11 @@
         }
 
         for (const sourceRef of directAnnotationSources) {
+          const lib = normalizeLibraryContext(sourceRef);
+          if (lib.libraryType === 'native') {
+            setStatus(sourceRef, 'intact');
+            continue;
+          }
           const itemUrl = getApiUrl(`${libraryApiPrefix(sourceRef)}/items/${encodeURIComponent(sourceRef.annotationKey)}`);
           try {
             const res = await fetch(itemUrl, { headers: getHeaders(), debugExpectedStatuses: [401, 403, 404] });
@@ -5751,38 +5940,7 @@
       try {
         let targetItem = null;
         if (sourceLibrary.libraryType === 'native') {
-          targetItem = allLibraryItems.find(i => i.key === targetItemKey || (sourceRef.itemKey && i.key === sourceRef.itemKey));
-          if (!targetItem) {
-            const res = await fetch(`/canvas/native/documents/${encodeURIComponent(targetItemKey)}`);
-            if (!res.ok) throw new Error(`获取原生文献失败 (HTTP ${res.status})`);
-            const docData = await res.json();
-            const d = docData.data;
-            targetItem = {
-              key: d.id,
-              version: d.version,
-              data: {
-                itemType: d.itemType || 'journalArticle',
-                title: d.title,
-                creators: d.creators || [],
-                date: d.date || '',
-                year: d.year || '',
-                tags: []
-              },
-              children: (d.attachments || []).map(a => ({
-                key: a.id,
-                version: a.version,
-                data: {
-                  itemType: 'attachment',
-                  contentType: a.mimeType || 'application/pdf',
-                  filename: a.originalFilename || `${d.title}.pdf`,
-                  title: a.title || d.title,
-                  isNative: true
-                },
-                isNative: true
-              })),
-              isNative: true
-            };
-          }
+          targetItem = await getNativeLibraryItem(targetItemKey);
         } else {
           const canUsePersonalLibraryCache = sourceLibrary.libraryType === 'user'
             && sourceLibrary.libraryId === String(config.userId || '');
@@ -5823,38 +5981,7 @@
           const targetItemKey = sourceRef.itemKey || sourceRef.attachmentKey;
           let targetItem = null;
           if (sourceLibrary.libraryType === 'native') {
-            targetItem = allLibraryItems.find(item => item.key === targetItemKey);
-            if (!targetItem) {
-              const response = await fetch(`/canvas/native/documents/${encodeURIComponent(targetItemKey)}`);
-              if (!response.ok) throw new Error(`获取原生文献失败 (HTTP ${response.status})`);
-              const docData = await response.json();
-              const d = docData.data;
-              targetItem = {
-                key: d.id,
-                version: d.version,
-                data: {
-                  itemType: d.itemType || 'journalArticle',
-                  title: d.title,
-                  creators: d.creators || [],
-                  date: d.date || '',
-                  year: d.year || '',
-                  tags: []
-                },
-                children: (d.attachments || []).map(a => ({
-                  key: a.id,
-                  version: a.version,
-                  data: {
-                    itemType: 'attachment',
-                    contentType: a.mimeType || 'application/pdf',
-                    filename: a.originalFilename || `${d.title}.pdf`,
-                    title: a.title || d.title,
-                    isNative: true
-                  },
-                  isNative: true
-                })),
-                isNative: true
-              };
-            }
+            targetItem = await getNativeLibraryItem(targetItemKey);
           } else {
             targetItem = sourceLibrary.libraryType === 'user' && sourceLibrary.libraryId === String(config.userId || '')
               ? allItems.find(item => item.key === targetItemKey) : null;
@@ -6968,7 +7095,7 @@
     })();
 
     async function openNativeDocument(doc, attachment) {
-      if (!attachment) {
+      if (!attachment && doc?.id) {
         try {
           const fullDocRes = await fetch(`/canvas/native/documents/${encodeURIComponent(doc.id)}`);
           if (fullDocRes.ok) {
@@ -6985,22 +7112,27 @@
       const attData = {
         key: attachment.id,
         version: attachment.version,
+        libraryType: 'native',
+        libraryId: 'local',
         data: {
           key: attachment.id,
-          title: attachment.title || doc.title,
+          title: attachment.title || doc?.title,
           contentType: attachment.mimeType || 'application/pdf',
-          filename: attachment.originalFilename || `${doc.title}.pdf`,
+          filename: attachment.originalFilename || `${doc?.title || 'document'}.pdf`,
           isNative: true
         },
         isNative: true
       };
       const itemData = {
-        key: doc.id,
-        version: doc.version,
+        key: doc?.id || doc?.key,
+        version: doc?.version,
+        libraryType: 'native',
+        libraryId: 'local',
         data: {
-          title: doc.title,
-          itemType: doc.itemType || 'journalArticle',
-          creators: doc.creators || []
+          key: doc?.id || doc?.key,
+          title: doc?.title || '',
+          itemType: doc?.itemType || 'journalArticle',
+          creators: doc?.creators || []
         },
         children: [attData],
         isNative: true
@@ -7014,13 +7146,32 @@
     }
 
     async function openDocument(identity) {
-      if (!identity || !identity.itemKey) return;
-      const libraryType = identity.libraryType || (identity.isNative ? 'native' : 'user');
-      const libraryId = identity.libraryId || (libraryType === 'native' ? 'local' : config.userId);
-      const itemKey = identity.itemKey;
+      if (!identity) return;
+      const lib = normalizeLibraryContext(identity);
+      const itemKey = identity.itemKey || identity.id || identity.key;
+      if (!itemKey) return;
+
+      if (lib.libraryType === 'native') {
+        const item = await getNativeLibraryItem(itemKey);
+        if (!item) {
+          showToast(`无法找到原生文献 #${itemKey}`, 'error');
+          return;
+        }
+        const attachment = identity.attachmentKey
+          ? item.children?.find(child => child.key === identity.attachmentKey)
+          : item.children?.[0];
+
+        return openNativeDocument(
+          nativeLibraryItemToDocument(item),
+          nativeLibraryChildToAttachment(attachment)
+        );
+      }
+
+      const libraryType = lib.libraryType || (identity.isNative ? 'native' : 'user');
+      const libraryId = lib.libraryId || config.userId;
       return openItem({
         key: itemKey,
-        isNative: libraryType === 'native',
+        isNative: false,
         data: {
           key: itemKey,
           title: identity.title || '',

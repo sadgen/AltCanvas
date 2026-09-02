@@ -48,8 +48,16 @@ export async function validateAiEndpoint(raw, { allowPrivate = false, allowInsec
     }
   }
 
-  const normalized = endpoint.toString().replace(/\/+$/, '');
-  return normalized.endsWith('/chat/completions') ? normalized : `${normalized}/chat/completions`;
+  let pathname = endpoint.pathname.replace(/\/+$/, '');
+  if (!pathname || pathname === '') {
+    pathname = '/v1/chat/completions';
+  } else if (pathname === '/chat/completions') {
+    pathname = '/v1/chat/completions';
+  } else if (!pathname.endsWith('/chat/completions')) {
+    pathname = `${pathname}/chat/completions`;
+  }
+  endpoint.pathname = pathname;
+  return endpoint.toString();
 }
 
 export function getAiPublicConfig(override = null) {

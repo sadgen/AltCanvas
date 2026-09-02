@@ -864,9 +864,19 @@ function ensureAllIndexes(db) {
   if (tableExists('annotations')) {
     db.exec("CREATE INDEX IF NOT EXISTS annotations_attachment_idx ON annotations(attachment_id, deleted_at, sort_index);");
   }
-  if (tableExists('external_refs')) {
-    db.exec("CREATE INDEX IF NOT EXISTS external_refs_owner_idx ON external_refs(owner_key, provider, external_item_id);");
-  }
+    if (tableExists('external_refs')) {
+      db.exec(`
+        DELETE FROM external_refs
+        WHERE rowid NOT IN (
+          SELECT MAX(rowid) FROM external_refs
+          GROUP BY owner_key, provider, COALESCE(external_library_id, ''), external_item_id
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS external_refs_identity_idx
+          ON external_refs(owner_key, provider, COALESCE(external_library_id, ''), external_item_id);
+        CREATE INDEX IF NOT EXISTS external_refs_owner_idx
+          ON external_refs(owner_key, provider, external_item_id);
+      `);
+    }
   if (tableExists('import_jobs')) {
     db.exec("CREATE INDEX IF NOT EXISTS import_jobs_owner_idx ON import_jobs(owner_key, state, created_at);");
   }
@@ -3715,15 +3725,18 @@ export class CanvasStore {
     return row ? this.getDocument(actorKey, row.id) : null;
   }
 
-  findDocumentByExternalRef(actorKey, provider, externalItemId) {
+  findDocumentByExternalRef(actorKey, provider, externalItemId, externalLibraryId = null) {
     if (!provider || !externalItemId) return null;
+    const normalizedLibId = externalLibraryId !== null && externalLibraryId !== undefined ? String(externalLibraryId) : '';
     const row = this.db.prepare(`
       SELECT d.id FROM documents d
       JOIN external_refs er ON er.document_id = d.id
-      WHERE er.owner_key = ? AND er.provider = ? AND er.external_item_id = ?
+      WHERE er.owner_key = ? AND er.provider = ?
+        AND COALESCE(er.external_library_id, '') = ?
+        AND er.external_item_id = ?
         AND d.deleted_at IS NULL
       LIMIT 1
-    `).get(actorKey, provider, String(externalItemId));
+    `).get(actorKey, provider, normalizedLibId, String(externalItemId));
     return row ? this.getDocument(actorKey, row.id) : null;
   }
 
@@ -3806,33 +3819,42 @@ export class CanvasStore {
     const normalizedArxivId = arxivId ? String(arxivId).trim() : null;
 
     // --- Dedup chain (exact levels only auto-reuse) ---
+    // If multiple exact matches resolve to different documents, signal a conflict rather than picking one arbitrarily.
     let matched = null;
+    const exactMatches = [];
     if (!forceNew) {
-      if (!matched && attachment?.sha256) {
+      if (attachment?.sha256) {
         const doc = this.findDocumentByBlobHash(actorKey, attachment.sha256);
-        if (doc) matched = { strategy: 'sha256', document: doc };
+        if (doc) exactMatches.push({ strategy: 'sha256', document: doc });
       }
-      if (!matched && normalizedDoi) {
+      if (normalizedDoi) {
         const doc = this.findDocumentByDoi(actorKey, normalizedDoi);
-        if (doc) matched = { strategy: 'doi', document: doc };
+        if (doc) exactMatches.push({ strategy: 'doi', document: doc });
       }
-      if (!matched) {
-        for (const ref of externalRefs) {
-          if (!ref?.provider || !ref?.externalItemId) continue;
-          const doc = this.findDocumentByExternalRef(actorKey, ref.provider, ref.externalItemId);
-          if (doc) {
-            matched = { strategy: 'external_ref', document: doc, ref };
-            break;
-          }
-        }
+      for (const ref of externalRefs) {
+        if (!ref?.provider || !ref?.externalItemId) continue;
+        const doc = this.findDocumentByExternalRef(actorKey, ref.provider, ref.externalItemId, ref.externalLibraryId || null);
+        if (doc) exactMatches.push({ strategy: 'external_ref', document: doc, ref });
       }
-      if (!matched && normalizedIsbn) {
+      if (normalizedIsbn) {
         const doc = this.findDocumentByIsbn(actorKey, normalizedIsbn);
-        if (doc) matched = { strategy: 'isbn', document: doc };
+        if (doc) exactMatches.push({ strategy: 'isbn', document: doc });
       }
-      if (!matched && normalizedArxivId) {
+      if (normalizedArxivId) {
         const doc = this.findDocumentByArxivId(actorKey, normalizedArxivId);
-        if (doc) matched = { strategy: 'arxiv', document: doc };
+        if (doc) exactMatches.push({ strategy: 'arxiv', document: doc });
+      }
+
+      // Check for conflicting exact identities
+      const distinctDocIds = new Set(exactMatches.map(m => m.document.id));
+      if (distinctDocIds.size > 1) {
+        return {
+          outcome: 'conflicting_identities',
+          conflicts: exactMatches.map(m => ({ strategy: m.strategy, documentId: m.document.id, title: m.document.title }))
+        };
+      }
+      if (exactMatches.length > 0) {
+        matched = exactMatches[0];
       }
     }
 
@@ -4288,7 +4310,7 @@ export class CanvasStore {
     return this.db.prepare(query).all(...params).map(importJobRow);
   }
 
-  // Append a per-item record to a batch import job's report and adjust counters atomically.
+  // Append a per-item record to a batch import job's report and adjust counters while keeping job in running state.
   appendImportJobItemReport(actorKey, jobId, itemReport) {
     const timestamp = nowIso();
     return this.transaction(() => {
@@ -4309,19 +4331,35 @@ export class CanvasStore {
       });
       const completedCount = items.filter(i => i.ok).length;
       const failedCount = items.length - completedCount;
-      let state = row.state;
-      if (['pending', 'running', 'completed', 'completed_with_errors'].includes(state)) {
-        state = failedCount > 0 ? 'completed_with_errors' : 'completed';
-      }
+      const nextState = row.state === 'pending' ? 'running' : row.state;
       this.db.prepare(`
         UPDATE import_jobs SET
           state = ?,
           completed_count = ?,
           failed_count = ?,
-          report_json = ?,
-          completed_at = CASE WHEN ? IN ('completed', 'completed_with_errors') THEN COALESCE(completed_at, ?) ELSE completed_at END
+          report_json = ?
         WHERE id = ? AND owner_key = ?
-      `).run(state, completedCount, failedCount, JSON.stringify({ items }), state, timestamp, jobId, actorKey);
+      `).run(nextState, completedCount, failedCount, JSON.stringify({ items }), jobId, actorKey);
+      return this.getImportJob(actorKey, jobId);
+    });
+  }
+
+  // Finalize the batch import job after all items have been processed or when explicitly terminated.
+  finalizeImportJob(actorKey, jobId) {
+    const timestamp = nowIso();
+    return this.transaction(() => {
+      const row = this.db.prepare('SELECT * FROM import_jobs WHERE id = ? AND owner_key = ?').get(jobId, actorKey);
+      if (!row) return null;
+      if (['completed', 'completed_with_errors', 'failed', 'cancelled'].includes(row.state)) {
+        return importJobRow(row);
+      }
+      const finalState = row.failed_count > 0 ? 'completed_with_errors' : 'completed';
+      this.db.prepare(`
+        UPDATE import_jobs SET
+          state = ?,
+          completed_at = ?
+        WHERE id = ? AND owner_key = ?
+      `).run(finalState, timestamp, jobId, actorKey);
       return this.getImportJob(actorKey, jobId);
     });
   }

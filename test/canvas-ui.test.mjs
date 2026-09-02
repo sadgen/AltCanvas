@@ -612,6 +612,473 @@ assert.match(html, /async function resolveQuickImport\(\)/);
   assert.equal(layoutSaved, true, 'autoFitCanvasNodeHeight must schedule layout save');
 }
 
+// --- P1 Native Library Routing & Capability Isolation Tests ---
+assert.doesNotMatch(html, /\ballLibraryItems\b/, 'allLibraryItems must not exist in index.html');
+assert.match(html, /async function loadNativeLibrary\(/, 'loadNativeLibrary must exist');
+assert.match(html, /async function loadExternalLibrary\(/, 'loadExternalLibrary must exist');
+assert.match(html, /function nativeDocumentToLibraryItem\(/, 'nativeDocumentToLibraryItem must exist');
+assert.match(html, /function renderNativeLibraryError\(/, 'renderNativeLibraryError must exist');
+assert.match(html, /config\.authMode === 'altero' &&\s*config\.capabilities\?\.externalLibrary === true/,
+  'capability must be the only routing criterion for external library');
+
+// Behavioral Test: loadCollectionsAndLibrary in Local + externalLibrary: false mode
+{
+  const loadFnMatch = html.match(/async function loadCollectionsAndLibrary\(\) \{([\s\S]*?)\n    \}/);
+  const loadNativeFnMatch = html.match(/async function loadNativeLibrary\(signal\) \{([\s\S]*?)\n    \}/);
+  const renderNativeErrMatch = html.match(/function renderNativeLibraryError\(err\) \{([\s\S]*?)\n    \}/);
+  const nativeDocToItemMatch = html.match(/function nativeDocumentToLibraryItem\(doc\) \{([\s\S]*?)\n    \}/);
+
+  assert.ok(loadFnMatch && loadNativeFnMatch && renderNativeErrMatch && nativeDocToItemMatch, 'Native library loading functions must exist');
+
+  // Case 1: Local mode (externalLibrary: false) - Success 200
+  {
+    const requestedUrls = [];
+    let itemsRendered = false;
+    let collectionsRendered = false;
+    let localAllItems = [];
+    let containerHtml = '';
+
+    const mockDocument = {
+      getElementById: (id) => ({
+        innerHTML: '',
+        set innerHTML(val) { containerHtml = val; },
+        get innerHTML() { return containerHtml; },
+        addEventListener: () => {}
+      })
+    };
+
+    const mockConfig = {
+      userId: 'local-user-1',
+      authMode: 'local',
+      capabilities: { externalLibrary: false }
+    };
+
+    const mockFetch = async (url) => {
+      requestedUrls.push(url);
+      if (url === '/canvas/native/documents') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: [
+              {
+                id: 'doc-nat-1',
+                version: 1,
+                title: 'Native Paper 1',
+                attachments: [{ id: 'att-nat-1', version: 1, originalFilename: 'paper1.pdf', mimeType: 'application/pdf' }]
+              }
+            ]
+          })
+        };
+      }
+      if (url.startsWith('/canvas/documents/metadata')) {
+        return { ok: true, json: async () => ({ data: [] }) };
+      }
+      return { ok: false, status: 404 };
+    };
+
+    const nativeDocToItemRunner = new Function(
+      'doc',
+      `return (${nativeDocToItemMatch[0]})(doc);`
+    );
+
+    const testNativeRunner = new Function(
+      'config', 'document', 'fetch', 'documentMetas', 'docMetaKey', 'renderCollections', 'renderItems',
+      'nativeDocumentToLibraryItem', 'renderNativeLibraryError', 'errorMessage', 'escapeHTML', 'updateAuthUI', 'openSettingsModal', 'beginLogin',
+      `
+      let libraryController = null;
+      let allItems = [];
+      ${nativeDocToItemMatch[0]}
+      ${renderNativeErrMatch[0]}
+      ${loadNativeFnMatch[0]}
+      ${loadFnMatch[0]}
+      return {
+        run: async () => { await loadCollectionsAndLibrary(); return allItems; }
+      };
+      `
+    );
+
+    const instance = testNativeRunner(
+      mockConfig,
+      mockDocument,
+      mockFetch,
+      new Map(),
+      () => '',
+      () => { collectionsRendered = true; },
+      () => { itemsRendered = true; },
+      nativeDocToItemRunner,
+      () => {},
+      e => e.message,
+      s => s,
+      () => {},
+      () => {},
+      () => {}
+    );
+
+    const resultingItems = await instance.run();
+    assert.equal(resultingItems.length, 1, 'allItems must contain 1 native document');
+    assert.equal(resultingItems[0].key, 'doc-nat-1');
+    assert.equal(resultingItems[0].isNative, true);
+    assert.equal(resultingItems[0].libraryType, 'native');
+    assert.equal(resultingItems[0].children.length, 1);
+    assert.equal(itemsRendered, true, 'renderItems must be called');
+    assert.equal(collectionsRendered, true, 'renderCollections must be called');
+
+    // Verify NO Altero requests were made
+    assert.ok(requestedUrls.includes('/canvas/native/documents'), 'Must request native documents');
+    assert.ok(!requestedUrls.some(u => u.includes('/api/users/') || u.includes('/api/groups/')), 'Local mode must never query /api/users/ or /api/groups/');
+  }
+
+  // Case 2: Local mode - Native documents returns 500
+  {
+    const requestedUrls = [];
+    let containerHtml = '';
+
+    const mockDocument = {
+      getElementById: (id) => ({
+        innerHTML: '',
+        set innerHTML(val) { containerHtml = val; },
+        get innerHTML() { return containerHtml; },
+        addEventListener: () => {},
+        querySelector: () => null
+      })
+    };
+
+    const mockConfig = {
+      userId: 'local-user-1',
+      authMode: 'local',
+      capabilities: { externalLibrary: false }
+    };
+
+    const mockFetch = async (url) => {
+      requestedUrls.push(url);
+      if (url === '/canvas/native/documents') {
+        return { ok: false, status: 500, json: async () => ({}) };
+      }
+      return { ok: false, status: 500 };
+    };
+
+    const testNativeRunner500 = new Function(
+      'config', 'document', 'fetch', 'documentMetas', 'docMetaKey', 'renderCollections', 'renderItems',
+      'renderNativeLibraryError', 'errorMessage', 'escapeHTML', 'updateAuthUI', 'openSettingsModal', 'beginLogin',
+      `
+      let libraryController = null;
+      let allItems = [];
+      function nativeDocumentToLibraryItem(d) { return d; }
+      ${renderNativeErrMatch[0]}
+      ${loadNativeFnMatch[0]}
+      ${loadFnMatch[0]}
+      return {
+        run: async () => { await loadCollectionsAndLibrary(); return { allItems }; }
+      };
+      `
+    );
+
+    const instance500 = testNativeRunner500(
+      mockConfig,
+      mockDocument,
+      mockFetch,
+      new Map(),
+      () => '',
+      () => {},
+      () => {},
+      () => {},
+      e => e.message,
+      s => s,
+      () => {},
+      () => {},
+      () => {}
+    );
+
+    await instance500.run();
+
+    // Verify container rendered native library error and did NOT fallback to Altero
+    assert.match(containerHtml, /Native 文库加载失败/, '500 error must render Native error message');
+    assert.doesNotMatch(containerHtml, /重新授权/, '500 Native error must not display 重新授权');
+    assert.ok(!requestedUrls.some(u => u.includes('/api/users/') || u.includes('/api/groups/')), '500 Native error must not fallback to Altero API');
+  }
+
+  // Case 3: Altero capability enabled
+  {
+    const requestedUrls = [];
+    let itemsRendered = false;
+    let collectionsRendered = false;
+
+    const mockDocument = {
+      getElementById: (id) => ({
+        innerHTML: '',
+        addEventListener: () => {},
+        querySelector: () => null
+      })
+    };
+
+    const mockConfig = {
+      userId: 'altero-user-123',
+      authMode: 'altero',
+      capabilities: { externalLibrary: true }
+    };
+
+    const mockFetch = async (url) => {
+      requestedUrls.push(url);
+      if (url.includes('/collections')) {
+        return { ok: true, status: 200, json: async () => [{ key: 'col-1', data: { name: 'Col 1' } }] };
+      }
+      if (url.includes('/items/top')) {
+        return { ok: true, status: 200, json: async () => [{ key: 'item-1', data: { title: 'Altero Doc' } }] };
+      }
+      if (url.includes('/canvas/documents/metadata')) {
+        return { ok: true, json: async () => ({ data: [] }) };
+      }
+      return { ok: false, status: 404 };
+    };
+
+    const loadExternalFnMatch = html.match(/async function loadExternalLibrary\(signal\) \{([\s\S]*?)\n    \}/);
+    assert.ok(loadExternalFnMatch, 'loadExternalLibrary must exist');
+
+    const testAlteroRunner = new Function(
+      'config', 'document', 'fetch', 'documentMetas', 'docMetaKey', 'renderCollections', 'renderItems',
+      'getApiUrl', 'getHeaders', 'errorMessage', 'escapeHTML', 'updateAuthUI', 'openSettingsModal', 'beginLogin',
+      `
+      let libraryController = null;
+      let allItems = [];
+      function renderNativeLibraryError() {}
+      async function loadNativeLibrary() {}
+      ${loadExternalFnMatch[0]}
+      ${loadFnMatch[0]}
+      return {
+        run: async () => { await loadCollectionsAndLibrary(); return { allItems }; }
+      };
+      `
+    );
+
+    const instanceAltero = testAlteroRunner(
+      mockConfig,
+      mockDocument,
+      mockFetch,
+      new Map(),
+      () => '',
+      () => { collectionsRendered = true; },
+      () => { itemsRendered = true; },
+      path => `/api${path}`,
+      () => ({}),
+      e => e.message,
+      s => s,
+      () => {},
+      () => {},
+      () => {}
+    );
+
+    const result = await instanceAltero.run();
+    assert.equal(result.allItems.length, 1, 'Altero mode must load items');
+    assert.ok(requestedUrls.some(u => u.includes('/users/altero-user-123/collections')), 'Altero mode must request collections');
+    assert.ok(requestedUrls.some(u => u.includes('/users/altero-user-123/items/top')), 'Altero mode must request items');
+    assert.equal(itemsRendered, true);
+    assert.equal(collectionsRendered, true);
+  }
+}
+
+// Behavioral Test: Native topic documents opening and jumpToSourceAnnotation (0 Altero calls)
+{
+  const jumpSourceMatch = html.match(/async function jumpToSourceAnnotation\(sourceRef\) \{([\s\S]*?)\n    \}/);
+  const resolveTopicPdfMatch = html.match(/async function resolveTopicLibraryPdf\(doc\) \{([\s\S]*?)\n    \}/);
+  assert.ok(jumpSourceMatch && resolveTopicPdfMatch, 'Jump and topic resolve functions must exist');
+
+  // 1. Test resolveTopicLibraryPdf for Native
+  let alteroCalled = false;
+  const resolveTopicRunner = new Function(
+    'normalizeLibraryContext', 'getNativeLibraryItem', 'allItems', 'config',
+    'getApiUrl', 'libraryApiPrefix', 'fetch', 'getHeaders',
+    'doc',
+    `return (async () => { ${resolveTopicPdfMatch[1]} })();`
+  );
+
+  const nativeResolved = await resolveTopicRunner(
+    s => ({ libraryType: s.libraryType || 'native', libraryId: s.libraryId || 'local' }),
+    async (docId) => ({
+      key: docId,
+      isNative: true,
+      children: [{ key: 'att-10', data: { contentType: 'application/pdf' }, isNative: true }]
+    }),
+    [],
+    { userId: 'user-1' },
+    s => s,
+    () => { alteroCalled = true; throw new Error('libraryApiPrefix called'); },
+    async () => ({ ok: true }),
+    () => ({}),
+    { itemKey: 'doc-native-1', libraryType: 'native', libraryId: 'local' }
+  );
+
+  assert.ok(nativeResolved, 'resolveTopicLibraryPdf must resolve native document PDF');
+  assert.equal(nativeResolved.attachment.key, 'att-10');
+  assert.equal(alteroCalled, false, 'resolveTopicLibraryPdf must not call Altero for native doc');
+
+  // 2. Test jumpToSourceAnnotation for Native
+  let openItemJumpCalled = null;
+  alteroCalled = false;
+
+  const jumpSourceRunner = new Function(
+    'getAnnotationPageIndex', 'normalizeLibraryContext', 'currentAttachment', 'isSameLibrary',
+    'currentDocumentLibrary', 'currentAnnotationsMap', 'rememberDeletedAnnotation', 'saveKnownDeletedAnnotations',
+    'renderCanvas', 'showToast', 'jumpToAnnotation', 'getNativeLibraryItem', 'config', 'allItems',
+    'getApiUrl', 'libraryApiPrefix', 'fetch', 'getHeaders', 'openItem', 'reportApplicationError', 'errorMessage',
+    'sourceRef',
+    `return (async () => { ${jumpSourceMatch[1]} })();`
+  );
+
+  const nativeSourceRef = {
+    annotationKey: 'ann-nat-1',
+    itemKey: 'doc-nat-1',
+    attachmentKey: 'att-nat-1',
+    libraryType: 'native',
+    libraryId: 'local'
+  };
+
+  await jumpSourceRunner(
+    () => 0,
+    s => ({ libraryType: s.libraryType || 'native', libraryId: s.libraryId || 'local' }),
+    null, // not current doc
+    () => false,
+    null,
+    new Map([['ann-nat-1', {}]]),
+    () => {},
+    () => {},
+    () => {},
+    () => {},
+    async () => {},
+    async (docId) => ({ key: docId, isNative: true, children: [] }),
+    { userId: 'user-1' },
+    [],
+    s => s,
+    () => { alteroCalled = true; throw new Error('libraryApiPrefix called'); },
+    async () => ({ ok: true }),
+    () => ({}),
+    async (item, src) => { openItemJumpCalled = { item, src }; },
+    () => {},
+    e => e.message,
+    nativeSourceRef
+  );
+
+  assert.ok(openItemJumpCalled, 'jumpToSourceAnnotation must open native item');
+  assert.equal(openItemJumpCalled.item.key, 'doc-nat-1');
+  assert.equal(alteroCalled, false, 'jumpToSourceAnnotation must not call Altero for native source');
+}
+
+// Behavioral Test: Native inbox entry opening (cache hit vs miss, 0 Altero calls)
+{
+  const openInboxMatch = html.match(/async function openInboxEntryForReading\(entry\) \{([\s\S]*?)\n    \}/);
+  assert.ok(openInboxMatch, 'openInboxEntryForReading definition must exist');
+
+  let openItemCalled = null;
+  let nativeFetched = false;
+  let alteroPrefixCalled = false;
+
+  const sampleNativeItem = {
+    key: 'item-nat-1',
+    libraryType: 'native',
+    libraryId: 'local',
+    isNative: true,
+    data: { title: 'Cached Native Doc' },
+    children: [{ key: 'att-1', isNative: true, data: { contentType: 'application/pdf' } }]
+  };
+
+  const openInboxRunner = new Function(
+    'closeInboxModal', 'allItems', 'normalizeLibraryContext', 'isSameLibrary', 'getNativeLibraryItem',
+    'getApiUrl', 'libraryApiPrefix', 'fetch', 'getHeaders', 'openItem', 'console',
+    'entry',
+    `return (async () => { ${openInboxMatch[1]} })();`
+  );
+
+  // 1. Cache hit
+  await openInboxRunner(
+    () => {},
+    [sampleNativeItem],
+    s => ({ libraryType: s.libraryType || 'native', libraryId: s.libraryId || 'local' }),
+    (a, b) => a.libraryType === b.libraryType && a.libraryId === b.libraryId,
+    async () => { nativeFetched = true; },
+    s => s,
+    () => { alteroPrefixCalled = true; throw new Error('libraryApiPrefix called'); },
+    async () => ({ ok: true }),
+    () => ({}),
+    async (item, lib) => { openItemCalled = { item, lib }; },
+    { warn: () => {} },
+    { itemKey: 'item-nat-1', libraryType: 'native', libraryId: 'local', title: 'Cached Native Doc' }
+  );
+
+  assert.ok(openItemCalled, 'Cache hit must call openItem');
+  assert.equal(openItemCalled.item.key, 'item-nat-1');
+  assert.equal(nativeFetched, false, 'Cache hit must not fetch from backend');
+  assert.equal(alteroPrefixCalled, false, 'libraryApiPrefix must not be called');
+
+  // 2. Cache miss
+  let fetchedDocId = null;
+  openItemCalled = null;
+
+  await openInboxRunner(
+    () => {},
+    [], // empty cache
+    s => ({ libraryType: s.libraryType || 'native', libraryId: s.libraryId || 'local' }),
+    (a, b) => a.libraryType === b.libraryType && a.libraryId === b.libraryId,
+    async (docId) => {
+      fetchedDocId = docId;
+      return { ...sampleNativeItem, key: docId };
+    },
+    s => s,
+    () => { alteroPrefixCalled = true; throw new Error('libraryApiPrefix called'); },
+    async () => ({ ok: true }),
+    () => ({}),
+    async (item, lib) => { openItemCalled = { item, lib }; },
+    { warn: () => {} },
+    { itemKey: 'item-nat-2', libraryType: 'native', libraryId: 'local', title: 'Remote Native Doc' }
+  );
+
+  assert.ok(openItemCalled, 'Cache miss must fetch and call openItem');
+  assert.equal(fetchedDocId, 'item-nat-2', 'Must request native document by key');
+  assert.equal(openItemCalled.item.key, 'item-nat-2');
+  assert.equal(alteroPrefixCalled, false, 'libraryApiPrefix must not be called for native entry');
+}
+
+// Behavioral Test: Unified openDocument router
+{
+  const openDocMatch = html.match(/async function openDocument\(identity\) \{([\s\S]*?)\n    \}/);
+  assert.ok(openDocMatch, 'openDocument definition must exist');
+
+  let openNativeDocCalled = null;
+  let openItemCalled = null;
+
+  const openDocRunner = new Function(
+    'normalizeLibraryContext', 'getNativeLibraryItem', 'showToast', 'openNativeDocument',
+    'nativeLibraryItemToDocument', 'nativeLibraryChildToAttachment', 'config', 'openItem',
+    'identity',
+    `return (async () => { ${openDocMatch[1]} })();`
+  );
+
+  const mockNativeItem = {
+    key: 'doc-uni-1',
+    version: 2,
+    libraryType: 'native',
+    libraryId: 'local',
+    isNative: true,
+    data: { title: 'Unified Doc', itemType: 'journalArticle' },
+    children: [{ key: 'att-uni-1', version: 1, data: { contentType: 'application/pdf', filename: 'u.pdf' }, isNative: true }]
+  };
+
+  await openDocRunner(
+    s => ({ libraryType: s.libraryType || (s.isNative ? 'native' : 'user'), libraryId: s.libraryId || 'local' }),
+    async () => mockNativeItem,
+    () => {},
+    async (doc, att) => { openNativeDocCalled = { doc, att }; },
+    item => ({ id: item.key, version: item.version, title: item.data?.title }),
+    child => ({ id: child?.key, version: child?.version, originalFilename: child?.data?.filename }),
+    { userId: '42' },
+    async (item, lib) => { openItemCalled = { item, lib }; },
+    { itemKey: 'doc-uni-1', libraryType: 'native' }
+  );
+
+  assert.ok(openNativeDocCalled, 'openDocument with native identity must delegate to openNativeDocument');
+  assert.equal(openNativeDocCalled.doc.id, 'doc-uni-1');
+  assert.equal(openNativeDocCalled.att.id, 'att-uni-1');
+}
+
 assert.match(devServer, /style-src-attr 'unsafe-inline'/, 'CSP must permit dynamic Canvas geometry styles');
 assert.match(devServer, /script-src 'self'/, 'script CSP must remain restricted');
 

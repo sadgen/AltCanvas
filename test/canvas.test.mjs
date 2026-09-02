@@ -298,6 +298,20 @@ try {
       }
       if (system.includes('学术翻译助手')) return '忠实的中文译文。';
       return '【学术分析】综合来看，两篇文献在核心假设上保持一致。';
+    },
+    downloadPdfFn: async (url, targetDir) => {
+      fs.mkdirSync(targetDir, { recursive: true, mode: 0o700 });
+      const tempFileName = `download-mock-${crypto.randomBytes(8).toString('hex')}.tmp`;
+      const tempFilePath = path.join(targetDir, tempFileName);
+      const pdfContent = Buffer.from('%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF');
+      fs.writeFileSync(tempFilePath, pdfContent, { mode: 0o600 });
+      const sha256 = crypto.createHash('sha256').update(pdfContent).digest('hex');
+      return {
+        tempFilePath,
+        sha256,
+        sizeBytes: pdfContent.length,
+        mimeType: 'application/pdf'
+      };
     }
   });
   const unauthenticated = await call(handler, '/canvas/workspaces');
@@ -1637,7 +1651,7 @@ try {
       'knowledge_relations_pair_idx', 'knowledge_relations_owner_idx',
       'source_refs_owner_idx', 'source_refs_target_idx',
       'edges_board_idx', 'edges_projection_idx',
-      'users_username_idx', 'documents_owner_idx', 'attachments_doc_idx', 'annotations_attachment_idx'
+      'users_username_idx', 'documents_owner_idx', 'attachments_doc_idx', 'annotations_attachment_idx', 'external_refs_identity_idx'
     ];
     for (const expectedIdx of expectedIndexes) {
       assert.ok(indexRows.includes(expectedIdx), `Index ${expectedIdx} must be preserved in migrated v12 database`);
@@ -3356,22 +3370,42 @@ try {
   assert.equal(doiReusedImport.document.isbn, '978-0-123456-78-9', 'Missing ISBN must be backfilled');
   assert.equal(doiReusedImport.document.title, 'Self-Attention in Deep Transformers', 'Original title must be preserved');
 
-  // 3. Exact match priority level 2: external_refs match
-  const customProviderImport = store.importNativeDocument(m2Actor, {
-    sourceType: 'semantic_scholar',
-    title: 'Semantic Scholar Paper',
-    externalRefs: [{ provider: 's2', externalItemId: 'S2_PAPER_9999' }]
+  // 3. Exact match priority level 2: external_refs match (with external_library_id isolation)
+  const customProviderUserImport = store.importNativeDocument(m2Actor, {
+    sourceType: 'zotero',
+    title: 'User-library paper',
+    externalRefs: [{ provider: 'zotero', externalItemId: 'ZOTERO_ITEM_100', externalLibraryId: 'user_42' }]
   });
-  assert.equal(customProviderImport.outcome, 'created');
+  assert.equal(customProviderUserImport.outcome, 'created');
 
-  const s2ReusedImport = store.importNativeDocument(m2Actor, {
-    sourceType: 'arxiv',
-    title: 'Different Title from arXiv',
-    externalRefs: [{ provider: 's2', externalItemId: 'S2_PAPER_9999' }]
+  // Same provider and item key but DIFFERENT external_library_id (group_99) must NOT merge with user_42 paper
+  const customProviderGroupImport = store.importNativeDocument(m2Actor, {
+    sourceType: 'zotero',
+    title: 'Group-library paper',
+    externalRefs: [{ provider: 'zotero', externalItemId: 'ZOTERO_ITEM_100', externalLibraryId: 'group_99' }]
   });
-  assert.equal(s2ReusedImport.outcome, 'reused');
-  assert.equal(s2ReusedImport.match.strategy, 'external_ref');
-  assert.equal(s2ReusedImport.document.id, customProviderImport.document.id);
+  assert.equal(customProviderGroupImport.outcome, 'created', 'Different external_library_id must create distinct document');
+  assert.notEqual(customProviderGroupImport.document.id, customProviderUserImport.document.id, 'Cross-library same key must remain separated');
+
+  // Matching same provider, same libraryId and same itemId correctly reuses
+  const zoteroReusedImport = store.importNativeDocument(m2Actor, {
+    sourceType: 'zotero',
+    title: 'User-library paper (Updated Title)',
+    externalRefs: [{ provider: 'zotero', externalItemId: 'ZOTERO_ITEM_100', externalLibraryId: 'user_42' }]
+  });
+  assert.equal(zoteroReusedImport.outcome, 'reused');
+  assert.equal(zoteroReusedImport.match.strategy, 'external_ref');
+  assert.equal(zoteroReusedImport.document.id, customProviderUserImport.document.id);
+
+  // 3b. Conflicting exact identities: DOI points to Doc A, externalRef points to Doc B -> return conflicting_identities
+  const conflictIdentitiesResult = store.importNativeDocument(m2Actor, {
+    sourceType: 'mixed',
+    title: 'Conflicting Paper',
+    doi: '10.5555/transformer-initial', // points to initialDoiImport
+    externalRefs: [{ provider: 'zotero', externalItemId: 'ZOTERO_ITEM_100', externalLibraryId: 'user_42' }] // points to customProviderUserImport
+  });
+  assert.equal(conflictIdentitiesResult.outcome, 'conflicting_identities');
+  assert.equal(conflictIdentitiesResult.conflicts.length, 2);
 
   // 4. Exact match priority level 3: arXiv ID match
   const arxivInitial = store.importNativeDocument(m2Actor, {
@@ -3425,6 +3459,44 @@ try {
   assert.equal(nativeHttpImportRes.payload.data.document.doi, '10.7777/http-native-import');
   assert.equal(nativeHttpImportRes.payload.data.inboxEntry.libraryType, 'native');
 
+  // 7b. HTTP API: POST /canvas/imports/native with real PDF download and SHA-256 attachment creation
+  const mockPdfServer = async (url) => {
+    return {
+      status: 200,
+      headers: { 'content-type': 'application/pdf' },
+      body: Buffer.from('%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF')
+    };
+  };
+
+  const pdfDownloadHttpRes = await call(handler, '/canvas/imports/native', {
+    method: 'POST', cookie,
+    body: {
+      sourceType: 'arxiv',
+      title: 'HTTP Native Arxiv Paper with PDF',
+      arxivId: '2501.99999',
+      pdfUrl: 'https://arxiv.org/pdf/2501.99999.pdf',
+      targetWorkspaceId: apiTopic.id
+    }
+  });
+  assert.equal(pdfDownloadHttpRes.statusCode, 201);
+  assert.ok(pdfDownloadHttpRes.payload.data.document);
+  assert.ok(pdfDownloadHttpRes.payload.data.attachment, 'Attachment must be created from safe PDF download');
+  assert.ok(pdfDownloadHttpRes.payload.data.attachment.blobHash, 'Blob hash must be computed and linked');
+
+  // Verify second import of exact same PDF via SHA-256 detects duplicate / reuses
+  const pdfSha256 = pdfDownloadHttpRes.payload.data.attachment.blobHash;
+  const samePdfReusedRes = await call(handler, '/canvas/imports/native', {
+    method: 'POST', cookie,
+    body: {
+      sourceType: 'manual',
+      title: 'Same PDF Different Source',
+      pdfUrl: 'https://arxiv.org/pdf/2501.99999.pdf'
+    }
+  });
+  assert.equal(samePdfReusedRes.statusCode, 200);
+  assert.equal(samePdfReusedRes.payload.data.outcome, 'reused');
+  assert.equal(samePdfReusedRes.payload.data.match.strategy, 'sha256');
+
   // 8. HTTP API: POST /canvas/imports/native 409 conflict when fuzzy duplicate detected
   const fuzzyHttpRes = await call(handler, '/canvas/imports/native', {
     method: 'POST', cookie,
@@ -3436,6 +3508,22 @@ try {
   assert.equal(fuzzyHttpRes.statusCode, 409);
   assert.equal(fuzzyHttpRes.payload.error.code, 'duplicate_confirmation_required');
   assert.ok(fuzzyHttpRes.payload.data.candidates.length > 0);
+
+  // 8b. P2 validation: batch request with invalid non-object item rejected BEFORE creating any job
+  const jobsCountBefore = store.db.prepare('SELECT COUNT(*) AS c FROM import_jobs').get().c;
+  const invalidBatchRes = await call(handler, '/canvas/imports/native/batch', {
+    method: 'POST', cookie,
+    body: {
+      sourceType: 'batch_invalid',
+      items: [
+        { title: 'Valid 1' },
+        'invalid_string_item'
+      ]
+    }
+  });
+  assert.equal(invalidBatchRes.statusCode, 400);
+  const jobsCountAfter = store.db.prepare('SELECT COUNT(*) AS c FROM import_jobs').get().c;
+  assert.equal(jobsCountAfter, jobsCountBefore, 'No orphaned pending import_jobs should be created on validation failure');
 
   // 9. HTTP API: POST /canvas/imports/native/batch with per-item report and atomic counters
   const batchImportRes = await call(handler, '/canvas/imports/native/batch', {

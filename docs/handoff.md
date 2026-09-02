@@ -778,15 +778,15 @@
    - **精确命中属性回填**：精确命中已有文献时，新导入的信息仅回填既有文档缺失的 `doi`, `isbn`, `url`, `abstract`, `year`, `creators` 等字段，既有非空属性保持稳定。
 
 2. **外部标识映射与收件箱/主题自动关联** ([`server/canvas-store.mjs`](file:///home/sadgen/Projects/AltCanvas/server/canvas-store.mjs))：
-   - 自动在 `external_refs` 表中为导入条目建立跨源映射记录；
+   - 自动在 `external_refs` 表中为导入条目建立跨源映射记录，以 `(owner_key, provider, COALESCE(external_library_id, ''), external_item_id)` 形成联合唯一身份，支持用户文库与群组文库相同条目 key 的严格跨库隔离；
+   - 精确命中多条冲突标识时（例如 DOI 指向 Doc A，外部 Ref 指向 Doc B）拒绝静默合并，返回 `conflicting_identities`；
    - 自动生成对应 `inbox_entries`（`detected_from = 'import:<sourceType>'`, `library_type = 'native'`, `library_id = 'local'`）；
    - 提供 `targetWorkspaceId` 时原子创建 `topic_documents`（`status = 'accepted'`, `origin = 'canvas_import'`）。
 
 3. **批量导入与任务系统（`import_jobs`）整合** ([`server/canvas-store.mjs`](file:///home/sadgen/Projects/AltCanvas/server/canvas-store.mjs) & [`server/canvas-api.mjs`](file:///home/sadgen/Projects/AltCanvas/server/canvas-api.mjs))：
-   - 新增 `POST /canvas/imports/native`（单个文档导入与 409 确认闭环）；
-   - 新增 `POST /canvas/imports/native/batch`（支持至多 100 条批量导入任务）；
-   - 原子累计 `completed_count` 与 `failed_count`，记录逐项 `items` 详情报告；
-   - 状态流转覆盖 `pending` → `running` → `completed` / `completed_with_errors` / `cancelled`；
+   - 新增 `POST /canvas/imports/native`：单篇文献导入，支持安全两阶段 PDF 下载（SSRF 防御、临时文件、0600 权限、SHA-256 去重与失败清理补偿）及 409 确认闭环；
+   - 新增 `POST /canvas/imports/native/batch`：支持至多 100 条批量导入任务，前置校验全部条目结构避免遗留孤儿 pending 任务；
+   - 批量任务状态流转严格遵循 `pending` → `running`（逐项追加报告和计数） → `finalizeImportJob`（`completed` / `completed_with_errors` / `cancelled`）；
    - 新增 `GET /canvas/import-jobs/:id`、`POST /canvas/import-jobs/:id/cancel` 及 `GET /canvas/import-jobs` 列表接口。
 
 4. **前端快速导入交互对接** ([`index.html`](file:///home/sadgen/Projects/AltCanvas/index.html))：
@@ -812,3 +812,38 @@
 | M4 Altero/Zotero 外部迁移器 | `PENDING` | 幂等一次性迁移 |
 | M5 AltCanvas Capture 浏览器扩展 | `PENDING` | 独立扩展仓库 |
 | M6 默认解除 Altero 依赖 | `PENDING` | 默认部署全面切换为 Native |
+
+## 2026-09-02 会话（P1 Native Library Routing & Capability Isolation 修复）
+
+### 修复背景与根因
+
+- 本地账号登录成功后前端提示“当前登录缺少读取文库所需的权限，请退出后重新授权”。
+- 根因分析：
+  1. `loadCollectionsAndLibrary` 内部使用了未声明的变量 `allLibraryItems`（导致抛出 `ReferenceError: allLibraryItems is not defined`），异常被 `catch` 捕获后控制流错误落入下游 Altero API 加载逻辑；
+  2. Altero API 在本地模式下因未启用外部文库返回 403，触发了 Altero 专用的“重新授权”提示；
+  3. 收件箱、主题文献和 Canvas 来源跳转在某些未命中缓存的分支也缺少 Native 专用分派，直接调用了 `libraryApiPrefix()`。
+
+### 修复成果与实现要点
+
+1. **统一文库内存状态与 Native 数据映射** ([`index.html`](file:///home/sadgen/Projects/AltCanvas/index.html))：
+   - 彻底清除所有 `allLibraryItems` 引用，统一使用 `allItems` 并补充 `libraryType: 'native', libraryId: 'local', isNative: true`；
+   - 提取规范转换工具函数 `nativeDocumentToLibraryItem`、`nativeLibraryItemToDocument` 与 `nativeLibraryChildToAttachment`，并在多个视图中复用；
+   - 新增 `getNativeLibraryItem(documentId, signal)` 统一 Native 文档缓存获取与按需加载。
+
+2. **彻底隔离 Native 与 Altero 加载分支** ([`index.html`](file:///home/sadgen/Projects/AltCanvas/index.html))：
+   - 将文库加载重构为独立函数 `loadNativeLibrary(signal)` 与 `loadExternalLibrary(signal)`；
+   - 严格依据 `config.authMode === 'altero' && config.capabilities?.externalLibrary === true` 决定路由，非外部文库模式下执行 `loadNativeLibrary` 且无论成功失败一律直接终止（`return`），严禁落入 Altero；
+   - 独立错误呈现 `renderNativeLibraryError`：401 提示“登录会话已过期”，403 提示“无法访问本地文库”，5xx 提示“Native 文库加载失败”，绝不向本地用户展示 Altero 专属的“重新授权”提示。
+
+3. **收件箱、主题文献与 Canvas 跳转 Native 闭环** ([`index.html`](file:///home/sadgen/Projects/AltCanvas/index.html))：
+   - `openInboxEntryForReading`、`loadTopicDocuments` 与 `resolveTopicLibraryPdf` 全面通过 `docLib.libraryType === 'native'` 精确分派，Native 模式调用 `getNativeLibraryItem`，严禁传入 `libraryApiPrefix()`；
+   - `jumpToSourceAnnotation`、`jumpToDocumentSource` 与 `syncSourceFreshness` 适配 Native 批注检查与文献跳转，零 Altero 网络调用；
+   - 升级 `openDocument(identity)` 统一入口，按 `normalizeLibraryContext` 调度 Native 与 Altero。
+
+4. **全套自动化测试覆盖** ([`test/canvas-ui.test.mjs`](file:///home/sadgen/Projects/AltCanvas/test/canvas-ui.test.mjs))：
+   - 增加 `allLibraryItems` 静态绝迹断言；
+   - 增加 Local + `externalLibrary: false` 200 成功与 500 隔离行为测试（断言 Altero API 调用次数为 0，错误提示正确）；
+   - 增加 Altero capability 开启时正常代理调用测试；
+   - 增加 Native 收件箱缓存命中/未命中直接打开行为测试（断言 `libraryApiPrefix` 0 调用）；
+   - 增加 Native 主题 PDF 解析与 Canvas 来源跳转行为测试（断言 0 Altero 调用）。
+   - `npm test` 7 套测试全部通过，`git diff --check` 通过。
