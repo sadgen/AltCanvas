@@ -43,6 +43,13 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function normalizeDoiValue(doi) {
+  const cleaned = String(doi || '').trim().toLowerCase();
+  if (!cleaned) return null;
+  const match = /\b(10\.\d{4,9}\/[-._;()/:a-z0-9]+)\b/.exec(cleaned);
+  return match ? match[1].replace(/[.,;)]+$/, '') : cleaned;
+}
+
 function id() {
   return crypto.randomUUID();
 }
@@ -3708,6 +3715,265 @@ export class CanvasStore {
     return row ? this.getDocument(actorKey, row.id) : null;
   }
 
+  findDocumentByExternalRef(actorKey, provider, externalItemId) {
+    if (!provider || !externalItemId) return null;
+    const row = this.db.prepare(`
+      SELECT d.id FROM documents d
+      JOIN external_refs er ON er.document_id = d.id
+      WHERE er.owner_key = ? AND er.provider = ? AND er.external_item_id = ?
+        AND d.deleted_at IS NULL
+      LIMIT 1
+    `).get(actorKey, provider, String(externalItemId));
+    return row ? this.getDocument(actorKey, row.id) : null;
+  }
+
+  findDocumentByIsbn(actorKey, isbn) {
+    if (!isbn) return null;
+    const row = this.db.prepare(`
+      SELECT id FROM documents
+      WHERE owner_key = ? AND LOWER(isbn) = LOWER(?) AND deleted_at IS NULL
+      LIMIT 1
+    `).get(actorKey, isbn.trim());
+    return row ? this.getDocument(actorKey, row.id) : null;
+  }
+
+  findDocumentByArxivId(actorKey, arxivId) {
+    if (!arxivId) return null;
+    return this.findDocumentByExternalRef(actorKey, 'arxiv', String(arxivId).trim());
+  }
+
+  findFuzzyNativeDocumentCandidates(actorKey, { title, year }) {
+    const normalizedTitle = String(title || '').toLowerCase().replace(/[\s\-_:：,，.。;；/\\()（）[\]【】]+/g, '');
+    if (!normalizedTitle || normalizedTitle.length < 6) return [];
+    const keywords = String(title || '')
+      .split(/[\s:：,，.。;；/\\()（）[\]【】]+/)
+      .filter(w => w.length >= 3)
+      .slice(0, 5);
+    if (!keywords.length) return [];
+
+    const clauses = keywords.map(() => 'title LIKE ?').join(' OR ');
+    const params = keywords.flatMap(k => [`%${k}%`]);
+    const rows = this.db.prepare(`
+      SELECT id, title, year FROM documents
+      WHERE owner_key = ? AND deleted_at IS NULL AND (${clauses})
+      LIMIT 20
+    `).all(actorKey, ...params);
+
+    const candidates = [];
+    for (const row of rows) {
+      const rowNormTitle = String(row.title || '').toLowerCase().replace(/[\s\-_:：,，.。;；/\\()（）[\]【】]+/g, '');
+      const isMatch = rowNormTitle === normalizedTitle
+        || rowNormTitle.includes(normalizedTitle)
+        || normalizedTitle.includes(rowNormTitle);
+      if (!isMatch) continue;
+      if (year && row.year && Number(year) !== Number(row.year)) continue;
+      candidates.push({
+        documentId: row.id,
+        title: row.title,
+        year: row.year,
+        matchReason: `标题高度相似${year && row.year ? `（${row.year} 年）` : ''}`
+      });
+    }
+    return candidates;
+  }
+
+  // M2 unified native import pipeline.
+  // Dedup priority: SHA-256 → normalized DOI → external_refs → ISBN/arXiv → title+year fuzzy.
+  // Fuzzy matches NEVER silently merge: the caller must re-submit with confirmFuzzy.
+  importNativeDocument(actorKey, {
+    sourceType,
+    title,
+    abstract = '',
+    creators = [],
+    year = null,
+    doi = null,
+    url = null,
+    isbn = null,
+    arxivId = null,
+    attachment = null,
+    externalRefs = [],
+    targetWorkspaceId = null,
+    forceNew = false,
+    confirmFuzzy = false
+  }) {
+    if (!title || typeof title !== 'string' || !title.trim()) {
+      throw new TypeError('title is required');
+    }
+    if (targetWorkspaceId) this.requireWorkspace(actorKey, targetWorkspaceId);
+
+    const normalizedDoi = doi ? normalizeDoiValue(doi) : null;
+    const normalizedIsbn = isbn ? String(isbn).trim() : null;
+    const normalizedArxivId = arxivId ? String(arxivId).trim() : null;
+
+    // --- Dedup chain (exact levels only auto-reuse) ---
+    let matched = null;
+    if (!forceNew) {
+      if (!matched && attachment?.sha256) {
+        const doc = this.findDocumentByBlobHash(actorKey, attachment.sha256);
+        if (doc) matched = { strategy: 'sha256', document: doc };
+      }
+      if (!matched && normalizedDoi) {
+        const doc = this.findDocumentByDoi(actorKey, normalizedDoi);
+        if (doc) matched = { strategy: 'doi', document: doc };
+      }
+      if (!matched) {
+        for (const ref of externalRefs) {
+          if (!ref?.provider || !ref?.externalItemId) continue;
+          const doc = this.findDocumentByExternalRef(actorKey, ref.provider, ref.externalItemId);
+          if (doc) {
+            matched = { strategy: 'external_ref', document: doc, ref };
+            break;
+          }
+        }
+      }
+      if (!matched && normalizedIsbn) {
+        const doc = this.findDocumentByIsbn(actorKey, normalizedIsbn);
+        if (doc) matched = { strategy: 'isbn', document: doc };
+      }
+      if (!matched && normalizedArxivId) {
+        const doc = this.findDocumentByArxivId(actorKey, normalizedArxivId);
+        if (doc) matched = { strategy: 'arxiv', document: doc };
+      }
+    }
+
+    // Fuzzy tier: require explicit confirmation, never merge silently.
+    let fuzzyCandidates = [];
+    if (!matched && !forceNew) {
+      fuzzyCandidates = this.findFuzzyNativeDocumentCandidates(actorKey, { title, year });
+      if (fuzzyCandidates.length && !confirmFuzzy) {
+        return { outcome: 'requires_confirmation', candidates: fuzzyCandidates };
+      }
+    }
+
+    const refsToWrite = [];
+    if (normalizedDoi) refsToWrite.push({ provider: 'doi', externalItemId: normalizedDoi, sourceUrl: url || null });
+    if (normalizedArxivId) refsToWrite.push({ provider: 'arxiv', externalItemId: normalizedArxivId, sourceUrl: url || null });
+    for (const ref of externalRefs) {
+      if (ref?.provider && ref?.externalItemId) {
+        refsToWrite.push({
+          provider: String(ref.provider),
+          externalItemId: String(ref.externalItemId),
+          externalLibraryId: ref.externalLibraryId || null,
+          externalAttachmentId: ref.externalAttachmentId || null,
+          externalVersion: ref.externalVersion || null,
+          sourceUrl: ref.sourceUrl || null
+        });
+      }
+    }
+
+    const tags = [sourceType, normalizedDoi ? 'doi' : '', normalizedArxivId ? 'arxiv' : ''].filter(Boolean);
+    const creatorsInput = (Array.isArray(creators) ? creators : []).map(c => ({
+      creatorType: c.creatorType || 'author',
+      firstName: c.firstName || '',
+      lastName: c.lastName || '',
+      name: c.name || ''
+    }));
+
+    const result = this.transaction(() => {
+      let document;
+      if (matched) {
+        document = matched.document;
+        // Backfill missing metadata; existing values always win.
+        const updates = {};
+        if (normalizedDoi && !document.doi) updates.doi = normalizedDoi;
+        if (normalizedIsbn && !document.isbn) updates.isbn = normalizedIsbn;
+        if (url && !document.url) updates.url = url;
+        if (abstract && !document.abstract) updates.abstract = abstract;
+        if (year && !document.year) updates.year = Number(year);
+        if (creatorsInput.length && !document.creators.length) updates.creators = creatorsInput;
+        if (Object.keys(updates).length) {
+          document = this.updateDocument(actorKey, document.id, undefined, updates);
+        }
+      } else {
+        document = this.createDocument(actorKey, {
+          title: title.trim(),
+          abstract: abstract || '',
+          year: year ? Number(year) : null,
+          doi: normalizedDoi,
+          isbn: normalizedIsbn,
+          url: url || null,
+          creators: creatorsInput
+        });
+      }
+
+      // External refs: idempotent backfill for both reuse and create paths.
+      for (const ref of refsToWrite) {
+        const existingRef = this.getExternalRef(actorKey, ref.provider, ref.externalItemId);
+        if (!existingRef || existingRef.documentId !== document.id) {
+          if (!existingRef) {
+            this.createExternalRef(actorKey, document.id, ref);
+          }
+        }
+      }
+
+      // Attachment: link blob to document when provided and not already linked.
+      let linkedAttachment = null;
+      if (attachment?.sha256) {
+        const existingAtt = (document.attachments || []).find(a => a.blobHash === attachment.sha256);
+        if (existingAtt) {
+          linkedAttachment = { attachment: existingAtt };
+        } else {
+          this.upsertBlob({
+            sha256: attachment.sha256,
+            relativePath: attachment.relativePath,
+            sizeBytes: attachment.sizeBytes,
+            mimeType: attachment.mimeType || 'application/pdf'
+          });
+          linkedAttachment = {
+            attachment: this.createAttachment(actorKey, document.id, {
+              blobHash: attachment.sha256,
+              mimeType: attachment.mimeType || 'application/pdf',
+              originalFilename: attachment.originalFilename || '',
+              title: attachment.title || title.trim(),
+              sourceUrl: attachment.sourceUrl || url || null,
+              sizeBytes: attachment.sizeBytes || 0,
+              pageCount: attachment.pageCount || null
+            })
+          };
+        }
+      }
+
+      const inboxUpserted = this.upsertInboxEntries(actorKey, [{
+        libraryType: 'native',
+        libraryId: 'local',
+        itemKey: document.id,
+        attachmentKey: linkedAttachment?.attachment?.id || document.attachments?.[0]?.id || null,
+        detectedFrom: `import:${sourceType || 'manual'}`,
+        title: document.title,
+        year: document.year ? String(document.year) : (year ? String(year) : null),
+        creators: creatorsInput,
+        abstractNote: document.abstract || abstract || '',
+        tags,
+        doi: document.doi || normalizedDoi || null
+      }]);
+      const inboxEntry = inboxUpserted[0];
+
+      let topicDocument = null;
+      if (targetWorkspaceId) {
+        topicDocument = this.addTopicDocument(actorKey, targetWorkspaceId, {
+          libraryType: 'native',
+          libraryId: 'local',
+          itemKey: document.id,
+          attachmentKey: inboxEntry?.attachmentKey || null,
+          status: 'accepted',
+          origin: 'canvas_import'
+        });
+      }
+
+      const fullDoc = this.getDocument(actorKey, document.id);
+      return {
+        outcome: matched ? 'reused' : 'created',
+        match: matched ? { strategy: matched.strategy, documentId: matched.document.id } : null,
+        document: fullDoc,
+        attachment: linkedAttachment?.attachment || fullDoc.attachments?.[0] || null,
+        inboxEntry,
+        topicDocument
+      };
+    });
+
+    return result;
+  }
+
   // --- Attachments ---
 
   createAttachment(actorKey, documentId, {
@@ -4008,6 +4274,65 @@ export class CanvasStore {
       actorKey
     );
     return this.getImportJob(actorKey, jobId);
+  }
+
+  listImportJobs(actorKey, { state, limit = 50 } = {}) {
+    let query = 'SELECT * FROM import_jobs WHERE owner_key = ?';
+    const params = [actorKey];
+    if (state) {
+      query += ' AND state = ?';
+      params.push(state);
+    }
+    query += ' ORDER BY created_at DESC LIMIT ?';
+    params.push(Math.min(200, Math.max(1, limit)));
+    return this.db.prepare(query).all(...params).map(importJobRow);
+  }
+
+  // Append a per-item record to a batch import job's report and adjust counters atomically.
+  appendImportJobItemReport(actorKey, jobId, itemReport) {
+    const timestamp = nowIso();
+    return this.transaction(() => {
+      const row = this.db.prepare('SELECT * FROM import_jobs WHERE id = ? AND owner_key = ?').get(jobId, actorKey);
+      if (!row) return null;
+      const report = parseJson(row.report_json) || {};
+      const items = Array.isArray(report.items) ? report.items : [];
+      items.push({
+        index: items.length,
+        ok: Boolean(itemReport.ok),
+        title: String(itemReport.title || '').slice(0, 500),
+        documentId: itemReport.documentId || null,
+        inboxEntryId: itemReport.inboxEntryId || null,
+        outcome: itemReport.outcome || null,
+        matchStrategy: itemReport.matchStrategy || null,
+        error: itemReport.error ? String(itemReport.error).slice(0, 500) : null,
+        at: timestamp
+      });
+      const completedCount = items.filter(i => i.ok).length;
+      const failedCount = items.length - completedCount;
+      let state = row.state;
+      if (['pending', 'running', 'completed', 'completed_with_errors'].includes(state)) {
+        state = failedCount > 0 ? 'completed_with_errors' : 'completed';
+      }
+      this.db.prepare(`
+        UPDATE import_jobs SET
+          state = ?,
+          completed_count = ?,
+          failed_count = ?,
+          report_json = ?,
+          completed_at = CASE WHEN ? IN ('completed', 'completed_with_errors') THEN COALESCE(completed_at, ?) ELSE completed_at END
+        WHERE id = ? AND owner_key = ?
+      `).run(state, completedCount, failedCount, JSON.stringify({ items }), state, timestamp, jobId, actorKey);
+      return this.getImportJob(actorKey, jobId);
+    });
+  }
+
+  cancelImportJob(actorKey, jobId) {
+    const row = this.db.prepare('SELECT * FROM import_jobs WHERE id = ? AND owner_key = ?').get(jobId, actorKey);
+    if (!row) throw new CanvasNotFoundError('import job not found');
+    if (!['pending', 'running'].includes(row.state)) {
+      return this.getImportJob(actorKey, jobId);
+    }
+    return this.updateImportJob(actorKey, jobId, { state: 'cancelled' });
   }
 }
 

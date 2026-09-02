@@ -6515,7 +6515,7 @@
       }
     }
 
-    async function executeQuickImport(targetWorkspaceId = null) {
+    async function executeQuickImport(targetWorkspaceId = null, confirmFuzzy = false) {
       if (!currentResolvedImport) return;
       const btnInboxOnly = document.getElementById('btn-quick-import-inbox-only');
       const btnTopic = document.getElementById('btn-quick-import-topic');
@@ -6525,20 +6525,42 @@
       try {
         const payload = {
           resolved: currentResolvedImport,
-          targetWorkspaceId: targetWorkspaceId || undefined
+          targetWorkspaceId: targetWorkspaceId || undefined,
+          confirmFuzzy: confirmFuzzy || undefined
         };
-        await canvasFetch('/imports', {
+        const res = await fetch('/canvas/imports/native', {
           method: 'POST',
-          body: payload
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
         });
+        const result = await res.json();
 
-        showToast(targetWorkspaceId ? '已成功导入并加入当前主题！' : '已成功导入至研究收件箱！', 'success');
+        if (res.status === 409 && result.error?.code === 'duplicate_confirmation_required') {
+          const candidates = result.data?.candidates || [];
+          const detail = candidates.slice(0, 3).map(c => `《${c.title || c.documentId}》`).join('、');
+          if (window.confirm(`检测到高度相似文献：${detail}。是否确认导入为新条目？`)) {
+            btnInboxOnly.disabled = false;
+            btnTopic.disabled = false;
+            return executeQuickImport(targetWorkspaceId, true);
+          }
+          showToast('已取消导入', 'info');
+          btnInboxOnly.disabled = false;
+          btnTopic.disabled = false;
+          return;
+        }
+        if (!res.ok) {
+          throw new Error(result.error?.message || `HTTP ${res.status}`);
+        }
+
+        const outcome = result.data?.outcome;
+        showToast(outcome === 'reused'
+          ? '文库中已存在该文献，已复用并更新元数据'
+          : '已成功导入至 Native 文库！', 'success');
         closeQuickImportModal();
 
-        // Refresh topic documents or inbox if open
-        if (targetWorkspaceId && currentTopicWorkspaceId === targetWorkspaceId) {
-          await loadTopicDocumentsForWorkspace(targetWorkspaceId);
-        }
+        // Refresh native library list and inbox if loaded
+        loadCollectionsAndLibrary();
+        if (typeof loadInboxEntries === 'function') loadInboxEntries();
       } catch (err) {
         showToast(`导入失败: ${errorMessage(err)}`, 'error');
         btnInboxOnly.disabled = false;

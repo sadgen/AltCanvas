@@ -3313,6 +3313,165 @@ try {
   });
   assert.equal(savedContextDiffRel.relationType, 'context_differs');
 
+  // =========================================================================
+  // --- M2 Unified Native Import Pipeline & Dedup Priority Chain Tests ---
+  // =========================================================================
+  const m2Actor = canvasActorKey('https://issuer.example', 'api-subject');
+
+  // 1. Initial import via DOI (new native document created + external_refs written)
+  const initialDoiImport = store.importNativeDocument(m2Actor, {
+    sourceType: 'doi',
+    title: 'Self-Attention in Deep Transformers',
+    abstract: 'Attention is all you need for sequence models.',
+    creators: [{ firstName: 'Ashish', lastName: 'Vaswani' }],
+    year: 2017,
+    doi: '10.5555/transformer-initial',
+    url: 'https://doi.org/10.5555/transformer-initial',
+    targetWorkspaceId: apiTopic.id
+  });
+  assert.equal(initialDoiImport.outcome, 'created');
+  assert.ok(initialDoiImport.document.id);
+  assert.equal(initialDoiImport.document.doi, '10.5555/transformer-initial');
+  assert.equal(initialDoiImport.document.creators.length, 1);
+  assert.ok(initialDoiImport.inboxEntry);
+  assert.equal(initialDoiImport.inboxEntry.libraryType, 'native');
+  assert.ok(initialDoiImport.topicDocument);
+
+  // External ref verification
+  const externalRefs = store.listExternalRefs(m2Actor, initialDoiImport.document.id);
+  assert.ok(externalRefs.some(r => r.provider === 'doi' && r.externalItemId === '10.5555/transformer-initial'));
+
+  // 2. Exact match priority level 1: normalized DOI auto-reuses and backfills metadata
+  const doiReusedImport = store.importNativeDocument(m2Actor, {
+    sourceType: 'doi',
+    title: 'Attention Mechanism in Transformers (Alternate Title)',
+    abstract: 'Updated abstract note for backfill.',
+    year: 2017,
+    doi: '10.5555/TRANSFORMER-INITIAL', // Case insensitive normalized
+    isbn: '978-0-123456-78-9'
+  });
+  assert.equal(doiReusedImport.outcome, 'reused');
+  assert.equal(doiReusedImport.match.strategy, 'doi');
+  assert.equal(doiReusedImport.document.id, initialDoiImport.document.id, 'Same document must be reused via DOI match');
+  assert.equal(doiReusedImport.document.isbn, '978-0-123456-78-9', 'Missing ISBN must be backfilled');
+  assert.equal(doiReusedImport.document.title, 'Self-Attention in Deep Transformers', 'Original title must be preserved');
+
+  // 3. Exact match priority level 2: external_refs match
+  const customProviderImport = store.importNativeDocument(m2Actor, {
+    sourceType: 'semantic_scholar',
+    title: 'Semantic Scholar Paper',
+    externalRefs: [{ provider: 's2', externalItemId: 'S2_PAPER_9999' }]
+  });
+  assert.equal(customProviderImport.outcome, 'created');
+
+  const s2ReusedImport = store.importNativeDocument(m2Actor, {
+    sourceType: 'arxiv',
+    title: 'Different Title from arXiv',
+    externalRefs: [{ provider: 's2', externalItemId: 'S2_PAPER_9999' }]
+  });
+  assert.equal(s2ReusedImport.outcome, 'reused');
+  assert.equal(s2ReusedImport.match.strategy, 'external_ref');
+  assert.equal(s2ReusedImport.document.id, customProviderImport.document.id);
+
+  // 4. Exact match priority level 3: arXiv ID match
+  const arxivInitial = store.importNativeDocument(m2Actor, {
+    sourceType: 'arxiv',
+    title: 'Large Language Models as Tool Users',
+    arxivId: '2305.12345'
+  });
+  assert.equal(arxivInitial.outcome, 'created');
+
+  const arxivReused = store.importNativeDocument(m2Actor, {
+    sourceType: 'arxiv',
+    title: 'LLMs Tool Use (Alternate Title)',
+    arxivId: '2305.12345'
+  });
+  assert.equal(arxivReused.outcome, 'reused');
+  assert.equal(arxivReused.match.strategy, 'arxiv');
+  assert.equal(arxivReused.document.id, arxivInitial.document.id);
+
+  // 5. Fuzzy tier: fuzzy duplicate candidate requires explicit confirmation and NEVER merges silently
+  const fuzzyCandidateCheck = store.importNativeDocument(m2Actor, {
+    sourceType: 'manual',
+    title: 'Large Language Models as Tool Users (Slight Variant)',
+    year: null,
+    confirmFuzzy: false
+  });
+  assert.equal(fuzzyCandidateCheck.outcome, 'requires_confirmation');
+  assert.ok(fuzzyCandidateCheck.candidates.length > 0);
+  assert.equal(fuzzyCandidateCheck.candidates[0].documentId, arxivInitial.document.id);
+
+  // 6. Confirmed fuzzy import creates a distinct document when confirmFuzzy=true
+  const fuzzyConfirmed = store.importNativeDocument(m2Actor, {
+    sourceType: 'manual',
+    title: 'Large Language Models as Tool Users (Slight Variant)',
+    confirmFuzzy: true
+  });
+  assert.equal(fuzzyConfirmed.outcome, 'created');
+  assert.notEqual(fuzzyConfirmed.document.id, arxivInitial.document.id, 'Confirmed fuzzy duplicate must create a distinct native document');
+
+  // 7. HTTP API: POST /canvas/imports/native (Single entry import)
+  const nativeHttpImportRes = await call(handler, '/canvas/imports/native', {
+    method: 'POST', cookie,
+    body: {
+      sourceType: 'doi',
+      title: 'HTTP Native Imported Paper',
+      doi: '10.7777/http-native-import',
+      targetWorkspaceId: apiTopic.id
+    }
+  });
+  assert.equal(nativeHttpImportRes.statusCode, 201);
+  assert.equal(nativeHttpImportRes.payload.data.outcome, 'created');
+  assert.equal(nativeHttpImportRes.payload.data.document.doi, '10.7777/http-native-import');
+  assert.equal(nativeHttpImportRes.payload.data.inboxEntry.libraryType, 'native');
+
+  // 8. HTTP API: POST /canvas/imports/native 409 conflict when fuzzy duplicate detected
+  const fuzzyHttpRes = await call(handler, '/canvas/imports/native', {
+    method: 'POST', cookie,
+    body: {
+      sourceType: 'manual',
+      title: 'HTTP Native Imported Paper (Similar)'
+    }
+  });
+  assert.equal(fuzzyHttpRes.statusCode, 409);
+  assert.equal(fuzzyHttpRes.payload.error.code, 'duplicate_confirmation_required');
+  assert.ok(fuzzyHttpRes.payload.data.candidates.length > 0);
+
+  // 9. HTTP API: POST /canvas/imports/native/batch with per-item report and atomic counters
+  const batchImportRes = await call(handler, '/canvas/imports/native/batch', {
+    method: 'POST', cookie,
+    body: {
+      sourceType: 'batch_csl',
+      targetWorkspaceId: apiTopic.id,
+      items: [
+        { title: 'Batch Paper Alpha', doi: '10.8888/alpha' },
+        { title: 'Batch Paper Beta', doi: '10.8888/beta' },
+        { title: '', doi: 'invalid' } // intentional failure
+      ]
+    }
+  });
+  assert.equal(batchImportRes.statusCode, 201);
+  assert.ok(batchImportRes.payload.data.job);
+  assert.equal(batchImportRes.payload.data.job.totalCount, 3);
+  assert.equal(batchImportRes.payload.data.job.completedCount, 2);
+  assert.equal(batchImportRes.payload.data.job.failedCount, 1);
+  assert.equal(batchImportRes.payload.data.job.state, 'completed_with_errors');
+  assert.equal(batchImportRes.payload.data.job.report.items.length, 3);
+  assert.equal(batchImportRes.payload.data.job.report.items[0].ok, true);
+  assert.equal(batchImportRes.payload.data.job.report.items[2].ok, false);
+
+  // 10. HTTP API: Cancel import job
+  const pendingBatchJob = store.createImportJob(m2Actor, { sourceType: 'batch_test', totalCount: 10 });
+  const cancelRes = await call(handler, `/canvas/import-jobs/${pendingBatchJob.id}/cancel`, { method: 'POST', cookie });
+  assert.equal(cancelRes.statusCode, 200);
+  assert.equal(cancelRes.payload.data.state, 'cancelled');
+
+  // 11. HTTP API: List import jobs
+  const listJobsRes = await call(handler, '/canvas/import-jobs', { cookie });
+  assert.equal(listJobsRes.statusCode, 200);
+  assert.ok(Array.isArray(listJobsRes.payload.data));
+  assert.ok(listJobsRes.payload.data.some(j => j.id === batchImportRes.payload.data.job.id));
+
   const clearedAiConfigResponse = await call(handler, '/canvas/ai/config', { method: 'DELETE', cookie });
   assert.equal(clearedAiConfigResponse.statusCode, 200);
   assert.equal(clearedAiConfigResponse.payload.data.userConfigured, false);

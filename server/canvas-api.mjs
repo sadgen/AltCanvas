@@ -1269,6 +1269,173 @@ export function createCanvasHandler(store, {
         return;
       }
 
+      // --- M2 Unified Native Import Pipeline ---
+      if (pathname === '/canvas/imports/native' && method === 'POST') {
+        const body = await readJson(req);
+        if (!body || typeof body !== 'object' || Array.isArray(body)) {
+          throw new TypeError('request body must be an object');
+        }
+        const targetWorkspaceId = body.targetWorkspaceId
+          ? string(body.targetWorkspaceId, 'targetWorkspaceId', { max: 128 })
+          : null;
+
+        let resolved = body.resolved;
+        if (!resolved && (body.input || body.url || body.identifier)) {
+          try {
+            resolved = await resolveImportInput(String(body.input || body.url || body.identifier));
+          } catch (err) {
+            error(res, 400, 'resolve_error', `Failed to resolve input: ${err.message}`);
+            return;
+          }
+        }
+        if (!resolved && !body.title) {
+          throw new TypeError('either resolved metadata or a title is required');
+        }
+
+        const result = store.importNativeDocument(actor.actorKey, {
+          sourceType: string(resolved?.sourceType || body.sourceType || 'manual', 'sourceType', { max: 32 }),
+          title: string(resolved?.title || body.title, 'title', { min: 1, max: 500 }),
+          abstract: string(resolved?.abstractNote || body.abstract || '', 'abstract', { max: 20_000 }),
+          creators: Array.isArray(resolved?.creators || body.creators) ? (resolved?.creators || body.creators) : [],
+          year: resolved?.year || body.year || null,
+          doi: resolved?.doi || body.doi || null,
+          url: resolved?.url || body.url || null,
+          isbn: body.isbn || null,
+          arxivId: resolved?.arxivId || resolved?.arXivId || body.arxivId || null,
+          externalRefs: Array.isArray(body.externalRefs) ? body.externalRefs : [],
+          attachment: null,
+          targetWorkspaceId,
+          forceNew: Boolean(body.forceNew),
+          confirmFuzzy: Boolean(body.confirmFuzzy)
+        });
+
+        if (result.outcome === 'requires_confirmation') {
+          json(res, 409, {
+            error: {
+              code: 'duplicate_confirmation_required',
+              message: '检测到高度相似的文献，需要用户确认后才能合并'
+            },
+            data: { candidates: result.candidates }
+          });
+          return;
+        }
+
+        json(res, result.outcome === 'reused' ? 200 : 201, { data: result });
+        return;
+      }
+
+      if (pathname === '/canvas/imports/native/batch' && method === 'POST') {
+        const body = await readJson(req);
+        if (!body || typeof body !== 'object' || Array.isArray(body)) {
+          throw new TypeError('request body must be an object');
+        }
+        if (!Array.isArray(body.items) || !body.items.length || body.items.length > 100) {
+          throw new TypeError('items must be a non-empty array of at most 100 entries');
+        }
+        const targetWorkspaceId = body.targetWorkspaceId
+          ? string(body.targetWorkspaceId, 'targetWorkspaceId', { max: 128 })
+          : null;
+
+        const batchJob = store.createImportJob(actor.actorKey, {
+          sourceType: string(body.sourceType || 'batch', 'sourceType', { max: 32 }),
+          totalCount: body.items.length
+        });
+
+        const items = [];
+        for (const item of body.items) {
+          if (!item || typeof item !== 'object' || Array.isArray(item)) {
+            throw new TypeError('each item must be an object');
+          }
+          items.push(item);
+        }
+
+        // Process synchronously so the batch report is complete in the response.
+        let cancelled = false;
+        for (const item of items) {
+          const currentJob = store.getImportJob(actor.actorKey, batchJob.id);
+          if (currentJob?.state === 'cancelled') {
+            cancelled = true;
+            break;
+          }
+          try {
+            let resolved = item.resolved;
+            if (!resolved && (item.input || item.url || item.identifier)) {
+              resolved = await resolveImportInput(String(item.input || item.url || item.identifier));
+            }
+            if (!resolved && !item.title) throw new TypeError('resolved metadata or title is required');
+            const result = store.importNativeDocument(actor.actorKey, {
+              sourceType: string(resolved?.sourceType || item.sourceType || 'batch', 'sourceType', { max: 32 }),
+              title: string(resolved?.title || item.title, 'title', { min: 1, max: 500 }),
+              abstract: string(resolved?.abstractNote || item.abstract || '', 'abstract', { max: 20_000 }),
+              creators: Array.isArray(resolved?.creators || item.creators) ? (resolved?.creators || item.creators) : [],
+              year: resolved?.year || item.year || null,
+              doi: resolved?.doi || item.doi || null,
+              url: resolved?.url || item.url || null,
+              isbn: item.isbn || null,
+              arxivId: resolved?.arxivId || resolved?.arXivId || item.arxivId || null,
+              externalRefs: Array.isArray(item.externalRefs) ? item.externalRefs : [],
+              attachment: null,
+              targetWorkspaceId,
+              forceNew: Boolean(item.forceNew),
+              confirmFuzzy: Boolean(item.confirmFuzzy ?? body.confirmFuzzy)
+            });
+            if (result.outcome === 'requires_confirmation') {
+              store.appendImportJobItemReport(actor.actorKey, batchJob.id, {
+                ok: false,
+                title: item.title || resolved?.title || '',
+                outcome: 'requires_confirmation',
+                error: 'Fuzzy duplicate requires user confirmation'
+              });
+            } else {
+              store.appendImportJobItemReport(actor.actorKey, batchJob.id, {
+                ok: true,
+                title: result.document.title,
+                documentId: result.document.id,
+                inboxEntryId: result.inboxEntry?.id || null,
+                outcome: result.outcome,
+                matchStrategy: result.match?.strategy || null
+              });
+            }
+          } catch (itemErr) {
+            store.appendImportJobItemReport(actor.actorKey, batchJob.id, {
+              ok: false,
+              title: String(item.title || item.input || ''),
+              error: itemErr.message
+            });
+          }
+        }
+
+        const finalJob = store.getImportJob(actor.actorKey, batchJob.id);
+        json(res, 201, {
+          data: {
+            job: finalJob,
+            cancelled
+          }
+        });
+        return;
+      }
+
+      match = /^\/canvas\/import-jobs\/([0-9a-f-]+)$/.exec(pathname);
+      if (match && method === 'GET') {
+        const job = store.getImportJob(actor.actorKey, match[1]);
+        if (!job) throw new CanvasNotFoundError('import job not found');
+        json(res, 200, { data: job });
+        return;
+      }
+      match = /^\/canvas\/import-jobs\/([0-9a-f-]+)\/cancel$/.exec(pathname);
+      if (match && method === 'POST') {
+        const job = store.cancelImportJob(actor.actorKey, match[1]);
+        json(res, 200, { data: job });
+        return;
+      }
+      if (pathname === '/canvas/import-jobs' && method === 'GET') {
+        const state = url.searchParams.get('state') || undefined;
+        const limit = url.searchParams.get('limit') ? Number(url.searchParams.get('limit')) : 50;
+        const jobs = store.listImportJobs(actor.actorKey, { state, limit });
+        json(res, 200, { data: jobs });
+        return;
+      }
+
       // --- Native Documents List & CRUD ---
       if (pathname === '/canvas/native/documents' && method === 'GET') {
         const search = url.searchParams.get('search') || undefined;

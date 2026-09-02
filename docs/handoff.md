@@ -762,6 +762,43 @@
 - `test/native-m1.test.mjs` - PASS
 - `git diff --check` - PASS
 
+## 2026-09-02 会话（M2 统一 Native 导入管线实施）
+
+### M2 原生导入管线成果
+
+1. **规范化输入对象模型与多级去重链** ([`server/canvas-store.mjs`](file:///home/sadgen/Projects/AltCanvas/server/canvas-store.mjs))：
+   - 实现 `importNativeDocument`，接收多源标准化元数据对象（`sourceType`, `title`, `abstract`, `creators`, `year`, `doi`, `url`, `isbn`, `arxivId`, `attachment`, `externalRefs`, `targetWorkspaceId`）；
+   - **严格去重优先级链**：
+     1. PDF SHA-256 Blob 哈希匹配；
+     2. 规范化 DOI（大小写无关、前缀过滤）精确匹配；
+     3. `external_refs` 外部提供方（DOI, arXiv, Semantic Scholar 等）精确匹配；
+     4. ISBN / arXiv ID 精确匹配；
+     5. 标题 + 年份模糊候选匹配。
+   - **模糊匹配确认策略**：模糊匹配**绝不静默合并**，返回 `outcome: 'requires_confirmation'` 与候选列表，必须由前端或调用方显式传递 `confirmFuzzy: true` 后才创建新条目。
+   - **精确命中属性回填**：精确命中已有文献时，新导入的信息仅回填既有文档缺失的 `doi`, `isbn`, `url`, `abstract`, `year`, `creators` 等字段，既有非空属性保持稳定。
+
+2. **外部标识映射与收件箱/主题自动关联** ([`server/canvas-store.mjs`](file:///home/sadgen/Projects/AltCanvas/server/canvas-store.mjs))：
+   - 自动在 `external_refs` 表中为导入条目建立跨源映射记录；
+   - 自动生成对应 `inbox_entries`（`detected_from = 'import:<sourceType>'`, `library_type = 'native'`, `library_id = 'local'`）；
+   - 提供 `targetWorkspaceId` 时原子创建 `topic_documents`（`status = 'accepted'`, `origin = 'canvas_import'`）。
+
+3. **批量导入与任务系统（`import_jobs`）整合** ([`server/canvas-store.mjs`](file:///home/sadgen/Projects/AltCanvas/server/canvas-store.mjs) & [`server/canvas-api.mjs`](file:///home/sadgen/Projects/AltCanvas/server/canvas-api.mjs))：
+   - 新增 `POST /canvas/imports/native`（单个文档导入与 409 确认闭环）；
+   - 新增 `POST /canvas/imports/native/batch`（支持至多 100 条批量导入任务）；
+   - 原子累计 `completed_count` 与 `failed_count`，记录逐项 `items` 详情报告；
+   - 状态流转覆盖 `pending` → `running` → `completed` / `completed_with_errors` / `cancelled`；
+   - 新增 `GET /canvas/import-jobs/:id`、`POST /canvas/import-jobs/:id/cancel` 及 `GET /canvas/import-jobs` 列表接口。
+
+4. **前端快速导入交互对接** ([`index.html`](file:///home/sadgen/Projects/AltCanvas/index.html))：
+   - 快速导入模态框全面切换至 `/canvas/imports/native`；
+   - 支持遇到 409 `duplicate_confirmation_required` 时的浏览器确认弹窗交互；
+   - 导入后自动触发 Native 文库与收件箱的视图刷新。
+
+5. **自动化测试** ([`test/canvas.test.mjs`](file:///home/sadgen/Projects/AltCanvas/test/canvas.test.mjs))：
+   - 包含 DOI 重用与回填测试、external_refs 重用测试、arXiv ID 匹配测试、模糊候选拦截与 confirmFuzzy 测试；
+   - 包含单条与批量导入 HTTP API 测试、部分失败状态 `completed_with_errors` 报告测试、取消任务测试及任务列表测试。
+   - `npm test` 7 套测试全过，`git diff --check` 通过。
+
 ---
 
 ### 里程碑状态
@@ -770,8 +807,8 @@
 |---|---|---|
 | M1 原生 PDF 基础单文献闭环 | **PASS (完成)** | 独立 local 认证、原生流式上传、去重、Range 文件流服务、Reader 批注持久化、全文理解与证据转批注 |
 | M1.5 Native Core Integration | **PASS (关闭)** | 主线与 Native 核心全量合流，Schema v12 双谱系幂等迁移，Native 确立为默认核心，Altero 降级为可选 Provider |
-| M2 统一导入管线 | `就绪 (待启动)` | 下一阶段目标：规范化多源导入（DOI/arXiv/URL/PDF/RIS/BibTeX）与合并策略 |
-| M3 Translation Server 集成 | `PENDING` | 下一阶段目标：内部解析组件集成与 SSRF 安全隔离 |
+| M2 统一导入管线 | **PASS (完成)** | 规范化多源导入（DOI/arXiv/URL/PDF/RIS/BibTeX/批量）、优先级去重链、模糊防静默合并、import_jobs 逐项报告与 Native 写入 |
+| M3 Translation Server 集成 | `就绪 (待启动)` | 下一阶段目标：内部解析组件集成与 SSRF 安全隔离 |
 | M4 Altero/Zotero 外部迁移器 | `PENDING` | 幂等一次性迁移 |
 | M5 AltCanvas Capture 浏览器扩展 | `PENDING` | 独立扩展仓库 |
 | M6 默认解除 Altero 依赖 | `PENDING` | 默认部署全面切换为 Native |
