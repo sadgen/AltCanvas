@@ -2298,6 +2298,11 @@
         const chunk = docsData.data || [];
         nativeDocs.push(...chunk);
         if (chunk.length < PAGE_SIZE) break; // last page reached
+        if (page === MAX_PAGES - 1) {
+          // Safety cap reached with a FULL last page: library may exceed the bound.
+          // Refuse to silently overwrite allItems with a truncated result.
+          throw new Error(`Native 文库超过分页安全上限（${MAX_PAGES * PAGE_SIZE} 篇），已中止加载以避免截断`);
+        }
       }
 
       const metasRes = await fetch('/canvas/documents/metadata?libraryType=native&libraryId=local', { signal }).catch(() => null);
@@ -4036,9 +4041,10 @@
           const item = document.createElement('div');
           item.className = 'p-2.5 rounded bg-slate-950/80 border border-slate-800 flex items-center justify-between gap-2 text-xs';
           const docLib = normalizeLibraryContext(doc);
-          const matchItem = isSameLibrary(docLib, currentDocumentLibrary)
-            ? allItems.find(i => i.key === doc.itemKey) : null;
-          const title = matchItem?.data?.title || `文献 #${doc.itemKey}`;
+          // Match by composite document identity, independent of the currently open reader document.
+          const matchItem = allItems.find(i => i.key === doc.itemKey && isSameLibrary(normalizeLibraryContext(i), docLib));
+          const meta = documentMetas.get(docMetaKey(docLib.libraryType, docLib.libraryId, doc.itemKey));
+          const title = matchItem?.data?.title || meta?.cleanTitle || `文献 #${doc.itemKey}`;
           item.innerHTML = `
             <div class="min-w-0 flex-1">
               <div class="font-medium text-slate-200 truncate" title="${escapeHTML(title)}">${escapeHTML(title)}</div>

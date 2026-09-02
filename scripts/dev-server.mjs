@@ -344,6 +344,14 @@ server.on('clientError', (err, socket) => {
 });
 
 const PORT = process.env.PORT || 8088;
+server.on('error', (err) => {
+  if (err?.code === 'EADDRINUSE') {
+    console.error(`[dev-server] 端口 ${PORT} 已被占用：已存在守护实例，本次启动立即退出（不产生重复实例）。`);
+    process.exit(0);
+  }
+  console.error(`[dev-server] 服务器错误: ${err?.message || err}`);
+  process.exit(1);
+});
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 AltCanvas BFF & Web Workspace running at http://0.0.0.0:${PORT}`);
 });

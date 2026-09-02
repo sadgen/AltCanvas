@@ -3790,6 +3790,148 @@ export class CanvasStore {
     return candidates;
   }
 
+  // Shared dedup decision chain. Performs NO writes; returns the authoritative match state.
+  _decideNativeImportMatch(actorKey, {
+    title, year, doi, isbn, arxivId, attachment, externalRefs, forceNew, confirmFuzzy
+  }) {
+    const normalizedDoi = doi ? normalizeDoiValue(doi) : null;
+    const normalizedIsbn = isbn ? String(isbn).trim() : null;
+    const normalizedArxivId = arxivId ? String(arxivId).trim() : null;
+
+    const exactMatches = [];
+    if (!forceNew) {
+      if (attachment?.sha256) {
+        const doc = this.findDocumentByBlobHash(actorKey, attachment.sha256);
+        if (doc) exactMatches.push({ strategy: 'sha256', document: doc });
+      }
+      if (normalizedDoi) {
+        const doc = this.findDocumentByDoi(actorKey, normalizedDoi);
+        if (doc) exactMatches.push({ strategy: 'doi', document: doc });
+      }
+      for (const ref of externalRefs) {
+        if (!ref?.provider || !ref?.externalItemId) continue;
+        const doc = this.findDocumentByExternalRef(actorKey, ref.provider, ref.externalItemId, ref.externalLibraryId || null);
+        if (doc) exactMatches.push({ strategy: 'external_ref', document: doc, ref });
+      }
+      if (normalizedIsbn) {
+        const doc = this.findDocumentByIsbn(actorKey, normalizedIsbn);
+        if (doc) exactMatches.push({ strategy: 'isbn', document: doc });
+      }
+      if (normalizedArxivId) {
+        const doc = this.findDocumentByArxivId(actorKey, normalizedArxivId);
+        if (doc) exactMatches.push({ strategy: 'arxiv', document: doc });
+      }
+    }
+
+    const distinctDocIds = new Set(exactMatches.map(m => m.document.id));
+    if (distinctDocIds.size > 1) {
+      return {
+        outcome: 'conflicting_identities',
+        conflicts: exactMatches.map(m => ({ strategy: m.strategy, documentId: m.document.id, title: m.document.title })),
+        normalized: { normalizedDoi, normalizedIsbn, normalizedArxivId }
+      };
+    }
+
+    const matched = exactMatches.length > 0 ? exactMatches[0] : null;
+    let fuzzyCandidates = [];
+    if (!matched && !forceNew) {
+      fuzzyCandidates = this.findFuzzyNativeDocumentCandidates(actorKey, { title, year });
+      if (fuzzyCandidates.length && !confirmFuzzy) {
+        return {
+          outcome: 'requires_confirmation',
+          candidates: fuzzyCandidates,
+          normalized: { normalizedDoi, normalizedIsbn, normalizedArxivId }
+        };
+      }
+    }
+
+    return {
+      outcome: 'writable',
+      matched,
+      normalized: { normalizedDoi, normalizedIsbn, normalizedArxivId }
+    };
+  }
+
+  // Read-only precheck for callers that must sequence external side effects (e.g. file
+  // promotion) BEFORE the database write. Never mutates state.
+  precheckNativeDocumentImport(actorKey, input) {
+    if (!input?.title || typeof input.title !== 'string' || !input.title.trim()) {
+      throw new TypeError('title is required');
+    }
+    return this._decideNativeImportMatch(actorKey, input);
+  }
+
+  // Startup crash-recovery scan reconciling blobs/attachments rows with on-disk files:
+  //  - attachments whose blob file is missing are soft-deleted and their blob refcount released;
+  //  - blob rows with no remaining references are removed;
+  //  - files on disk with no database row are deleted as orphans.
+  recoverBlobConsistency() {
+    const summary = { danglingAttachments: 0, removedBlobRows: 0, deletedOrphanFiles: 0 };
+    const blobDir = this.getBlobStorageDir();
+
+    // 1. Dangling attachments -> blob file missing
+    const dangling = this.db.prepare(`
+      SELECT a.id AS attachment_id, b.sha256 AS sha256, b.relative_path AS relative_path
+      FROM attachments a JOIN blobs b ON b.sha256 = a.blob_hash
+      WHERE a.deleted_at IS NULL
+    `).all();
+    const missingHashes = new Set();
+    for (const row of dangling) {
+      const filePath = path.resolve(blobDir, row.relative_path);
+      if (fs.existsSync(filePath)) continue;
+      missingHashes.add(row.sha256);
+      const timestamp = nowIso();
+      this.db.prepare(`
+        UPDATE attachments SET deleted_at = ?, version = version + 1, updated_at = ?
+        WHERE id = ? AND deleted_at IS NULL
+      `).run(timestamp, timestamp, row.attachment_id);
+      summary.danglingAttachments++;
+    }
+
+    // 2. Release blob rows for missing files when no attachment row remains (soft-deleted
+    //    attachments still hold a foreign key, so those blobs are zeroed instead of deleted).
+    for (const sha256 of missingHashes) {
+      const anyAttachments = this.db.prepare(`
+        SELECT 1 FROM attachments WHERE blob_hash = ? LIMIT 1
+      `).get(sha256);
+      if (!anyAttachments) {
+        this.db.prepare('DELETE FROM blobs WHERE sha256 = ?').run(sha256);
+        summary.removedBlobRows++;
+      } else {
+        this.db.prepare('UPDATE blobs SET reference_count = 0 WHERE sha256 = ?').run(sha256);
+        summary.zeroedBlobRows = (summary.zeroedBlobRows || 0) + 1;
+      }
+    }
+
+    // 3. Orphan files with no database row
+    const walk = (dir) => {
+      let entries = [];
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return []; }
+      let files = [];
+      for (const entry of entries) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) files = files.concat(walk(full));
+        else files.push(full);
+      }
+      return files;
+    };
+    const blobRoot = path.join(blobDir, 'sha256');
+    if (fs.existsSync(blobRoot)) {
+      for (const filePath of walk(blobRoot)) {
+        const sha256 = path.basename(filePath).replace(/\.pdf$/i, '');
+        const row = this.db.prepare('SELECT 1 FROM blobs WHERE sha256 = ?').get(sha256);
+        if (!row) {
+          try { fs.unlinkSync(filePath); summary.deletedOrphanFiles++; } catch {}
+        }
+      }
+    }
+
+    if (summary.danglingAttachments || summary.removedBlobRows || summary.deletedOrphanFiles) {
+      console.warn(`[blob-consistency] recovered: ${JSON.stringify(summary)}`);
+    }
+    return summary;
+  }
+
   // M2 unified native import pipeline.
   // Dedup priority: SHA-256 → normalized DOI → external_refs → ISBN/arXiv → title+year fuzzy.
   // Fuzzy matches NEVER silently merge: the caller must re-submit with confirmFuzzy.
@@ -3814,58 +3956,14 @@ export class CanvasStore {
     }
     if (targetWorkspaceId) this.requireWorkspace(actorKey, targetWorkspaceId);
 
-    const normalizedDoi = doi ? normalizeDoiValue(doi) : null;
-    const normalizedIsbn = isbn ? String(isbn).trim() : null;
-    const normalizedArxivId = arxivId ? String(arxivId).trim() : null;
-
-    // --- Dedup chain (exact levels only auto-reuse) ---
-    // If multiple exact matches resolve to different documents, signal a conflict rather than picking one arbitrarily.
-    let matched = null;
-    const exactMatches = [];
-    if (!forceNew) {
-      if (attachment?.sha256) {
-        const doc = this.findDocumentByBlobHash(actorKey, attachment.sha256);
-        if (doc) exactMatches.push({ strategy: 'sha256', document: doc });
-      }
-      if (normalizedDoi) {
-        const doc = this.findDocumentByDoi(actorKey, normalizedDoi);
-        if (doc) exactMatches.push({ strategy: 'doi', document: doc });
-      }
-      for (const ref of externalRefs) {
-        if (!ref?.provider || !ref?.externalItemId) continue;
-        const doc = this.findDocumentByExternalRef(actorKey, ref.provider, ref.externalItemId, ref.externalLibraryId || null);
-        if (doc) exactMatches.push({ strategy: 'external_ref', document: doc, ref });
-      }
-      if (normalizedIsbn) {
-        const doc = this.findDocumentByIsbn(actorKey, normalizedIsbn);
-        if (doc) exactMatches.push({ strategy: 'isbn', document: doc });
-      }
-      if (normalizedArxivId) {
-        const doc = this.findDocumentByArxivId(actorKey, normalizedArxivId);
-        if (doc) exactMatches.push({ strategy: 'arxiv', document: doc });
-      }
-
-      // Check for conflicting exact identities
-      const distinctDocIds = new Set(exactMatches.map(m => m.document.id));
-      if (distinctDocIds.size > 1) {
-        return {
-          outcome: 'conflicting_identities',
-          conflicts: exactMatches.map(m => ({ strategy: m.strategy, documentId: m.document.id, title: m.document.title }))
-        };
-      }
-      if (exactMatches.length > 0) {
-        matched = exactMatches[0];
-      }
+    const decision = this._decideNativeImportMatch(actorKey, {
+      title, year, doi, isbn, arxivId, attachment, externalRefs, forceNew, confirmFuzzy
+    });
+    if (decision.outcome !== 'writable') {
+      return decision;
     }
-
-    // Fuzzy tier: require explicit confirmation, never merge silently.
-    let fuzzyCandidates = [];
-    if (!matched && !forceNew) {
-      fuzzyCandidates = this.findFuzzyNativeDocumentCandidates(actorKey, { title, year });
-      if (fuzzyCandidates.length && !confirmFuzzy) {
-        return { outcome: 'requires_confirmation', candidates: fuzzyCandidates };
-      }
-    }
+    const { matched } = decision;
+    const { normalizedDoi, normalizedIsbn, normalizedArxivId } = decision.normalized;
 
     const refsToWrite = [];
     if (normalizedDoi) refsToWrite.push({ provider: 'doi', externalItemId: normalizedDoi, sourceUrl: url || null });
@@ -4329,6 +4427,7 @@ export class CanvasStore {
         outcome: itemReport.outcome || null,
         matchStrategy: itemReport.matchStrategy || null,
         error: itemReport.error ? String(itemReport.error).slice(0, 500) : null,
+        warning: itemReport.warning ? String(itemReport.warning).slice(0, 500) : undefined,
         candidates: Array.isArray(itemReport.candidates) ? itemReport.candidates : undefined,
         conflicts: Array.isArray(itemReport.conflicts) ? itemReport.conflicts : undefined,
         at: timestamp

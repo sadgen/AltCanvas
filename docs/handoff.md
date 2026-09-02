@@ -836,6 +836,34 @@
 
 ---
 
+## 2026-09-02 会话（M2 终审二轮整改：Blob/DB 安全时序、统一批量执行器与前端加固）
+
+### 修复清单
+
+1. **[P1] Blob/DB 提交安全时序**：抽出只读 `precheckNativeDocumentImport`；执行时序改为 解析 → 安全下载 → 去重/冲突预检（零写入）→ 排他原子提升文件至内容寻址路径 → 事务化写库；DB 失败时仅删除本次新建且无库引用的文件；写时决策与预检分叉（并发竞争）同样触发补偿；新增启动时 `recoverBlobConsistency` 双向扫描（悬挂数据库附件软删除、幽灵 blob 置零/清除、孤儿文件删除，幂等）。
+2. **[P1] 批量统一执行器**：新增 `executeNativeImportItem` 供单篇与批量共用，覆盖解析、PDF 安全下载（显式失败致命/推导降级告警）、哈希去重、冲突/确认、Blob 提升、DB 写入与双向补偿、warning 与结构化报告；批量项现支持 `pdfUrl` 全量 PDF 管线。
+3. **[P2] 分页安全上限**：`loadNativeLibrary` 在满页触达 100 页上限时抛错并拒绝用截断结果覆盖 `allItems`（真实 100+100+1 多页测试与上限抛错测试均已覆盖）。
+4. **[P2] 主题文献标题**：改为按文献复合身份在 `allItems` 匹配并回退 `documentMetas`，不再依赖 `currentDocumentLibrary`。
+5. **[P2] 统一输入规范化器**：`normalizeNativeImportItem` 作为单篇/批量唯一输入契约（字段类型与长度、creators 对象结构、externalRefs provider/ID/库 ID 深度校验），杜绝双契约漂移。
+6. **[P2] 单守护收敛**：定位历史 EADDRINUSE 来自重启序列旧实例未退净时的端口抢占；dev-server 新增端口占用优雅退出（exit 0 + 单行日志），实机验证双启动仅剩 1 个 worker。
+7. **[P2] 证据浮层**：`getCachedDocumentMeta` 已绝迹并附行为测试；待人工实机点击验证（见下）。
+
+### 测试新增
+- 提升失败补偿：500 `blob_persist_failed`、零文档写入、临时文件清理；
+- DB 写失败补偿：提升文件被删除、无 blob 行残留；
+- 批量 PDF 管线：sha256 命中证明批量真实经过下载+哈希；
+- 深度前置校验：creators/externalRefs/title 五类非法输入 400 且零任务残留；
+- 一致性扫描：悬挂数据库附件、幽灵 blob、孤儿文件与幂等重扫；
+- 分页：201 篇多页全量加载、上限抛错且 `allItems` 不被覆盖。
+- `npm test` 7 套全过；`git diff --check` 通过。
+
+### 待人工实机验证（human-in-loop）
+1. 刷新 AltCanvas 页面，打开任意含 PDF 来源卡片的画板；
+2. 点击卡片上的 [🔍 核验] 打开证据浮层，确认标题/页码/摘录正常显示、无 console 报错；
+3. 回复“完成”后由 Agent 复查 `.debug/browser.log` 确认无 `getCachedDocumentMeta` 新错误。
+
+---
+
 ### 里程碑状态
 
 | 里程碑 | 状态 | 说明 |

@@ -1177,14 +1177,277 @@ function actorFromRequest(req) {
   return actorKey ? { actorKey, session } : null;
 }
 
+function defaultPromoteBlob(store, tempFilePath, sha256) {
+  const targetBlobPath = store.resolveBlobPath(sha256, '.pdf');
+  fs.mkdirSync(path.dirname(targetBlobPath), { recursive: true, mode: 0o700 });
+  if (fs.existsSync(targetBlobPath)) {
+    try { fs.unlinkSync(tempFilePath); } catch {}
+    return { targetBlobPath, relativePath: path.relative(store.getBlobStorageDir(), targetBlobPath), newlyCreated: false };
+  }
+  fs.renameSync(tempFilePath, targetBlobPath);
+  fs.chmodSync(targetBlobPath, 0o600);
+  return { targetBlobPath, relativePath: path.relative(store.getBlobStorageDir(), targetBlobPath), newlyCreated: true };
+}
+
+// Compensate a promoted blob after a non-write outcome: remove the file only when the
+// database holds no live reference to it.
+function compensatePromotedBlob(store, sha256, targetBlobPath) {
+  try {
+    if (!fs.existsSync(targetBlobPath)) return;
+    const blob = store.getBlob(sha256);
+    if (!blob || blob.referenceCount <= 0) {
+      fs.unlinkSync(targetBlobPath);
+    }
+  } catch {}
+}
+
+// Unified M2 input normalizer: the single source of truth for import item structure.
+// Throws TypeError on any contract violation so single and batch endpoints share one contract.
+function normalizeNativeImportItem(item, indexLabel = 'item') {
+  if (!item || typeof item !== 'object' || Array.isArray(item)) {
+    throw new TypeError(`${indexLabel} must be an object`);
+  }
+
+  let resolved = item.resolved;
+  if (resolved !== undefined) {
+    if (!resolved || typeof resolved !== 'object' || Array.isArray(resolved)) {
+      throw new TypeError(`${indexLabel}.resolved must be an object`);
+    }
+    if (resolved.title !== undefined && (typeof resolved.title !== 'string' || resolved.title.length > 500)) {
+      throw new TypeError(`${indexLabel}.resolved.title must be a string of at most 500 characters`);
+    }
+  }
+
+  const rawTitle = resolved?.title ?? item.title;
+  if (rawTitle === undefined && !resolved && !item.input && !item.url && !item.identifier) {
+    throw new TypeError(`${indexLabel}: resolved metadata, a title, or an input is required`);
+  }
+  if (rawTitle !== undefined && (typeof rawTitle !== 'string' || rawTitle.length > 500)) {
+    throw new TypeError(`${indexLabel}.title must be a string of at most 500 characters`);
+  }
+
+  const FIELD_LIMITS = { abstract: 20_000, pdfUrl: 2000, isbn: 64, arxivId: 64, doi: 2000, url: 2000, sourceType: 64, input: 2000 };
+  for (const [field, maxLen] of Object.entries(FIELD_LIMITS)) {
+    if (item[field] !== undefined && item[field] !== null) {
+      if (typeof item[field] !== 'string') {
+        throw new TypeError(`${indexLabel}.${field} must be a string`);
+      }
+      if (item[field].length > maxLen) {
+        throw new TypeError(`${indexLabel}.${field} must be at most ${maxLen} characters`);
+      }
+    }
+  }
+
+  let creators = resolved?.creators ?? item.creators ?? [];
+  if (!Array.isArray(creators)) {
+    throw new TypeError(`${indexLabel}.creators must be an array`);
+  }
+  creators = creators.map(c => {
+    if (!c || typeof c !== 'object' || Array.isArray(c)) {
+      throw new TypeError(`${indexLabel}.creators entries must be objects`);
+    }
+    const out = {};
+    for (const field of ['creatorType', 'firstName', 'lastName', 'name']) {
+      if (c[field] !== undefined && c[field] !== null) {
+        if (typeof c[field] !== 'string' || c[field].length > 200) {
+          throw new TypeError(`${indexLabel}.creators.${field} must be a string of at most 200 characters`);
+        }
+        out[field] = c[field];
+      }
+    }
+    return out;
+  });
+
+  let externalRefs = item.externalRefs ?? [];
+  if (!Array.isArray(externalRefs)) {
+    throw new TypeError(`${indexLabel}.externalRefs must be an array`);
+  }
+  externalRefs = externalRefs.map(ref => {
+    if (!ref || typeof ref !== 'object' || Array.isArray(ref)) {
+      throw new TypeError(`${indexLabel}.externalRefs entries must be objects`);
+    }
+    if (!ref.provider || typeof ref.provider !== 'string' || ref.provider.length > 64) {
+      throw new TypeError(`${indexLabel}.externalRefs.provider must be a non-empty string of at most 64 characters`);
+    }
+    if (!ref.externalItemId || typeof ref.externalItemId !== 'string' || ref.externalItemId.length > 256) {
+      throw new TypeError(`${indexLabel}.externalRefs.externalItemId must be a non-empty string of at most 256 characters`);
+    }
+    if (ref.externalLibraryId !== undefined && ref.externalLibraryId !== null
+      && (typeof ref.externalLibraryId !== 'string' || ref.externalLibraryId.length > 128)) {
+      throw new TypeError(`${indexLabel}.externalRefs.externalLibraryId must be a string of at most 128 characters`);
+    }
+    return ref;
+  });
+
+  return {
+    resolved,
+    sourceType: item.sourceType ?? null,
+    title: typeof rawTitle === 'string' ? rawTitle : undefined,
+    abstract: item.abstract ?? null,
+    creators,
+    year: item.year ?? resolved?.year ?? null,
+    doi: item.doi ?? null,
+    url: item.url ?? null,
+    isbn: item.isbn ?? null,
+    arxivId: item.arxivId ?? null,
+    pdfUrl: item.pdfUrl ?? null,
+    externalRefs,
+    targetWorkspaceId: item.targetWorkspaceId ?? null,
+    forceNew: Boolean(item.forceNew),
+    confirmFuzzy: Boolean(item.confirmFuzzy),
+    input: item.input ?? item.url ?? item.identifier ?? null
+  };
+}
+
+// Unified M2 native import executor shared by single and batch endpoints.
+// Sequencing: resolve -> safe download -> precheck (no writes) -> promote blob -> DB write,
+// with bidirectional compensation so neither orphan files nor dangling DB rows survive.
+async function executeNativeImportItem(store, actorKey, normalized, {
+  downloadPdfFn,
+  promoteBlobFn = defaultPromoteBlob,
+  fallbackTargetWorkspaceId = null
+}) {
+  let resolved = normalized.resolved;
+  if (!resolved && normalized.input) {
+    try {
+      resolved = await resolveImportInput(normalized.input);
+    } catch (resolveErr) {
+      resolveErr.code = 'resolve_error';
+      resolveErr.status = 400;
+      throw resolveErr;
+    }
+  }
+  if (!resolved && !normalized.title) {
+    throw new TypeError('resolved metadata or a title is required');
+  }
+
+  const title = resolved?.title || normalized.title;
+  const abstract = resolved?.abstractNote || normalized.abstract || '';
+  const creators = Array.isArray(resolved?.creators) && resolved.creators.length ? resolved.creators : normalized.creators;
+  const year = resolved?.year || normalized.year || null;
+  const doi = resolved?.doi || normalized.doi || null;
+  const url = resolved?.url || normalized.url || null;
+  const arxivId = resolved?.arxivId || resolved?.arXivId || normalized.arxivId || null;
+  const externalRefs = normalized.externalRefs;
+  const targetWorkspaceId = normalized.targetWorkspaceId || fallbackTargetWorkspaceId;
+
+  // PDF acquisition: explicit item.pdfUrl failures are fatal; resolver-derived failures degrade with warning.
+  let warning = null;
+  let attachment = null;
+  let tempFilePath = null;
+  const explicitPdfUrl = normalized.pdfUrl && normalized.pdfUrl.trim() ? normalized.pdfUrl.trim() : null;
+  const pdfUrl = explicitPdfUrl || resolved?.pdfUrl || null;
+
+  if (pdfUrl && typeof pdfUrl === 'string' && /^https?:\/\//i.test(pdfUrl)) {
+    try {
+      const tempDir = path.join(store.getBlobStorageDir(), 'tmp');
+      const downloadResult = await downloadPdfFn(pdfUrl, tempDir);
+      tempFilePath = downloadResult.tempFilePath;
+      attachment = {
+        sha256: downloadResult.sha256,
+        sizeBytes: downloadResult.sizeBytes,
+        mimeType: 'application/pdf',
+        originalFilename: `${String(title || 'document').slice(0, 100)}.pdf`,
+        sourceUrl: pdfUrl
+      };
+    } catch (downloadErr) {
+      try { if (tempFilePath && fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath); } catch {}
+      if (explicitPdfUrl) {
+        const err = new Error(`PDF 下载失败: ${downloadErr.message}`);
+        err.status = downloadErr.status || 502;
+        err.code = 'pdf_download_failed';
+        throw err;
+      }
+      warning = `PDF 附件下载失败，已降级为仅元数据导入: ${downloadErr.message}`;
+      attachment = null;
+      tempFilePath = null;
+    }
+  }
+
+  const cleanupTemp = () => {
+    try { if (tempFilePath && fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath); } catch {}
+  };
+
+  const precheckInput = {
+    title, year, doi,
+    isbn: normalized.isbn,
+    arxivId,
+    attachment,
+    externalRefs,
+    forceNew: normalized.forceNew,
+    confirmFuzzy: normalized.confirmFuzzy
+  };
+
+  // Phase 1: read-only precheck BEFORE promoting any file.
+  const precheck = store.precheckNativeDocumentImport(actorKey, precheckInput);
+  if (precheck.outcome !== 'writable') {
+    cleanupTemp();
+    return { result: precheck, warning };
+  }
+
+  // Phase 2: promote temp file to content-addressed storage (exclusive, atomic rename).
+  let promotion = null;
+  if (attachment && tempFilePath) {
+    try {
+      promotion = promoteBlobFn(store, tempFilePath, attachment.sha256);
+      attachment.relativePath = promotion.relativePath;
+    } catch (promoteErr) {
+      cleanupTemp();
+      const err = new Error(`PDF 附件落盘失败: ${promoteErr.message}`);
+      err.status = 500;
+      err.code = 'blob_persist_failed';
+      throw err;
+    }
+  }
+
+  // Phase 3: transactional database write.
+  let result;
+  try {
+    result = store.importNativeDocument(actorKey, {
+      sourceType: resolved?.sourceType || normalized.sourceType || 'manual',
+      title,
+      abstract,
+      creators,
+      year,
+      doi,
+      url,
+      isbn: normalized.isbn,
+      arxivId,
+      externalRefs,
+      attachment,
+      targetWorkspaceId,
+      forceNew: normalized.forceNew,
+      confirmFuzzy: normalized.confirmFuzzy
+    });
+  } catch (dbErr) {
+    if (promotion?.newlyCreated) {
+      compensatePromotedBlob(store, attachment.sha256, promotion.targetBlobPath);
+    }
+    throw dbErr;
+  }
+
+  // Write-time decision diverged (concurrent import raced the precheck): compensate file.
+  if (result.outcome !== 'created' && result.outcome !== 'reused' && promotion?.newlyCreated) {
+    compensatePromotedBlob(store, attachment.sha256, promotion.targetBlobPath);
+  }
+
+  return { result, warning };
+}
+
 export function createCanvasHandler(store, {
   aiCompletion = requestAiCompletion,
   aiPublicConfig = getAiPublicConfig,
   aiEndpointValidator = validateAiEndpoint,
   fetchAltero = defaultFetchAltero,
   downloadPdfFn = safeDownloadPdfFile,
+  promoteBlobFn = defaultPromoteBlob,
 } = {}) {
   recoverQueuedAndRunningJobs(store);
+  try {
+    if (typeof store.recoverBlobConsistency === 'function') store.recoverBlobConsistency();
+  } catch (err) {
+    console.warn('Blob consistency recovery failed:', err.message);
+  }
 
   return async function handleCanvasApi(req, res, url) {
     const actor = actorFromRequest(req);
@@ -1276,142 +1539,57 @@ export function createCanvasHandler(store, {
         if (!body || typeof body !== 'object' || Array.isArray(body)) {
           throw new TypeError('request body must be an object');
         }
-        const targetWorkspaceId = body.targetWorkspaceId
-          ? string(body.targetWorkspaceId, 'targetWorkspaceId', { max: 128 })
-          : null;
 
-        let resolved = body.resolved;
-        if (!resolved && (body.input || body.url || body.identifier)) {
-          try {
-            resolved = await resolveImportInput(String(body.input || body.url || body.identifier));
-          } catch (err) {
-            error(res, 400, 'resolve_error', `Failed to resolve input: ${err.message}`);
+        let normalized;
+        try {
+          normalized = normalizeNativeImportItem(body, 'body');
+        } catch (err) {
+          error(res, 400, 'invalid_request', err.message);
+          return;
+        }
+        if (body.targetWorkspaceId) {
+          normalized.targetWorkspaceId = string(body.targetWorkspaceId, 'targetWorkspaceId', { max: 128 });
+        }
+        if (body.confirmFuzzy !== undefined && normalized.confirmFuzzy === false) {
+          normalized.confirmFuzzy = Boolean(body.confirmFuzzy);
+        }
+
+        let outcome;
+        try {
+          outcome = await executeNativeImportItem(store, actor.actorKey, normalized, {
+            downloadPdfFn,
+            promoteBlobFn
+          });
+        } catch (execErr) {
+          if (execErr.code === 'pdf_download_failed' || execErr.code === 'blob_persist_failed') {
+            error(res, execErr.status || 502, execErr.code, execErr.message);
             return;
           }
-        }
-        if (!resolved && !body.title) {
-          throw new TypeError('either resolved metadata or a title is required');
-        }
-
-        // Two-stage safe PDF download. Explicit body.pdfUrl failures are fatal;
-        // resolver-derived pdfUrl failures degrade to metadata-only with an explicit warning.
-        let attachmentDesc = null;
-        let downloadedTempPath = null;
-        let pdfWarning = null;
-        const explicitPdfUrl = typeof body.pdfUrl === 'string' && body.pdfUrl.trim() ? body.pdfUrl.trim() : null;
-        const pdfUrl = explicitPdfUrl || resolved?.pdfUrl || null;
-
-        if (pdfUrl && typeof pdfUrl === 'string' && /^https?:\/\//i.test(pdfUrl)) {
-          try {
-            const tempDir = path.join(store.getBlobStorageDir(), 'tmp');
-            const downloadResult = await downloadPdfFn(pdfUrl, tempDir);
-            downloadedTempPath = downloadResult.tempFilePath;
-
-            // relativePath is deterministic from sha256; the permanent file move is deferred
-            // until the DB write is confirmed, but the descriptor can carry it up-front.
-            const targetBlobPath = store.resolveBlobPath(downloadResult.sha256, '.pdf');
-
-            attachmentDesc = {
-              sha256: downloadResult.sha256,
-              tempFilePath: downloadResult.tempFilePath,
-              targetBlobPath,
-              relativePath: path.relative(store.getBlobStorageDir(), targetBlobPath),
-              sizeBytes: downloadResult.sizeBytes,
-              mimeType: 'application/pdf',
-              originalFilename: `${(resolved?.title || body.title || 'document').slice(0, 100)}.pdf`,
-              sourceUrl: pdfUrl
-            };
-          } catch (downloadErr) {
-            try { if (downloadedTempPath && fs.existsSync(downloadedTempPath)) fs.unlinkSync(downloadedTempPath); } catch {}
-            if (explicitPdfUrl) {
-              const status = downloadErr.status || 502;
-              error(res, status, 'pdf_download_failed', `PDF 下载失败: ${downloadErr.message}`);
-              return;
-            }
-            pdfWarning = `PDF 附件下载失败，已降级为仅元数据导入: ${downloadErr.message}`;
+          if (execErr.code === 'resolve_error') {
+            error(res, 400, 'resolve_error', `Failed to resolve input: ${execErr.message}`);
+            return;
           }
+          throw execErr;
         }
 
-        const cleanupTemp = () => {
-          try { if (downloadedTempPath && fs.existsSync(downloadedTempPath)) fs.unlinkSync(downloadedTempPath); } catch {}
-        };
-
-        let result;
-        try {
-          result = store.importNativeDocument(actor.actorKey, {
-            sourceType: string(resolved?.sourceType || body.sourceType || 'manual', 'sourceType', { max: 32 }),
-            title: string(resolved?.title || body.title, 'title', { min: 1, max: 500 }),
-            abstract: string(resolved?.abstractNote || body.abstract || '', 'abstract', { max: 20_000 }),
-            creators: Array.isArray(resolved?.creators || body.creators) ? (resolved?.creators || body.creators) : [],
-            year: resolved?.year || body.year || null,
-            doi: resolved?.doi || body.doi || null,
-            url: resolved?.url || body.url || null,
-            isbn: body.isbn || null,
-            arxivId: resolved?.arxivId || resolved?.arXivId || body.arxivId || null,
-            externalRefs: Array.isArray(body.externalRefs) ? body.externalRefs : [],
-            attachment: attachmentDesc,
-            targetWorkspaceId,
-            forceNew: Boolean(body.forceNew),
-            confirmFuzzy: Boolean(body.confirmFuzzy)
-          });
-        } catch (importErr) {
-          cleanupTemp();
-          throw importErr;
-        }
-
+        const { result, warning } = outcome;
         if (result.outcome === 'requires_confirmation') {
-          cleanupTemp();
           json(res, 409, {
-            error: {
-              code: 'duplicate_confirmation_required',
-              message: '检测到高度相似的文献，需要用户确认后才能合并'
-            },
+            error: { code: 'duplicate_confirmation_required', message: '检测到高度相似的文献，需要用户确认后才能合并' },
             data: { candidates: result.candidates }
           });
           return;
         }
-
         if (result.outcome === 'conflicting_identities') {
-          cleanupTemp();
           json(res, 409, {
-            error: {
-              code: 'identity_conflict',
-              message: '多个精确标识分别指向不同文献，无法确定合并目标，请手动处理'
-            },
+            error: { code: 'identity_conflict', message: '多个精确标识分别指向不同文献，无法确定合并目标，请手动处理' },
             data: { conflicts: result.conflicts }
           });
           return;
         }
 
-        // Write confirmed: promote temp file to permanent blob storage.
-        if (attachmentDesc) {
-          const targetBlobPath = attachmentDesc.targetBlobPath;
-          if (!fs.existsSync(targetBlobPath)) {
-            try {
-              fs.mkdirSync(path.dirname(targetBlobPath), { recursive: true, mode: 0o700 });
-              fs.renameSync(downloadedTempPath, targetBlobPath);
-              fs.chmodSync(targetBlobPath, 0o600);
-            } catch (blobErr) {
-              // Blob promotion failed after DB write: surface error; DB blob row without file will 404 on file access.
-              json(res, 500, {
-                error: { code: 'blob_persist_failed', message: `文献已入库但 PDF 附件落盘失败: ${blobErr.message}` },
-                data: { ...result, warning: pdfWarning }
-              });
-              return;
-            }
-          } else {
-            cleanupTemp();
-          }
-          // Re-fetch document to include the newly linked attachment
-          result = {
-            ...result,
-            document: store.getDocument(actor.actorKey, result.document.id),
-            attachment: result.attachment
-          };
-        }
-
         json(res, result.outcome === 'reused' ? 200 : 201, {
-          data: pdfWarning ? { ...result, warning: pdfWarning } : result
+          data: warning ? { ...result, warning } : result
         });
         return;
       }
@@ -1425,51 +1603,20 @@ export function createCanvasHandler(store, {
           throw new TypeError('items must be a non-empty array of at most 100 entries');
         }
 
-        // P2 pre-validation: fully validate all items BEFORE creating job to avoid orphaned pending jobs
-        const validatedItems = [];
+        // Full deep pre-validation via the unified normalizer BEFORE creating the job.
+        const normalizedItems = [];
         for (let i = 0; i < body.items.length; i++) {
-          const item = body.items[i];
-          if (!item || typeof item !== 'object' || Array.isArray(item)) {
-            throw new TypeError(`item at index ${i} must be an object`);
-          }
-          if (item.resolved !== undefined && (typeof item.resolved !== 'object' || item.resolved === null || Array.isArray(item.resolved))) {
-            throw new TypeError(`item at index ${i}: resolved must be an object`);
-          }
-          if (item.title !== undefined && (typeof item.title !== 'string' || item.title.length > 500)) {
-            throw new TypeError(`item at index ${i}: title must be a string of at most 500 characters`);
-          }
-          if (item.abstract !== undefined && (typeof item.abstract !== 'string' || item.abstract.length > 20_000)) {
-            throw new TypeError(`item at index ${i}: abstract must be a string of at most 20000 characters`);
-          }
-          if (item.creators !== undefined && !Array.isArray(item.creators)) {
-            throw new TypeError(`item at index ${i}: creators must be an array`);
-          }
-          if (item.externalRefs !== undefined && !Array.isArray(item.externalRefs)) {
-            throw new TypeError(`item at index ${i}: externalRefs must be an array`);
-          }
-          if (item.externalRefs !== undefined) {
-            for (const ref of item.externalRefs) {
-              if (!ref || typeof ref !== 'object' || Array.isArray(ref)) {
-                throw new TypeError(`item at index ${i}: externalRefs entries must be objects`);
-              }
-              if (!ref.provider || !ref.externalItemId) {
-                throw new TypeError(`item at index ${i}: externalRefs entries require provider and externalItemId`);
-              }
-            }
-          }
-          if (item.input !== undefined && typeof item.input !== 'string') {
-            throw new TypeError(`item at index ${i}: input must be a string`);
-          }
-          validatedItems.push(item);
+          normalizedItems.push(normalizeNativeImportItem(body.items[i], `item at index ${i}`));
         }
 
         const targetWorkspaceId = body.targetWorkspaceId
           ? string(body.targetWorkspaceId, 'targetWorkspaceId', { max: 128 })
           : null;
+        const batchConfirmFuzzy = Boolean(body.confirmFuzzy);
 
         const batchJob = store.createImportJob(actor.actorKey, {
           sourceType: string(body.sourceType || 'batch', 'sourceType', { max: 32 }),
-          totalCount: validatedItems.length
+          totalCount: normalizedItems.length
         });
 
         // Set import_jobs state to running on startup (import_jobs table, not jobs table)
@@ -1477,38 +1624,26 @@ export function createCanvasHandler(store, {
 
         // Process synchronously so the batch report is complete in the response.
         let cancelled = false;
-        for (const item of validatedItems) {
+        for (const normalized of normalizedItems) {
           const currentJob = store.getImportJob(actor.actorKey, batchJob.id);
           if (currentJob?.state === 'cancelled') {
             cancelled = true;
             break;
           }
+          if (batchConfirmFuzzy && !normalized.confirmFuzzy) {
+            normalized.confirmFuzzy = true;
+          }
+          const fallbackTitle = normalized.title || normalized.input || '';
           try {
-            let resolved = item.resolved;
-            if (!resolved && (item.input || item.url || item.identifier)) {
-              resolved = await resolveImportInput(String(item.input || item.url || item.identifier));
-            }
-            if (!resolved && !item.title) throw new TypeError('resolved metadata or title is required');
-            const result = store.importNativeDocument(actor.actorKey, {
-              sourceType: string(resolved?.sourceType || item.sourceType || 'batch', 'sourceType', { max: 32 }),
-              title: string(resolved?.title || item.title, 'title', { min: 1, max: 500 }),
-              abstract: string(resolved?.abstractNote || item.abstract || '', 'abstract', { max: 20_000 }),
-              creators: Array.isArray(resolved?.creators || item.creators) ? (resolved?.creators || item.creators) : [],
-              year: resolved?.year || item.year || null,
-              doi: resolved?.doi || item.doi || null,
-              url: resolved?.url || item.url || null,
-              isbn: item.isbn || null,
-              arxivId: resolved?.arxivId || resolved?.arXivId || item.arxivId || null,
-              externalRefs: Array.isArray(item.externalRefs) ? item.externalRefs : [],
-              attachment: null,
-              targetWorkspaceId,
-              forceNew: Boolean(item.forceNew),
-              confirmFuzzy: Boolean(item.confirmFuzzy ?? body.confirmFuzzy)
+            const { result, warning } = await executeNativeImportItem(store, actor.actorKey, normalized, {
+              downloadPdfFn,
+              promoteBlobFn,
+              fallbackTargetWorkspaceId: targetWorkspaceId
             });
             if (result.outcome === 'requires_confirmation') {
               store.appendImportJobItemReport(actor.actorKey, batchJob.id, {
                 ok: false,
-                title: item.title || resolved?.title || '',
+                title: fallbackTitle,
                 outcome: 'requires_confirmation',
                 error: 'Fuzzy duplicate requires user confirmation',
                 candidates: result.candidates
@@ -1516,7 +1651,7 @@ export function createCanvasHandler(store, {
             } else if (result.outcome === 'conflicting_identities') {
               store.appendImportJobItemReport(actor.actorKey, batchJob.id, {
                 ok: false,
-                title: item.title || resolved?.title || '',
+                title: fallbackTitle,
                 outcome: 'identity_conflict',
                 error: 'Multiple exact identities resolve to different documents; manual resolution required',
                 conflicts: result.conflicts
@@ -1528,14 +1663,16 @@ export function createCanvasHandler(store, {
                 documentId: result.document.id,
                 inboxEntryId: result.inboxEntry?.id || null,
                 outcome: result.outcome,
-                matchStrategy: result.match?.strategy || null
+                matchStrategy: result.match?.strategy || null,
+                warning: warning || undefined
               });
             }
           } catch (itemErr) {
             store.appendImportJobItemReport(actor.actorKey, batchJob.id, {
               ok: false,
-              title: String(item.title || item.input || ''),
-              error: itemErr.message
+              title: fallbackTitle,
+              error: itemErr.message,
+              warning: /PDF 附件下载失败/.test(itemErr.message) ? itemErr.message : undefined
             });
           }
         }

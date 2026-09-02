@@ -625,6 +625,62 @@ assert.match(html, /async function resolveQuickImport\(\)/);
   assert.ok(classes['altero-auth-section'].has('hidden'), 'altero-auth-section must be hidden');
 }
 
+// --- Behavioral test: native library multi-page pagination and safety cap ---
+{
+  const loadNativeFn = html.match(/async function loadNativeLibrary\(signal\) \{([\s\S]*?)\n    \}/);
+  assert.ok(loadNativeFn, 'loadNativeLibrary must exist');
+
+  const buildRunner = () => new Function(
+    'fetch', 'nativeDocumentToLibraryItem', 'renderCollections', 'renderItems', 'documentMetas', 'docMetaKey',
+    `
+    let allItems = ['sentinel'];
+    ${loadNativeFn[0]}
+    return { run: (signal) => loadNativeLibrary(signal), getAllItems: () => allItems };
+    `
+  );
+
+  // Case A: real multi-page result 100 + 100 + 1 -> all 201 items loaded
+  {
+    let callIndex = 0;
+    const makeDocs = (count, base) => Array.from({ length: count }, (_, i) => ({ id: `doc-${base}-${i}`, title: `Doc ${base}-${i}` }));
+    const mockFetch = async (url) => {
+      callIndex++;
+      if (callIndex === 1) return { ok: true, status: 200, json: async () => ({ data: makeDocs(100, 'p1') }) };
+      if (callIndex === 2) return { ok: true, status: 200, json: async () => ({ data: makeDocs(100, 'p2') }) };
+      return { ok: true, status: 200, json: async () => ({ data: makeDocs(1, 'p3') }) };
+    };
+    const instance = buildRunner()(
+      mockFetch,
+      d => ({ key: d.id, isNative: true, libraryType: 'native', libraryId: 'local' }),
+      () => {}, () => {}, new Map(), () => ''
+    );
+    await instance.run();
+    const items = instance.getAllItems();
+    assert.equal(items.length, 201, 'Multi-page 100+100+1 must load all 201 documents');
+    assert.equal(items[0].key, 'doc-p1-0');
+    assert.equal(items[200].key, 'doc-p3-0');
+  }
+
+  // Case B: safety cap reached with a full last page -> throws and does NOT clobber allItems
+  {
+    const fullPage = Array.from({ length: 100 }, (_, i) => ({ id: `doc-cap-${i}`, title: `Cap ${i}` }));
+    let fetchCalls = 0;
+    const mockFetch = async () => {
+      fetchCalls++;
+      return { ok: true, status: 200, json: async () => ({ data: fullPage }) };
+    };
+    const instance = buildRunner()(
+      mockFetch,
+      d => ({ key: d.id, isNative: true, libraryType: 'native', libraryId: 'local' }),
+      () => {}, () => {}, new Map(), () => ''
+    );
+    await assert.rejects(() => instance.run(), /分页安全上限/,
+      'Cap-exceeded library must throw instead of silently truncating');
+    assert.equal(fetchCalls, 100, 'All 100 safety-cap pages must have been attempted');
+    assert.deepEqual(instance.getAllItems(), ['sentinel'], 'allItems must NOT be overwritten with truncated result');
+  }
+}
+
 // --- Behavioral test: autoFitCanvasNodeHeight execution ---
 {
   const autoFitMatch = /function autoFitCanvasNodeHeight\(node, element\)\s*\{([\s\S]*?)\n    \}/.exec(scripts[0]);

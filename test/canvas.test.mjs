@@ -3649,6 +3649,150 @@ try {
     assert.equal(groupDoc2.document.id, customProviderGroupImport.document.id);
   }
 
+  // 9e. Unified batch pipeline imports PDFs: batch item with pdfUrl produces a real attachment
+  {
+    const batchPdfRes = await call(handler, '/canvas/imports/native/batch', {
+      method: 'POST', cookie,
+      body: {
+        sourceType: 'batch_pdf',
+        items: [{ title: 'Batch PDF Unified Paper', pdfUrl: 'https://example.org/batch.pdf' }]
+      }
+    });
+    assert.equal(batchPdfRes.statusCode, 201);
+    assert.equal(batchPdfRes.payload.data.job.state, 'completed');
+    assert.equal(batchPdfRes.payload.data.job.completedCount, 1);
+    const batchItem = batchPdfRes.payload.data.job.report.items[0];
+    assert.equal(batchItem.ok, true);
+    // The mock downloader returns the same PDF bytes as the earlier single-import test,
+    // so the SHA-256 tier must engage: a sha256 match is only possible when the batch
+    // pipeline actually downloaded and hashed the PDF attachment.
+    assert.equal(batchItem.matchStrategy, 'sha256', 'Batch item must go through the PDF download + hash pipeline');
+    const batchDoc = store.getDocument(m2Actor, batchItem.documentId);
+    assert.ok(batchDoc, 'Batch report must reference the matched document');
+    assert.ok(batchDoc.attachments.length >= 1, 'Matched document must carry the real attachment');
+    assert.ok(batchDoc.attachments.some(a => a.blobHash), 'Attachment must be linked to a content-addressed blob');
+  }
+
+  // 9f. Compensation direction 1: file promotion failure -> no DB writes, request fails
+  {
+    const promoteFailHandler = createCanvasHandler(store, {
+      downloadPdfFn: async (url, targetDir) => {
+        fs.mkdirSync(targetDir, { recursive: true, mode: 0o700 });
+        const tempFilePath = path.join(targetDir, 'promote-fail.tmp');
+        const content = Buffer.from('%PDF-1.7 promote-fail');
+        fs.writeFileSync(tempFilePath, content, { mode: 0o600 });
+        return {
+          tempFilePath,
+          sha256: crypto.createHash('sha256').update(content).digest('hex'),
+          sizeBytes: content.length,
+          mimeType: 'application/pdf'
+        };
+      },
+      promoteBlobFn: () => { throw new Error('disk full (simulated)'); }
+    });
+    const promoteFailRes = await call(promoteFailHandler, '/canvas/imports/native', {
+      method: 'POST', cookie,
+      body: { sourceType: 'manual', title: 'Promote Failure Paper', pdfUrl: 'https://example.org/fail.pdf' }
+    });
+    assert.equal(promoteFailRes.statusCode, 500, 'Promotion failure must fail the request');
+    assert.equal(promoteFailRes.payload.error.code, 'blob_persist_failed');
+    assert.equal(store.listDocuments(m2Actor, { search: 'Promote Failure Paper' }).length, 0,
+      'No document row may exist after promotion failure');
+    const tmpLeftover = fs.readdirSync(path.join(store.getBlobStorageDir(), 'tmp')).filter(f => f.startsWith('promote-fail'));
+    assert.equal(tmpLeftover.length, 0, 'Temp file must be cleaned after promotion failure');
+  }
+
+  // 9g. Compensation direction 2: DB write failure -> promoted file is removed
+  {
+    const failingStore = new Proxy(store, {
+      get(target, prop) {
+        if (prop === 'importNativeDocument') {
+          return () => { throw new Error('simulated DB transaction failure'); };
+        }
+        const value = target[prop];
+        return typeof value === 'function' ? value.bind(target) : value;
+      }
+    });
+    const dbFailHandler = createCanvasHandler(failingStore, {
+      downloadPdfFn: async (url, targetDir) => {
+        fs.mkdirSync(targetDir, { recursive: true, mode: 0o700 });
+        const tempFilePath = path.join(targetDir, 'db-fail.tmp');
+        const content = Buffer.from('%PDF-1.7 db-fail');
+        fs.writeFileSync(tempFilePath, content, { mode: 0o600 });
+        return {
+          tempFilePath,
+          sha256: crypto.createHash('sha256').update(content).digest('hex'),
+          sizeBytes: content.length,
+          mimeType: 'application/pdf'
+        };
+      }
+    });
+    const dbFailRes = await call(dbFailHandler, '/canvas/imports/native', {
+      method: 'POST', cookie,
+      body: { sourceType: 'manual', title: 'DB Failure Paper', pdfUrl: 'https://example.org/dbfail.pdf' }
+    });
+    assert.equal(dbFailRes.statusCode, 500, 'DB failure must surface as 500');
+    const dbFailHash = crypto.createHash('sha256').update(Buffer.from('%PDF-1.7 db-fail')).digest('hex');
+    const blobPath = store.resolveBlobPath(dbFailHash, '.pdf');
+    assert.ok(!fs.existsSync(blobPath), 'Promoted blob file must be removed after DB write failure');
+    assert.equal(store.getBlob(dbFailHash), null, 'No blob row may remain after DB write failure');
+  }
+
+  // 9h. Startup blob/DB consistency recovery (isolated data directory)
+  {
+    const consistencyDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-blob-consistency-'));
+    const consistencyStore = new CanvasStore(path.join(consistencyDir, 'consistency.sqlite'));
+    const cActor = canvasActorKey('https://issuer.example', 'consistency-actor');
+    const doc = consistencyStore.createDocument(cActor, { title: 'Dangling Doc' });
+    const ghostHash = 'a'.repeat(64);
+    consistencyStore.db.prepare(`
+      INSERT INTO blobs (sha256, relative_path, size_bytes, mime_type, created_at, reference_count)
+      VALUES (?, 'sha256/aa/aa/ghost.pdf', 10, 'application/pdf', '2026-09-02T00:00:00.000Z', 1)
+    `).run(ghostHash);
+    consistencyStore.db.prepare(`
+      INSERT INTO attachments (id, document_id, blob_hash, mime_type, original_filename, title, size_bytes, version, created_at, updated_at)
+      VALUES ('att-dangling', ?, ?, 'application/pdf', 'ghost.pdf', 'Ghost', 10, 1, '2026-09-02T00:00:00.000Z', '2026-09-02T00:00:00.000Z')
+    `).run(doc.id, ghostHash);
+
+    const orphanPath = consistencyStore.resolveBlobPath('b'.repeat(64), '.pdf');
+    fs.mkdirSync(path.dirname(orphanPath), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(orphanPath, '%PDF-1.7 orphan', { mode: 0o600 });
+
+    const summary = consistencyStore.recoverBlobConsistency();
+    assert.equal(summary.danglingAttachments, 1, 'Dangling attachment must be detected');
+    assert.equal(summary.zeroedBlobRows, 1, 'Ghost blob with soft-deleted FK holder must be zeroed (not hard-deleted)');
+    assert.equal(consistencyStore.getBlob(ghostHash).referenceCount, 0, 'Zeroed blob must report refcount 0');
+    assert.equal(summary.deletedOrphanFiles, 1, 'Orphan file without DB row must be deleted');
+    assert.ok(!fs.existsSync(orphanPath), 'Orphan file must be deleted from disk');
+
+    const attAfter = consistencyStore.getAttachment(cActor, 'att-dangling');
+    assert.equal(attAfter, null, 'Soft-deleted dangling attachment must no longer be returned');
+
+    // Idempotency: a second scan finds nothing
+    const second = consistencyStore.recoverBlobConsistency();
+    assert.equal(second.danglingAttachments + second.removedBlobRows + second.deletedOrphanFiles, 0);
+    consistencyStore.close();
+    fs.rmSync(consistencyDir, { recursive: true, force: true });
+  }
+
+  // 9i. Deep pre-validation rejects malformed nested structures without creating any job
+  {
+    const jobsBefore = store.db.prepare('SELECT COUNT(*) AS c FROM import_jobs').get().c;
+    const badPayloads = [
+      { items: [{ title: 'Bad Creators', creators: [{ firstName: 123 }] }] },
+      { items: [{ title: 'Bad Provider', externalRefs: [{ provider: '', externalItemId: 'X' }] }] },
+      { items: [{ title: 'Bad ItemId', externalRefs: [{ provider: 'zotero', externalItemId: 'x'.repeat(300) }] }] },
+      { items: [{ title: 'x'.repeat(600) }] },
+      { items: [{ title: 'Bad Library', externalRefs: [{ provider: 'zotero', externalItemId: 'OK1', externalLibraryId: 42 }] }] }
+    ];
+    for (const payload of badPayloads) {
+      const res = await call(handler, '/canvas/imports/native/batch', { method: 'POST', cookie, body: payload });
+      assert.equal(res.statusCode, 400, `Deep pre-validation must reject: ${JSON.stringify(payload).slice(0, 80)}`);
+    }
+    const jobsAfter = store.db.prepare('SELECT COUNT(*) AS c FROM import_jobs').get().c;
+    assert.equal(jobsAfter, jobsBefore, 'Deep pre-validation failures must not create import jobs');
+  }
+
   // 10. HTTP API: Cancel import job
   const pendingBatchJob = store.createImportJob(m2Actor, { sourceType: 'batch_test', totalCount: 10 });
   const cancelRes = await call(handler, `/canvas/import-jobs/${pendingBatchJob.id}/cancel`, { method: 'POST', cookie });
