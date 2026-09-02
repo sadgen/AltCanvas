@@ -813,6 +813,37 @@
 | M5 AltCanvas Capture 浏览器扩展 | `PENDING` | 独立扩展仓库 |
 | M6 默认解除 Altero 依赖 | `PENDING` | 默认部署全面切换为 Native |
 
+## 2026-09-02 会话（M2 终审 P1 整改：任务状态机、外部引用文库维度、冲突闭环、PDF 管线与前端修复）
+
+### 修复清单
+
+1. **[P1] 批量任务真实状态机**：批量入口改用 `updateImportJob`（`import_jobs` 表）在启动时置 `running`；`appendImportJobItemReport` 仅累计报告与计数、保持 `running`；全部处理完由 `finalizeImportJob` 统一落 `completed` / `completed_with_errors` 并记录 `completedAt`。
+2. **[P1] external_refs 写入文库维度**：`getExternalRef` 升级为 `(owner, provider, COALESCE(external_library_id,''), external_item_id)` 联合身份；`importNativeDocument` 回填阶段传入 `externalLibraryId`，群组文库引用可持久化并在后续导入正确复用。
+3. **[P1] 冲突 HTTP 闭环**：单篇接口对 `conflicting_identities` 返回 `409 identity_conflict` + 结构化冲突文献列表；批量报告持久化 `conflicts` / `candidates` 字段。
+4. **[P1] PDF 下载失败语义**：显式 `body.pdfUrl` 失败直接失败（`pdf_download_failed`）；解析器推导 pdfUrl 失败降级为仅元数据导入并返回显式 `warning`。
+5. **[P1] 孤儿 Blob 消除**：PDF 下载至 `tmp` 后延迟到 DB 写入确认才移动至永久 Blob 目录；`requires_confirmation` / `conflicting_identities` / 异常路径统一清理临时文件。
+6. **[P1] Native 文库全量分页**：`loadNativeLibrary` 以 `limit=100&offset=` 循环分页拉取全部文献（100 页安全上限），不再静默截断为前 50 篇。
+7. **[P1] 证据浮层崩溃修复**：`openQuickEvidencePopover` 移除未定义 `getCachedDocumentMeta`，改用 `documentMetas.get(docMetaKey(...))`，并新增生产行为测试。
+8. **[P2]**：`getNativeLibraryItem` 按需加载后写回 `allItems` 缓存；文库条目标题/元数据弹窗/AI 元数据提取的文库解析改为 `isNative → native/local` 优先；批量条目前置校验覆盖 title/abstract/creators/externalRefs 完整合法性；8088 收敛为单一守护实例。
+
+### 测试新增
+- 批量状态机：逐项后保持 `running`、`completedAt` 为空、finalize 终态、终态后取消为 no-op；
+- 冲突闭环：单篇 409 `identity_conflict`、批量结构化 conflicts 报告；
+- PDF 管线：显式失败 502 不建文档、推导降级 201 + warning、SHA-256 二次导入复用；
+- 写入路径：群组 external ref 二次导入通过持久化引用复用；
+- UI：分页参数断言、`getCachedDocumentMeta` 绝迹断言、证据浮层行为测试。
+- `npm test` 7 套全过；`git diff --check` 通过。
+
+---
+
+### 里程碑状态
+
+| 里程碑 | 状态 | 说明 |
+|---|---|---|
+| M1 原生 PDF 基础单文献闭环 | **PASS (完成)** | 独立 local 认证、原生流式上传、去重、Range 文件流服务、Reader 批注持久化、全文理解与证据转批注 |
+| M1.5 Native Core Integration | **PASS (关闭)** | 主线与 Native 核心全量合流，Schema v12 双谱系幂等迁移，Native 确立为默认核心，Altero 降级为可选 Provider |
+| M2 统一导入管线 | **PASS (完成)** | 规范化多源导入、优先级去重链（含文库维度 external_refs）、模糊/冲突防静默合并、PDF 两阶段安全下载、import_jobs 完整状态机与逐项报告 |
+
 ## 2026-09-02 会话（P1 Native Library Routing & Capability Isolation 修复）
 
 ### 修复背景与根因

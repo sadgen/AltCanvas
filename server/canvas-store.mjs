@@ -3918,13 +3918,11 @@ export class CanvasStore {
         });
       }
 
-      // External refs: idempotent backfill for both reuse and create paths.
+      // External refs: idempotent backfill for both reuse and create paths (with library dimension).
       for (const ref of refsToWrite) {
-        const existingRef = this.getExternalRef(actorKey, ref.provider, ref.externalItemId);
-        if (!existingRef || existingRef.documentId !== document.id) {
-          if (!existingRef) {
-            this.createExternalRef(actorKey, document.id, ref);
-          }
+        const existingRef = this.getExternalRef(actorKey, ref.provider, ref.externalItemId, ref.externalLibraryId || null);
+        if (!existingRef) {
+          this.createExternalRef(actorKey, document.id, ref);
         }
       }
 
@@ -4242,10 +4240,14 @@ export class CanvasStore {
     return externalRefRow(this.db.prepare('SELECT * FROM external_refs WHERE id = ?').get(refId));
   }
 
-  getExternalRef(actorKey, provider, externalItemId) {
+  getExternalRef(actorKey, provider, externalItemId, externalLibraryId = null) {
+    const normalizedLibId = externalLibraryId !== null && externalLibraryId !== undefined ? String(externalLibraryId) : '';
     return externalRefRow(this.db.prepare(`
-      SELECT * FROM external_refs WHERE owner_key = ? AND provider = ? AND external_item_id = ?
-    `).get(actorKey, provider, externalItemId));
+      SELECT * FROM external_refs
+      WHERE owner_key = ? AND provider = ?
+        AND COALESCE(external_library_id, '') = ?
+        AND external_item_id = ?
+    `).get(actorKey, provider, normalizedLibId, externalItemId));
   }
 
   listExternalRefs(actorKey, documentId) {
@@ -4327,6 +4329,8 @@ export class CanvasStore {
         outcome: itemReport.outcome || null,
         matchStrategy: itemReport.matchStrategy || null,
         error: itemReport.error ? String(itemReport.error).slice(0, 500) : null,
+        candidates: Array.isArray(itemReport.candidates) ? itemReport.candidates : undefined,
+        conflicts: Array.isArray(itemReport.conflicts) ? itemReport.conflicts : undefined,
         at: timestamp
       });
       const completedCount = items.filter(i => i.ok).length;

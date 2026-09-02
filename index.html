@@ -1761,8 +1761,8 @@
     function openDocMetaModal(item) {
       if (!item) return;
       currentEditingMetaItem = item;
-      const libType = item.libraryType || currentDocumentLibrary?.libraryType || 'user';
-      const libId = item.libraryId || currentDocumentLibrary?.libraryId || config.userId;
+      const libType = item.libraryType || (item.isNative ? 'native' : currentDocumentLibrary?.libraryType) || 'user';
+      const libId = item.libraryId || (item.isNative ? 'local' : currentDocumentLibrary?.libraryId) || config.userId;
       const meta = documentMetas.get(docMetaKey(libType, libId, item.key));
       const rawName = item.data?.title || item.data?.filename || '';
       document.getElementById('doc-meta-item-key').value = item.key;
@@ -1838,8 +1838,8 @@
       const metaKey = item.key;
       const filename = item.data?.filename || item.filename || '';
       const rawTitle = item.data?.title || item.title || '';
-      const libType = item.libraryType || currentDocumentLibrary?.libraryType || 'user';
-      const libId = item.libraryId || currentDocumentLibrary?.libraryId || config.userId;
+      const libType = item.libraryType || (item.isNative ? 'native' : currentDocumentLibrary?.libraryType) || 'user';
+      const libId = item.libraryId || (item.isNative ? 'local' : currentDocumentLibrary?.libraryId) || config.userId;
 
       let textSnippet = '';
       if (currentReaderInstance && currentItem?.key === metaKey) {
@@ -2237,7 +2237,13 @@
       if (!response.ok) throw new Error(`获取原生文献失败 (HTTP ${response.status})`);
 
       const payload = await response.json();
-      return nativeDocumentToLibraryItem(payload.data);
+      const item = nativeDocumentToLibraryItem(payload.data);
+      if (item) {
+        const existingIdx = allItems.findIndex(i => (i.isNative || i.libraryType === 'native') && i.key === documentId);
+        if (existingIdx >= 0) allItems[existingIdx] = item;
+        else allItems.push(item);
+      }
+      return item;
     }
 
     function renderNativeLibraryError(err) {
@@ -2264,26 +2270,37 @@
     }
 
     async function loadNativeLibrary(signal) {
-      const [docsRes, metasRes] = await Promise.all([
-        fetch('/canvas/native/documents', { signal }),
-        fetch('/canvas/documents/metadata?libraryType=native&libraryId=local', { signal }).catch(() => null)
-      ]);
+      // Paginated fetch of the ENTIRE native library (server default limit is 50 per page)
+      const PAGE_SIZE = 100;
+      const MAX_PAGES = 100; // hard safety bound: 10,000 documents
+      const nativeDocs = [];
+      for (let page = 0; page < MAX_PAGES; page++) {
+        const offset = page * PAGE_SIZE;
+        const docsRes = await fetch(`/canvas/native/documents?limit=${PAGE_SIZE}&offset=${offset}`, { signal });
 
-      if (docsRes.status === 401) {
-        const err = new Error('登录会话已过期');
-        err.status = 401;
-        throw err;
+        if (docsRes.status === 401) {
+          const err = new Error('登录会话已过期');
+          err.status = 401;
+          throw err;
+        }
+        if (docsRes.status === 403) {
+          const err = new Error('无法访问本地文库');
+          err.status = 403;
+          throw err;
+        }
+        if (!docsRes.ok) {
+          const err = new Error(`HTTP ${docsRes.status}: 未能加载条目`);
+          err.status = docsRes.status;
+          throw err;
+        }
+
+        const docsData = await docsRes.json();
+        const chunk = docsData.data || [];
+        nativeDocs.push(...chunk);
+        if (chunk.length < PAGE_SIZE) break; // last page reached
       }
-      if (docsRes.status === 403) {
-        const err = new Error('无法访问本地文库');
-        err.status = 403;
-        throw err;
-      }
-      if (!docsRes.ok) {
-        const err = new Error(`HTTP ${docsRes.status}: 未能加载条目`);
-        err.status = docsRes.status;
-        throw err;
-      }
+
+      const metasRes = await fetch('/canvas/documents/metadata?libraryType=native&libraryId=local', { signal }).catch(() => null);
 
       if (metasRes && metasRes.ok) {
         try {
@@ -2298,8 +2315,6 @@
         } catch {}
       }
 
-      const docsData = await docsRes.json();
-      const nativeDocs = docsData.data || [];
       allItems = nativeDocs.map(nativeDocumentToLibraryItem).filter(Boolean);
       renderCollections([]);
       renderItems();
@@ -2458,8 +2473,8 @@
             : 'bg-slate-950/40 hover:bg-slate-900 border-slate-900 hover:border-slate-800 text-slate-300'
         } group relative`;
 
-        const itemLibType = item.libraryType || currentDocumentLibrary?.libraryType || 'user';
-        const itemLibId = item.libraryId || currentDocumentLibrary?.libraryId || config.userId;
+        const itemLibType = item.libraryType || (item.isNative ? 'native' : currentDocumentLibrary?.libraryType) || 'user';
+        const itemLibId = item.libraryId || (item.isNative ? 'local' : currentDocumentLibrary?.libraryId) || config.userId;
         const meta = documentMetas.get(docMetaKey(itemLibType, itemLibId, item.key));
         const rawName = item.data?.title || item.data?.filename || '无标题文档';
         const displayTitle = meta?.cleanTitle || rawName;
@@ -6540,7 +6555,7 @@
       const quoteBox = document.getElementById('evidence-popover-quote-box');
       const pageBadge = document.getElementById('evidence-popover-page-badge');
 
-      const meta = getCachedDocumentMeta({ libraryType: sourceRef.libraryType, libraryId: sourceRef.libraryId, itemKey: sourceRef.itemKey });
+      const meta = documentMetas.get(docMetaKey(sourceRef.libraryType, sourceRef.libraryId, sourceRef.itemKey));
       const displayTitle = meta?.cleanTitle || node.title || `文献 #${sourceRef.itemKey}`;
       const displayPage = sourceRef.pageLabel || (sourceRef.position?.pageIndex !== undefined ? sourceRef.position.pageIndex + 1 : '1');
       const displayQuote = sourceRef.quoteSnapshot || sourceRef.position?.textQuote || node.body || '无摘录快照';

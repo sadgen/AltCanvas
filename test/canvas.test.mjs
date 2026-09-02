@@ -3497,6 +3497,39 @@ try {
   assert.equal(samePdfReusedRes.payload.data.outcome, 'reused');
   assert.equal(samePdfReusedRes.payload.data.match.strategy, 'sha256');
 
+  // 7c. HTTP API: explicit body.pdfUrl download failure must FAIL the request (non-silent)
+  const explicitFailHandler = createCanvasHandler(store, {
+    downloadPdfFn: async () => { throw new Error('Forbidden address: private host'); }
+  });
+  const explicitPdfFailRes = await call(explicitFailHandler, '/canvas/imports/native', {
+    method: 'POST', cookie,
+    body: {
+      sourceType: 'manual',
+      title: 'Explicit PDF Failure Paper',
+      pdfUrl: 'http://192.168.1.1/paper.pdf'
+    }
+  });
+  assert.equal(explicitPdfFailRes.statusCode, 502, 'Explicit body.pdfUrl failure must fail the request');
+  assert.equal(explicitPdfFailRes.payload.error.code, 'pdf_download_failed');
+
+  // Verify document was NOT created for the failed explicit PDF import
+  const explicitFailDoc = store.listDocuments(m2Actor, { search: 'Explicit PDF Failure Paper' });
+  assert.equal(explicitFailDoc.length, 0, 'No document should be created when explicit PDF download fails');
+
+  // 7d. HTTP API: resolver-derived pdfUrl failure degrades to metadata-only WITH warning
+  const degradeHandler = createCanvasHandler(store, {
+    downloadPdfFn: async () => { throw new Error('network unreachable'); }
+  });
+  const degradeRes = await call(degradeHandler, '/canvas/imports/native', {
+    method: 'POST', cookie,
+    body: {
+      resolved: { sourceType: 'arxiv', title: 'Resolver Derived PDF Degrade Paper', arxivId: '2401.55555', pdfUrl: 'https://arxiv.org/pdf/2401.55555.pdf' }
+    }
+  });
+  assert.equal(degradeRes.statusCode, 201, 'Resolver-derived pdfUrl failure degrades to success');
+  assert.ok(degradeRes.payload.data.warning, 'Degrade response must carry explicit warning');
+  assert.match(degradeRes.payload.data.warning, /PDF 附件下载失败/);
+
   // 8. HTTP API: POST /canvas/imports/native 409 conflict when fuzzy duplicate detected
   const fuzzyHttpRes = await call(handler, '/canvas/imports/native', {
     method: 'POST', cookie,
@@ -3508,6 +3541,21 @@ try {
   assert.equal(fuzzyHttpRes.statusCode, 409);
   assert.equal(fuzzyHttpRes.payload.error.code, 'duplicate_confirmation_required');
   assert.ok(fuzzyHttpRes.payload.data.candidates.length > 0);
+
+  // 8a. HTTP API: conflicting identities must return 409 identity_conflict
+  const identityConflictRes = await call(handler, '/canvas/imports/native', {
+    method: 'POST', cookie,
+    body: {
+      sourceType: 'mixed',
+      title: 'HTTP Identity Conflict Paper',
+      doi: '10.5555/transformer-initial',
+      externalRefs: [{ provider: 'zotero', externalItemId: 'ZOTERO_ITEM_100', externalLibraryId: 'user_42' }]
+    }
+  });
+  assert.equal(identityConflictRes.statusCode, 409);
+  assert.equal(identityConflictRes.payload.error.code, 'identity_conflict');
+  assert.equal(identityConflictRes.payload.data.conflicts.length, 2);
+  assert.ok(identityConflictRes.payload.data.conflicts.every(c => c.documentId && c.title));
 
   // 8b. P2 validation: batch request with invalid non-object item rejected BEFORE creating any job
   const jobsCountBefore = store.db.prepare('SELECT COUNT(*) AS c FROM import_jobs').get().c;
@@ -3547,6 +3595,59 @@ try {
   assert.equal(batchImportRes.payload.data.job.report.items.length, 3);
   assert.equal(batchImportRes.payload.data.job.report.items[0].ok, true);
   assert.equal(batchImportRes.payload.data.job.report.items[2].ok, false);
+
+  // 9b. Batch state machine: appendImportJobItemReport keeps running; finalize sets terminal state
+  {
+    const smJob = store.createImportJob(m2Actor, { sourceType: 'sm_test', totalCount: 2 });
+    assert.equal(smJob.state, 'pending');
+
+    const afterFirst = store.appendImportJobItemReport(m2Actor, smJob.id, { ok: true, title: 'SM Item 1' });
+    assert.equal(afterFirst.state, 'running', 'After first item the job must be running, NOT completed');
+    assert.equal(afterFirst.completedAt, null, 'completedAt must not be set while running');
+
+    const afterSecond = store.appendImportJobItemReport(m2Actor, smJob.id, { ok: false, title: 'SM Item 2', error: 'fail' });
+    assert.equal(afterSecond.state, 'running', 'After second item the job must still be running');
+    assert.equal(afterSecond.completedAt, null);
+
+    const finalized = store.finalizeImportJob(m2Actor, smJob.id);
+    assert.equal(finalized.state, 'completed_with_errors', 'Finalize must set terminal state based on failures');
+    assert.ok(finalized.completedAt, 'Finalize must set completedAt');
+    assert.equal(finalized.completedCount, 1);
+    assert.equal(finalized.failedCount, 1);
+
+    // Cancel is no longer possible after terminal state
+    const cancelTerminal = store.cancelImportJob(m2Actor, smJob.id);
+    assert.equal(cancelTerminal.state, 'completed_with_errors', 'Cancel after finalize must be a no-op');
+  }
+
+  // 9c. Batch structured conflicting identities report
+  const conflictBatchRes = await call(handler, '/canvas/imports/native/batch', {
+    method: 'POST', cookie,
+    body: {
+      sourceType: 'batch_conflict',
+      items: [
+        { title: 'Conflict Batch Paper', doi: '10.5555/transformer-initial', externalRefs: [{ provider: 'zotero', externalItemId: 'ZOTERO_ITEM_100', externalLibraryId: 'user_42' }] }
+      ]
+    }
+  });
+  assert.equal(conflictBatchRes.statusCode, 201);
+  const conflictItem = conflictBatchRes.payload.data.job.report.items[0];
+  assert.equal(conflictItem.ok, false);
+  assert.equal(conflictItem.outcome, 'identity_conflict');
+  assert.ok(Array.isArray(conflictItem.conflicts) && conflictItem.conflicts.length === 2,
+    'Batch report must retain structured conflicts list');
+
+  // 9d. Cross-library external ref write path: group_99 ref is persisted so future imports reuse
+  {
+    const groupDoc2 = store.importNativeDocument(m2Actor, {
+      sourceType: 'zotero',
+      title: 'Group-library paper (second import)',
+      externalRefs: [{ provider: 'zotero', externalItemId: 'ZOTERO_ITEM_100', externalLibraryId: 'group_99' }]
+    });
+    assert.equal(groupDoc2.outcome, 'reused', 'Second group_99 import must reuse via persisted group external ref');
+    assert.equal(groupDoc2.match.strategy, 'external_ref');
+    assert.equal(groupDoc2.document.id, customProviderGroupImport.document.id);
+  }
 
   // 10. HTTP API: Cancel import job
   const pendingBatchJob = store.createImportJob(m2Actor, { sourceType: 'batch_test', totalCount: 10 });

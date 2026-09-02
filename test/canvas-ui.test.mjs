@@ -518,6 +518,51 @@ assert.match(html, /id="canvas-evidence-popover"/,
   'evidence verification popover must be present in DOM');
 assert.match(html, /function openQuickEvidencePopover\(/);
 
+// --- Behavioral test: openQuickEvidencePopover must not reference undefined helpers ---
+{
+  assert.doesNotMatch(html, /getCachedDocumentMeta/,
+    'openQuickEvidencePopover must not call undefined getCachedDocumentMeta');
+
+  const evidencePopoverMatch = /function openQuickEvidencePopover\(node, sourceRef\) \{([\s\S]*?)\n    \}/.exec(scripts[0]);
+  assert.ok(evidencePopoverMatch, 'openQuickEvidencePopover must be extractable from script');
+
+  const popoverClasses = {
+    'canvas-evidence-popover': new Set(['hidden'])
+  };
+  const popoverTexts = {};
+  const popoverDoc = {
+    getElementById: (id) => ({
+      classList: {
+        add: (c) => popoverClasses[id]?.add(c),
+        remove: (c) => popoverClasses[id]?.delete(c)
+      },
+      set textContent(v) { popoverTexts[id] = v; },
+      get textContent() { return popoverTexts[id] || ''; }
+    })
+  };
+  const documentMetas = new Map([
+    ['native|local|DOC_EV_1', { cleanTitle: '【机构】证据文献标题（2024）' }]
+  ]);
+
+  const evidenceRunner = new Function(
+    'node', 'sourceRef', 'document', 'documentMetas', 'docMetaKey', 'currentEvidencePopoverSourceRef',
+    evidencePopoverMatch[1]
+  );
+
+  evidenceRunner(
+    { title: '卡片标题', body: '卡片正文' },
+    { libraryType: 'native', libraryId: 'local', itemKey: 'DOC_EV_1', pageLabel: '5', quoteSnapshot: '原文引用内容' },
+    popoverDoc,
+    documentMetas,
+    (t, l, k) => `${t}|${l}|${k}`,
+    null
+  );
+
+  assert.ok(!popoverClasses['canvas-evidence-popover'].has('hidden'), 'popover must be visible after open');
+  assert.equal(popoverTexts['evidence-popover-doc-title'], '【机构】证据文献标题（2024）', 'popover title must come from documentMetas cache');
+  assert.equal(popoverTexts['evidence-popover-page-badge'], 'p.5');
+}
+
 // --- Capabilities-Driven UI Tests ---
 assert.match(html, /function applyCapabilitiesUI\(\)/,
   'UI must define applyCapabilitiesUI to control capability-driven views');
@@ -621,14 +666,15 @@ assert.match(html, /function renderNativeLibraryError\(/, 'renderNativeLibraryEr
 assert.match(html, /config\.authMode === 'altero' &&\s*config\.capabilities\?\.externalLibrary === true/,
   'capability must be the only routing criterion for external library');
 
-// Behavioral Test: loadCollectionsAndLibrary in Local + externalLibrary: false mode
-{
+  // Behavioral Test: loadCollectionsAndLibrary in Local + externalLibrary: false mode
+  {
   const loadFnMatch = html.match(/async function loadCollectionsAndLibrary\(\) \{([\s\S]*?)\n    \}/);
   const loadNativeFnMatch = html.match(/async function loadNativeLibrary\(signal\) \{([\s\S]*?)\n    \}/);
   const renderNativeErrMatch = html.match(/function renderNativeLibraryError\(err\) \{([\s\S]*?)\n    \}/);
   const nativeDocToItemMatch = html.match(/function nativeDocumentToLibraryItem\(doc\) \{([\s\S]*?)\n    \}/);
 
   assert.ok(loadFnMatch && loadNativeFnMatch && renderNativeErrMatch && nativeDocToItemMatch, 'Native library loading functions must exist');
+  assert.match(loadNativeFnMatch[0], /limit=\$\{PAGE_SIZE\}&offset=\$\{offset\}/, 'loadNativeLibrary must paginate through the entire library');
 
   // Case 1: Local mode (externalLibrary: false) - Success 200
   {
@@ -655,7 +701,7 @@ assert.match(html, /config\.authMode === 'altero' &&\s*config\.capabilities\?\.e
 
     const mockFetch = async (url) => {
       requestedUrls.push(url);
-      if (url === '/canvas/native/documents') {
+      if (url.startsWith('/canvas/native/documents')) {
         return {
           ok: true,
           status: 200,
@@ -725,7 +771,8 @@ assert.match(html, /config\.authMode === 'altero' &&\s*config\.capabilities\?\.e
     assert.equal(collectionsRendered, true, 'renderCollections must be called');
 
     // Verify NO Altero requests were made
-    assert.ok(requestedUrls.includes('/canvas/native/documents'), 'Must request native documents');
+    assert.ok(requestedUrls.some(u => u.includes('/canvas/native/documents')), 'Must request native documents');
+    assert.ok(requestedUrls.some(u => u.includes('limit=')), 'Native library request must carry pagination params');
     assert.ok(!requestedUrls.some(u => u.includes('/api/users/') || u.includes('/api/groups/')), 'Local mode must never query /api/users/ or /api/groups/');
   }
 
@@ -752,7 +799,7 @@ assert.match(html, /config\.authMode === 'altero' &&\s*config\.capabilities\?\.e
 
     const mockFetch = async (url) => {
       requestedUrls.push(url);
-      if (url === '/canvas/native/documents') {
+      if (url.startsWith('/canvas/native/documents')) {
         return { ok: false, status: 500, json: async () => ({}) };
       }
       return { ok: false, status: 500 };
