@@ -354,4 +354,18 @@ server.on('error', (err) => {
 });
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 AltCanvas BFF & Web Workspace running at http://0.0.0.0:${PORT}`);
+  // Only the instance that WON the listen port may run the blob/DB consistency scan.
+  // Competing startups exit above before reaching here, so an in-flight import's
+  // promoted-but-not-yet-committed files can never be reaped by a losing instance.
+  try {
+    const canvasStore = getCanvasStore();
+    if (canvasStore && typeof canvasStore.recoverBlobConsistency === 'function') {
+      const summary = canvasStore.recoverBlobConsistency();
+      if (summary && (summary.danglingAttachments || summary.removedBlobRows || summary.deletedOrphanFiles)) {
+        console.log(`[dev-server] Blob 一致性恢复完成: ${JSON.stringify(summary)}`);
+      }
+    }
+  } catch (err) {
+    console.warn('[dev-server] Blob consistency recovery failed:', err?.message || err);
+  }
 });

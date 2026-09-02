@@ -3862,48 +3862,76 @@ export class CanvasStore {
   }
 
   // Startup crash-recovery scan reconciling blobs/attachments rows with on-disk files:
-  //  - attachments whose blob file is missing are soft-deleted and their blob refcount released;
-  //  - blob rows with no remaining references are removed;
-  //  - files on disk with no database row are deleted as orphans.
-  recoverBlobConsistency() {
-    const summary = { danglingAttachments: 0, removedBlobRows: 0, deletedOrphanFiles: 0 };
+  //  - attachments whose blob file is missing are soft-deleted, their business bindings
+  //    (inbox attachment pairs, topic attachment pairs, analysis status) cleaned in the
+  //    SAME transaction, and their blob refcount released;
+  //  - blob rows with no remaining references are removed (or zeroed when a soft-deleted
+  //    attachment still holds the foreign key);
+  //  - files on disk with no database row are deleted as orphans ONLY after a grace
+  //    period, so files promoted by an in-flight import (promoted before its DB write)
+  //    are never reaped by a concurrent scan.
+  // Must only be invoked by the instance that holds the listen port.
+  recoverBlobConsistency({ orphanGraceMs = 15 * 60 * 1000 } = {}) {
+    const summary = {
+      danglingAttachments: 0, removedBlobRows: 0, zeroedBlobRows: 0, deletedOrphanFiles: 0,
+      sparedRecentOrphans: 0, clearedInboxBindings: 0, clearedTopicBindings: 0, staledTopicAnalyses: 0
+    };
     const blobDir = this.getBlobStorageDir();
 
-    // 1. Dangling attachments -> blob file missing
-    const dangling = this.db.prepare(`
-      SELECT a.id AS attachment_id, b.sha256 AS sha256, b.relative_path AS relative_path
-      FROM attachments a JOIN blobs b ON b.sha256 = a.blob_hash
-      WHERE a.deleted_at IS NULL
-    `).all();
+    // Phase 1+2 run in one transaction together with business-layer cleanup.
     const missingHashes = new Set();
-    for (const row of dangling) {
-      const filePath = path.resolve(blobDir, row.relative_path);
-      if (fs.existsSync(filePath)) continue;
-      missingHashes.add(row.sha256);
-      const timestamp = nowIso();
-      this.db.prepare(`
-        UPDATE attachments SET deleted_at = ?, version = version + 1, updated_at = ?
-        WHERE id = ? AND deleted_at IS NULL
-      `).run(timestamp, timestamp, row.attachment_id);
-      summary.danglingAttachments++;
-    }
+    this.transaction(() => {
+      const dangling = this.db.prepare(`
+        SELECT a.id AS attachment_id, b.sha256 AS sha256, b.relative_path AS relative_path
+        FROM attachments a JOIN blobs b ON b.sha256 = a.blob_hash
+        WHERE a.deleted_at IS NULL
+      `).all();
+      for (const row of dangling) {
+        const filePath = path.resolve(blobDir, row.relative_path);
+        if (fs.existsSync(filePath)) continue;
+        missingHashes.add(row.sha256);
+        const timestamp = nowIso();
+        this.db.prepare(`
+          UPDATE attachments SET deleted_at = ?, version = version + 1, updated_at = ?
+          WHERE id = ? AND deleted_at IS NULL
+        `).run(timestamp, timestamp, row.attachment_id);
+        summary.danglingAttachments++;
 
-    // 2. Release blob rows for missing files when no attachment row remains (soft-deleted
-    //    attachments still hold a foreign key, so those blobs are zeroed instead of deleted).
-    for (const sha256 of missingHashes) {
-      const anyAttachments = this.db.prepare(`
-        SELECT 1 FROM attachments WHERE blob_hash = ? LIMIT 1
-      `).get(sha256);
-      if (!anyAttachments) {
-        this.db.prepare('DELETE FROM blobs WHERE sha256 = ?').run(sha256);
-        summary.removedBlobRows++;
-      } else {
-        this.db.prepare('UPDATE blobs SET reference_count = 0 WHERE sha256 = ?').run(sha256);
-        summary.zeroedBlobRows = (summary.zeroedBlobRows || 0) + 1;
+        // Business binding 1: inbox entries referencing this attachment lose the atomic pair.
+        summary.clearedInboxBindings += this.db.prepare(`
+          UPDATE inbox_entries SET attachment_key = NULL, attachment_version = NULL, updated_at = ?
+          WHERE attachment_key = ? AND attachment_key IS NOT NULL
+        `).run(timestamp, row.attachment_id).changes;
+
+        // Business binding 2: analyses bound to this vanished attachment turn stale FIRST
+        // (matched while attachment_key still identifies the binding), then the pair is cleared.
+        summary.staledTopicAnalyses += this.db.prepare(`
+          UPDATE topic_documents SET analysis_status = 'stale', version = version + 1, updated_at = ?
+          WHERE attachment_key = ? AND analysis_status IN ('ready', 'running')
+        `).run(timestamp, row.attachment_id).changes;
+        summary.clearedTopicBindings += this.db.prepare(`
+          UPDATE topic_documents SET attachment_key = NULL, attachment_version = NULL, updated_at = ?
+          WHERE attachment_key = ? AND attachment_key IS NOT NULL
+        `).run(timestamp, row.attachment_id).changes;
       }
-    }
 
-    // 3. Orphan files with no database row
+      // Release blob rows for missing files when no attachment row remains (soft-deleted
+      // attachments still hold a foreign key, so those blobs are zeroed instead of deleted).
+      for (const sha256 of missingHashes) {
+        const anyAttachments = this.db.prepare(`
+          SELECT 1 FROM attachments WHERE blob_hash = ? LIMIT 1
+        `).get(sha256);
+        if (!anyAttachments) {
+          this.db.prepare('DELETE FROM blobs WHERE sha256 = ?').run(sha256);
+          summary.removedBlobRows++;
+        } else {
+          this.db.prepare('UPDATE blobs SET reference_count = 0 WHERE sha256 = ?').run(sha256);
+          summary.zeroedBlobRows++;
+        }
+      }
+    });
+
+    // Phase 3 (file system only): orphan files with no database row, past the grace period.
     const walk = (dir) => {
       let entries = [];
       try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return []; }
@@ -3920,13 +3948,22 @@ export class CanvasStore {
       for (const filePath of walk(blobRoot)) {
         const sha256 = path.basename(filePath).replace(/\.pdf$/i, '');
         const row = this.db.prepare('SELECT 1 FROM blobs WHERE sha256 = ?').get(sha256);
-        if (!row) {
-          try { fs.unlinkSync(filePath); summary.deletedOrphanFiles++; } catch {}
-        }
+        if (row) continue;
+        try {
+          const ageMs = Date.now() - fs.statSync(filePath).mtimeMs;
+          if (ageMs < orphanGraceMs) {
+            summary.sparedRecentOrphans++;
+            continue;
+          }
+          fs.unlinkSync(filePath);
+          summary.deletedOrphanFiles++;
+        } catch {}
       }
     }
 
-    if (summary.danglingAttachments || summary.removedBlobRows || summary.deletedOrphanFiles) {
+    const touched = summary.danglingAttachments || summary.removedBlobRows || summary.zeroedBlobRows
+      || summary.deletedOrphanFiles || summary.clearedInboxBindings || summary.clearedTopicBindings;
+    if (touched) {
       console.warn(`[blob-consistency] recovered: ${JSON.stringify(summary)}`);
     }
     return summary;

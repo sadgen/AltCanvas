@@ -871,6 +871,34 @@
 | M1 原生 PDF 基础单文献闭环 | **PASS (完成)** | 独立 local 认证、原生流式上传、去重、Range 文件流服务、Reader 批注持久化、全文理解与证据转批注 |
 | M1.5 Native Core Integration | **PASS (关闭)** | 主线与 Native 核心全量合流，Schema v12 双谱系幂等迁移，Native 确立为默认核心，Altero 降级为可选 Provider |
 | M2 统一导入管线 | **PASS (完成)** | 规范化多源导入、优先级去重链（含文库维度 external_refs）、模糊/冲突防静默合并、PDF 两阶段安全下载、import_jobs 完整状态机与逐项报告 |
+---
+
+## 2026-09-02 会话（M2 终审三轮整改：恢复竞态、业务绑定清理、排他提升与契约封堵）
+
+### 修复清单
+
+1. **[P1] 恢复扫描竞态消除**：
+   - `recoverBlobConsistency` 不再在 `createCanvasHandler`（每次建处理器）时执行，改为**仅在 dev-server 成功取得监听权后**由主实例执行——竞争实例在 `EADDRINUSE` 优雅退出前绝不触达扫描；
+   - 孤儿文件增加 **15 分钟宽限期**（按 mtime）：导入中"已提升未提交"的文件绝不会被并发扫描误删；
+   - 确定性交错测试：提升文件 → 并发扫描（零删除）→ DB 写入 → 文件与引用**同时存活**。
+   - **重复拉起源根治**：定位到 systemd 用户单元 `altcanvas.service`（`Restart=always, RestartSec=3`，此前累计 2547 次竞争启动）；已停用手工 nohup 实例，由 systemd 独占守护，journal 干净、单实例、零新增端口冲突。
+2. **[P1] 恢复悬挂附件的业务层绑定清理（同事务）**：软删除附件时原子清理 `inbox_entries.attachment_key/version` 原子对、`topic_documents.attachment_key/version`，并将绑定该附件的 `ready/running` 分析置 `stale`；行为测试断言收件箱对清空、主题对清空、分析状态 stale。
+3. **[P2] 真正排他的原子提升**：`defaultPromoteBlob` 改用 `linkSync`（EEXIST 即并发失败方）+ `EXDEV` 回退 `copyFileSync(COPYFILE_EXCL)`；并发测试断言同一内容两次提升**恰好一次** `newlyCreated: true` 且失败方临时文件被清理。
+4. **[P2] 契约旁路封堵**：显式 `pdfUrl` 非 http(s)（`file:`/`ftp:` 等）直接 400；客户端 `resolved` 全量纳入同一规范化器（`abstractNote/sourceType/doi/url/pdfUrl/arxivId` 类型与长度、`pdfUrl` 协议、`creators` 数组）；`year`（含 `resolved.year`）必须为 1400–2200 整数；7 类非法载荷 400 且零文档/零任务残留。
+
+### 测试新增/更新
+- 一致性扫描：悬挂数据库附件 + 收件箱/主题绑定清理 + stale 分析 + 新旧孤儿区分（aged 删除 / fresh 宽限保留）+ 幂等终扫；
+- 交错安全：promote → scan → DB write 全链路双向存活；
+- 排他提升：双提升者单赢家；
+- 契约封堵：`file://`/`ftp://` pdfUrl、非法 year（类型/越界）、超长 `resolved.abstractNote`、非法 `resolved.pdfUrl`、批量 file:// 全部 400。
+- `npm test` 7 套全过；`git diff --check` 通过。
+
+### 待人工实机验证（human-in-loop，关闭 M2 前置条件）
+1. 刷新 AltCanvas 页面，打开含 PDF 来源卡片的画板；
+2. 点击卡片上的 **[🔍 核验]** 打开证据浮层，确认标题/页码/摘录正常、无 console 报错；
+3. 回复"完成"后由 Agent 复查 `.debug/browser.log` 确认无 `getCachedDocumentMeta` 新错误。
+
+---
 
 ## 2026-09-02 会话（P1 Native Library Routing & Capability Isolation 修复）
 

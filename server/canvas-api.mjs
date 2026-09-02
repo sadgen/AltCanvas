@@ -1177,16 +1177,41 @@ function actorFromRequest(req) {
   return actorKey ? { actorKey, session } : null;
 }
 
-function defaultPromoteBlob(store, tempFilePath, sha256) {
-  const targetBlobPath = store.resolveBlobPath(sha256, '.pdf');
+function defaultPromoteBlob(store, tempFilePath, sha256) {  const targetBlobPath = store.resolveBlobPath(sha256, '.pdf');
   fs.mkdirSync(path.dirname(targetBlobPath), { recursive: true, mode: 0o700 });
-  if (fs.existsSync(targetBlobPath)) {
-    try { fs.unlinkSync(tempFilePath); } catch {}
-    return { targetBlobPath, relativePath: path.relative(store.getBlobStorageDir(), targetBlobPath), newlyCreated: false };
+  const relativePath = path.relative(store.getBlobStorageDir(), targetBlobPath);
+
+  const removeTemp = () => { try { fs.unlinkSync(tempFilePath); } catch {} };
+
+  // Exclusive, atomic promotion: hard link fails with EEXIST if a concurrent promoter
+  // already created the target, so exactly one caller can ever observe newlyCreated=true.
+  try {
+    fs.linkSync(tempFilePath, targetBlobPath);
+    removeTemp();
+    fs.chmodSync(targetBlobPath, 0o600);
+    return { targetBlobPath, relativePath, newlyCreated: true };
+  } catch (err) {
+    if (err.code === 'EEXIST') {
+      removeTemp();
+      return { targetBlobPath, relativePath, newlyCreated: false };
+    }
+    if (err.code === 'EXDEV') {
+      // Cross-device fallback: exclusive copy, never overwriting an existing target.
+      try {
+        fs.copyFileSync(tempFilePath, targetBlobPath, fs.constants.COPYFILE_EXCL);
+        removeTemp();
+        fs.chmodSync(targetBlobPath, 0o600);
+        return { targetBlobPath, relativePath, newlyCreated: true };
+      } catch (copyErr) {
+        if (copyErr.code === 'EEXIST') {
+          removeTemp();
+          return { targetBlobPath, relativePath, newlyCreated: false };
+        }
+        throw copyErr;
+      }
+    }
+    throw err;
   }
-  fs.renameSync(tempFilePath, targetBlobPath);
-  fs.chmodSync(targetBlobPath, 0o600);
-  return { targetBlobPath, relativePath: path.relative(store.getBlobStorageDir(), targetBlobPath), newlyCreated: true };
 }
 
 // Compensate a promoted blob after a non-write outcome: remove the file only when the
@@ -1224,6 +1249,43 @@ function normalizeNativeImportItem(item, indexLabel = 'item') {
   }
   if (rawTitle !== undefined && (typeof rawTitle !== 'string' || rawTitle.length > 500)) {
     throw new TypeError(`${indexLabel}.title must be a string of at most 500 characters`);
+  }
+
+  // Client-supplied `resolved` objects go through the SAME contract as top-level fields.
+  if (resolved) {
+    const RESOLVED_LIMITS = { abstractNote: 20_000, sourceType: 64, doi: 2000, url: 2000, pdfUrl: 2000, arxivId: 64 };
+    for (const [field, maxLen] of Object.entries(RESOLVED_LIMITS)) {
+      if (resolved[field] !== undefined && resolved[field] !== null) {
+        if (typeof resolved[field] !== 'string') {
+          throw new TypeError(`${indexLabel}.resolved.${field} must be a string`);
+        }
+        if (resolved[field].length > maxLen) {
+          throw new TypeError(`${indexLabel}.resolved.${field} must be at most ${maxLen} characters`);
+        }
+      }
+    }
+    if (resolved.pdfUrl && !/^https?:\/\//i.test(resolved.pdfUrl)) {
+      throw new TypeError(`${indexLabel}.resolved.pdfUrl must be an http(s) URL`);
+    }
+    if (resolved.creators !== undefined && !Array.isArray(resolved.creators)) {
+      throw new TypeError(`${indexLabel}.resolved.creators must be an array`);
+    }
+  }
+
+  const validateYear = (value, label) => {
+    if (value === undefined || value === null) return;
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < 1400 || value > 2200) {
+      throw new TypeError(`${label} must be an integer between 1400 and 2200`);
+    }
+  };
+  validateYear(item.year, `${indexLabel}.year`);
+  validateYear(resolved?.year, `${indexLabel}.resolved.year`);
+
+  // An explicitly provided pdfUrl that is not http(s) is a contract violation, never a
+  // silent metadata-only degradation.
+  if (item.pdfUrl !== undefined && item.pdfUrl !== null && String(item.pdfUrl).trim() !== ''
+    && !/^https?:\/\//i.test(String(item.pdfUrl))) {
+    throw new TypeError(`${indexLabel}.pdfUrl must be an http(s) URL`);
   }
 
   const FIELD_LIMITS = { abstract: 20_000, pdfUrl: 2000, isbn: 64, arxivId: 64, doi: 2000, url: 2000, sourceType: 64, input: 2000 };
@@ -1434,6 +1496,9 @@ async function executeNativeImportItem(store, actorKey, normalized, {
   return { result, warning };
 }
 
+// Exported for direct concurrency testing of the exclusive promotion primitive.
+export { defaultPromoteBlob };
+
 export function createCanvasHandler(store, {
   aiCompletion = requestAiCompletion,
   aiPublicConfig = getAiPublicConfig,
@@ -1443,11 +1508,10 @@ export function createCanvasHandler(store, {
   promoteBlobFn = defaultPromoteBlob,
 } = {}) {
   recoverQueuedAndRunningJobs(store);
-  try {
-    if (typeof store.recoverBlobConsistency === 'function') store.recoverBlobConsistency();
-  } catch (err) {
-    console.warn('Blob consistency recovery failed:', err.message);
-  }
+  // NOTE: recoverBlobConsistency is intentionally NOT invoked here. It must only run on
+  // the instance that holds the listen port (see scripts/dev-server.mjs), after bind
+  // succeeds — otherwise a competing startup could reap files that an in-flight import
+  // has promoted but not yet committed to the database.
 
   return async function handleCanvasApi(req, res, url) {
     const actor = actorFromRequest(req);

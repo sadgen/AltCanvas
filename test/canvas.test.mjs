@@ -6,7 +6,7 @@ import os from 'os';
 import path from 'path';
 import { DatabaseSync } from 'node:sqlite';
 import { CanvasConflictError, CanvasNotFoundError, CanvasStore, canvasActorKey } from '../server/canvas-store.mjs';
-import { createCanvasHandler, fetchAllUpstreamItems, recoverQueuedAndRunningJobs } from '../server/canvas-api.mjs';
+import { createCanvasHandler, fetchAllUpstreamItems, recoverQueuedAndRunningJobs, defaultPromoteBlob } from '../server/canvas-api.mjs';
 import { createSession, destroySession } from '../server/session.mjs';
 
 class MockResponse extends EventEmitter {
@@ -3738,11 +3738,15 @@ try {
     assert.equal(store.getBlob(dbFailHash), null, 'No blob row may remain after DB write failure');
   }
 
-  // 9h. Startup blob/DB consistency recovery (isolated data directory)
+  // 9h. Startup blob/DB consistency recovery (isolated data directory):
+  // business-layer cleanup + orphan grace period + in-flight interleave safety
   {
     const consistencyDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-blob-consistency-'));
     const consistencyStore = new CanvasStore(path.join(consistencyDir, 'consistency.sqlite'));
     const cActor = canvasActorKey('https://issuer.example', 'consistency-actor');
+
+    // Workspace + document + dangling attachment whose blob file does not exist
+    const cWs = consistencyStore.createWorkspace(cActor, { name: 'Consistency Topic' });
     const doc = consistencyStore.createDocument(cActor, { title: 'Dangling Doc' });
     const ghostHash = 'a'.repeat(64);
     consistencyStore.db.prepare(`
@@ -3754,26 +3758,123 @@ try {
       VALUES ('att-dangling', ?, ?, 'application/pdf', 'ghost.pdf', 'Ghost', 10, 1, '2026-09-02T00:00:00.000Z', '2026-09-02T00:00:00.000Z')
     `).run(doc.id, ghostHash);
 
-    const orphanPath = consistencyStore.resolveBlobPath('b'.repeat(64), '.pdf');
-    fs.mkdirSync(path.dirname(orphanPath), { recursive: true, mode: 0o700 });
-    fs.writeFileSync(orphanPath, '%PDF-1.7 orphan', { mode: 0o600 });
+    // Business bindings referencing the dangling attachment
+    consistencyStore.upsertInboxEntries(cActor, [{
+      libraryType: 'native', libraryId: 'local', itemKey: doc.id,
+      attachmentKey: 'att-dangling', attachmentVersion: 3,
+      detectedFrom: 'import:doi', title: 'Dangling Doc'
+    }]);
+    consistencyStore.addTopicDocument(cActor, cWs.id, {
+      libraryType: 'native', libraryId: 'local', itemKey: doc.id,
+      attachmentKey: 'att-dangling', attachmentVersion: 3,
+      status: 'accepted', origin: 'canvas_import'
+    });
+    consistencyStore.db.prepare(`
+      UPDATE topic_documents SET analysis_status = 'ready' WHERE item_key = ?
+    `).run(doc.id);
+
+    // Orphan files: one AGED (must be reaped), one FRESH (must be spared by grace period)
+    const agedOrphanPath = consistencyStore.resolveBlobPath('b'.repeat(64), '.pdf');
+    fs.mkdirSync(path.dirname(agedOrphanPath), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(agedOrphanPath, '%PDF-1.7 aged orphan', { mode: 0o600 });
+    const oldTime = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    fs.utimesSync(agedOrphanPath, oldTime, oldTime);
+
+    const freshOrphanPath = consistencyStore.resolveBlobPath('c'.repeat(64), '.pdf');
+    fs.mkdirSync(path.dirname(freshOrphanPath), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(freshOrphanPath, '%PDF-1.7 fresh orphan', { mode: 0o600 });
 
     const summary = consistencyStore.recoverBlobConsistency();
     assert.equal(summary.danglingAttachments, 1, 'Dangling attachment must be detected');
     assert.equal(summary.zeroedBlobRows, 1, 'Ghost blob with soft-deleted FK holder must be zeroed (not hard-deleted)');
     assert.equal(consistencyStore.getBlob(ghostHash).referenceCount, 0, 'Zeroed blob must report refcount 0');
-    assert.equal(summary.deletedOrphanFiles, 1, 'Orphan file without DB row must be deleted');
-    assert.ok(!fs.existsSync(orphanPath), 'Orphan file must be deleted from disk');
+    assert.equal(summary.clearedInboxBindings, 1, 'Inbox attachment pair must be cleared');
+    assert.equal(summary.clearedTopicBindings, 1, 'Topic attachment pair must be cleared');
+    assert.equal(summary.staledTopicAnalyses, 1, 'Ready analysis must be marked stale');
+    assert.equal(summary.deletedOrphanFiles, 1, 'AGED orphan file must be deleted');
+    assert.equal(summary.sparedRecentOrphans, 1, 'FRESH orphan file must be spared by grace period');
+    assert.ok(!fs.existsSync(agedOrphanPath), 'Aged orphan must be gone');
+    assert.ok(fs.existsSync(freshOrphanPath), 'Fresh orphan must survive the grace period');
 
     const attAfter = consistencyStore.getAttachment(cActor, 'att-dangling');
     assert.equal(attAfter, null, 'Soft-deleted dangling attachment must no longer be returned');
+    const inboxAfter = consistencyStore.listInboxEntries(cActor, { limit: 10 })
+      .find(e => e.itemKey === doc.id);
+    assert.equal(inboxAfter.attachmentKey, null, 'Inbox entry must lose the dangling attachment binding');
+    const topicAfter = consistencyStore.listTopicDocuments(cActor, cWs.id)[0];
+    assert.equal(topicAfter.attachmentKey, null, 'Topic document must lose the dangling attachment binding');
+    assert.equal(topicAfter.analysisStatus, 'stale', 'Analysis status must become stale after recovery');
 
-    // Idempotency: a second scan finds nothing
-    const second = consistencyStore.recoverBlobConsistency();
-    assert.equal(second.danglingAttachments + second.removedBlobRows + second.deletedOrphanFiles, 0);
+    // In-flight interleave safety: promote a file, run a concurrent recovery scan
+    // (file present, DB row absent), then commit the DB write. Both must survive.
+    const inflightContent = Buffer.from('%PDF-1.7 in-flight import');
+    const inflightHash = crypto.createHash('sha256').update(inflightContent).digest('hex');
+    const inflightTemp = path.join(consistencyStore.getBlobStorageDir(), 'tmp', 'inflight.tmp');
+    fs.mkdirSync(path.dirname(inflightTemp), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(inflightTemp, inflightContent, { mode: 0o600 });
+    const promotion = defaultPromoteBlob(consistencyStore, inflightTemp, inflightHash);
+    assert.equal(promotion.newlyCreated, true);
+
+    const raceScan = consistencyStore.recoverBlobConsistency();
+    const inflightPath = consistencyStore.resolveBlobPath(inflightHash, '.pdf');
+    assert.ok(fs.existsSync(inflightPath), 'Concurrent scan must NOT reap an in-flight (grace-period) promoted file');
+    assert.equal(raceScan.deletedOrphanFiles, 0, 'No deletions allowed during the race window');
+
+    const inflightResult = consistencyStore.importNativeDocument(cActor, {
+      sourceType: 'manual',
+      title: 'In-flight Import Paper',
+      attachment: {
+        sha256: inflightHash,
+        relativePath: promotion.relativePath,
+        sizeBytes: inflightContent.length,
+        mimeType: 'application/pdf',
+        originalFilename: 'inflight.pdf'
+      }
+    });
+    assert.equal(inflightResult.outcome, 'created');
+    assert.ok(inflightResult.attachment, 'Attachment must be linked after the interleaved write');
+    assert.ok(fs.existsSync(inflightPath), 'File and DB reference must BOTH survive the interleaving');
+
+    // Exclusive promotion: a second promoter of the same content must lose the race
+    const secondTemp = path.join(consistencyStore.getBlobStorageDir(), 'tmp', 'second.tmp');
+    fs.writeFileSync(secondTemp, inflightContent, { mode: 0o600 });
+    const secondPromotion = defaultPromoteBlob(consistencyStore, secondTemp, inflightHash);
+    assert.equal(secondPromotion.newlyCreated, false, 'Exactly one concurrent promoter may win');
+    assert.ok(!fs.existsSync(secondTemp), 'Losing promoter temp file must be removed');
+    assert.ok(fs.existsSync(inflightPath), 'Winning file must remain intact');
+
+    // Idempotency: a final scan finds nothing actionable
+    const finalScan = consistencyStore.recoverBlobConsistency();
+    assert.equal(finalScan.danglingAttachments + finalScan.removedBlobRows + finalScan.zeroedBlobRows + finalScan.deletedOrphanFiles, 0);
     consistencyStore.close();
     fs.rmSync(consistencyDir, { recursive: true, force: true });
   }
+
+  // 9i-bis. Contract bypass closures: non-http pdfUrl, invalid years, oversized resolved fields
+  {
+    const docsBefore = store.listDocuments(m2Actor, {}).length;
+    const jobsBefore = store.db.prepare('SELECT COUNT(*) AS c FROM import_jobs').get().c;
+    const badSinglePayloads = [
+      { sourceType: 'manual', title: 'File Protocol Paper', pdfUrl: 'file:///etc/passwd' },
+      { sourceType: 'manual', title: 'FTP Protocol Paper', pdfUrl: 'ftp://example.org/x.pdf' },
+      { sourceType: 'manual', title: 'Bad Year Paper', year: 99999 },
+      { sourceType: 'manual', title: 'Bad Year Type', year: 'twenty' },
+      { sourceType: 'manual', title: 'Bad Resolved Year', resolved: { sourceType: 'doi', title: 'R', year: 'abc' } },
+      { sourceType: 'manual', title: 'Bad Resolved Abstract', resolved: { sourceType: 'doi', title: 'R', abstractNote: 'x'.repeat(20_001) } },
+      { sourceType: 'manual', title: 'Bad Resolved PdfUrl', resolved: { sourceType: 'doi', title: 'R', pdfUrl: 'gopher://x' } }
+    ];
+    for (const payload of badSinglePayloads) {
+      const res = await call(handler, '/canvas/imports/native', { method: 'POST', cookie, body: payload });
+      assert.equal(res.statusCode, 400, `Contract bypass must 400: ${JSON.stringify(payload).slice(0, 90)}`);
+    }
+    const badBatchPayload = { items: [{ title: 'Batch File Protocol', pdfUrl: 'file:///etc/passwd' }] };
+    const batchRes = await call(handler, '/canvas/imports/native/batch', { method: 'POST', cookie, body: badBatchPayload });
+    assert.equal(batchRes.statusCode, 400, 'Batch non-http pdfUrl must 400');
+    assert.equal(store.listDocuments(m2Actor, {}).length, docsBefore, 'No documents may be created by rejected payloads');
+    assert.equal(store.db.prepare('SELECT COUNT(*) AS c FROM import_jobs').get().c, jobsBefore, 'No jobs may be created by rejected payloads');
+  }
+
+  // 10. HTTP API: Cancel import job
 
   // 9i. Deep pre-validation rejects malformed nested structures without creating any job
   {
