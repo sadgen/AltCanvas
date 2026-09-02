@@ -769,8 +769,8 @@
 | 里程碑 | 状态 | 说明 |
 |---|---|---|
 | M1 原生 PDF 基础单文献闭环 | **PASS (完成)** | 独立 local 认证、原生流式上传、去重、Range 文件流服务、Reader 批注持久化、全文理解与证据转批注 |
-| M1 审计整改与深层防御闭环 | **PASS (完成)** | P0 认证隔离、P0 原生打开链路贯通、resetCurrentDocumentState 原子清空、严格 closing boundary 截断拦截、孤儿 Blob 回滚补偿、背压错误生命周期、重复上传主题关联全覆盖 |
-| M2 统一导入管线 | `PENDING` | 下一阶段目标：规范化多源导入（DOI/arXiv/URL/PDF/RIS/BibTeX）与合并策略 |
+| M1.5 Native Core Integration | **PASS (关闭)** | 主线与 Native 核心全量合流，Schema v12 双谱系幂等迁移，Native 确立为默认核心，Altero 降级为可选 Provider |
+| M2 统一导入管线 | `就绪 (待启动)` | 下一阶段目标：规范化多源导入（DOI/arXiv/URL/PDF/RIS/BibTeX）与合并策略 |
 | M3 Translation Server 集成 | `PENDING` | 下一阶段目标：内部解析组件集成与 SSRF 安全隔离 |
 | M4 Altero/Zotero 外部迁移器 | `PENDING` | 幂等一次性迁移 |
 | M5 AltCanvas Capture 浏览器扩展 | `PENDING` | 独立扩展仓库 |
