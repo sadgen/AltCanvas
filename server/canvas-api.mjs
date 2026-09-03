@@ -18,6 +18,44 @@ import {
 import { getSession, getSessionIdFromRequest } from './session.mjs';
 import { getAiPublicConfig, requestAiCompletion, validateAiEndpoint } from './ai-provider.mjs';
 import { resolveImportInput, findDuplicateCandidates, safeDownloadPdfFile } from './import-resolver.mjs';
+import { NativePathError, openFileInsideRoot } from './native-fs.mjs';
+
+// M4: server-configured library roots. Format: JSON array
+// [{"path": "/data/library", "name": "研究文库"}] or a semicolon separated
+// list of "path|name" entries (name optional). Clients cannot register roots.
+export function parseNativeLibraryRootsConfig(env = process.env) {
+  const raw = (env.NATIVE_LIBRARY_ROOTS || '').trim();
+  if (!raw) return [];
+  if (raw.startsWith('[')) {
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new Error('NATIVE_LIBRARY_ROOTS must be valid JSON when it starts with "["');
+    }
+    if (!Array.isArray(parsed)) throw new Error('NATIVE_LIBRARY_ROOTS JSON must be an array');
+    return parsed.map(entry => {
+      if (!entry || typeof entry.path !== 'string' || !path.isAbsolute(entry.path)) {
+        throw new Error('NATIVE_LIBRARY_ROOTS entries must use absolute paths');
+      }
+      return {
+        absolutePath: path.resolve(entry.path),
+        displayName: typeof entry.name === 'string' && entry.name.trim() ? entry.name.trim().slice(0, 200) : path.basename(entry.path)
+      };
+    });
+  }
+  return raw.split(';').map(chunk => chunk.trim()).filter(Boolean).map(chunk => {
+    const [rawPath, rawName] = chunk.split('|');
+    if (!rawPath || !path.isAbsolute(rawPath.trim())) {
+      throw new Error('NATIVE_LIBRARY_ROOTS entries must use absolute paths');
+    }
+    const abs = path.resolve(rawPath.trim());
+    return {
+      absolutePath: abs,
+      displayName: rawName && rawName.trim() ? rawName.trim().slice(0, 200) : path.basename(abs)
+    };
+  });
+}
 
 const MAX_BODY_BYTES = Number(process.env.MAX_CANVAS_BODY_BYTES || 512 * 1024);
 const MAX_DOCUMENT_BODY_BYTES = Number(process.env.MAX_AI_DOCUMENT_BODY_BYTES || 768 * 1024);
@@ -1941,6 +1979,14 @@ export function createCanvasHandler(store, {
         return;
       }
 
+      // --- Native Library Roots (M4) ---
+      if (pathname === '/canvas/native/library-roots' && method === 'GET') {
+        const configuredRoots = parseNativeLibraryRootsConfig();
+        const roots = store.ensureLibraryRootsFromConfig(actor.actorKey, configuredRoots);
+        json(res, 200, { data: roots });
+        return;
+      }
+
       // --- Native Documents List & CRUD ---
       if (pathname === '/canvas/native/documents' && method === 'GET') {
         const search = url.searchParams.get('search') || undefined;
@@ -1988,113 +2034,157 @@ export function createCanvasHandler(store, {
       }
 
       // --- Native Attachment File Streaming with HTTP Range ---
+      // Unified across managed blobs (M1) and library-root source files (M4).
       match = /^\/canvas\/native\/attachments\/([0-9a-f-]+)\/file$/.exec(pathname);
       if (match && ['GET', 'HEAD'].includes(method)) {
         const attachmentId = match[1];
-        const attWithBlob = store.getAttachmentWithBlob(actor.actorKey, attachmentId);
-        if (!attWithBlob) {
+        const content = store.getAttachmentContent(actor.actorKey, attachmentId);
+        if (!content) {
           error(res, 404, 'not_found', 'Attachment not found');
           return;
         }
 
-        const blobFilePath = path.resolve(store.getBlobStorageDir(), attWithBlob.blob.relativePath);
-        if (!fs.existsSync(blobFilePath)) {
-          error(res, 404, 'file_not_found', 'Attachment file not found on disk');
-          return;
+        // Open a read handle before emitting headers: this validates that the
+        // backing file exists and (for source files) rejects symlink escapes.
+        let readContext;
+        try {
+          if (content.kind === 'source_file') {
+            const opened = openFileInsideRoot(content.sourceFile.rootAbsolutePath, content.sourceFile.relativePath);
+            let released = false;
+            readContext = {
+              fileSize: opened.stat.size,
+              createStream: (start, end) => fs.createReadStream('', { fd: opened.fd, start, end, autoClose: false }),
+              release: () => {
+                if (released) return;
+                released = true;
+                try { fs.closeSync(opened.fd); } catch {}
+              }
+            };
+          } else {
+            const blobFilePath = content.filePath;
+            if (!fs.existsSync(blobFilePath)) {
+              error(res, 404, 'file_not_found', 'Attachment file not found on disk');
+              return;
+            }
+            const stat = fs.statSync(blobFilePath);
+            readContext = {
+              fileSize: stat.size,
+              createStream: (start, end) => fs.createReadStream(blobFilePath, { start, end }),
+              release: () => {}
+            };
+          }
+        } catch (err) {
+          if (err instanceof NativePathError) {
+            const status = err.code === 'file_not_found' || err.code === 'symlink_rejected' ? 404 : 400;
+            error(res, status, err.code, 'Attachment file is not readable');
+            return;
+          }
+          throw err;
         }
 
-        const stat = fs.statSync(blobFilePath);
-        const fileSize = stat.size;
-        const blobEtag = `W/"${attWithBlob.blob.sha256}"`;
+        try {
+          const fileSize = readContext.fileSize;
+          const contentEtag = `W/"${content.sha256}"`;
 
-        const ifNoneMatch = req.headers['if-none-match'];
-        if (ifNoneMatch && (ifNoneMatch === blobEtag || ifNoneMatch === `"${attWithBlob.blob.sha256}"` || ifNoneMatch === '*')) {
-          res.writeHead(304, {
-            'ETag': blobEtag,
-            'Cache-Control': 'private, max-age=86400',
-            'Accept-Ranges': 'bytes'
-          });
-          res.end();
-          return;
-        }
-
-        const rangeHeader = req.headers['range'];
-        if (!rangeHeader) {
-          res.writeHead(200, {
-            'Content-Type': attWithBlob.blob.mimeType || 'application/pdf',
-            'Content-Length': fileSize,
-            'Accept-Ranges': 'bytes',
-            'ETag': blobEtag,
-            'Cache-Control': 'private, max-age=86400',
-            'Content-Disposition': `inline; filename="${encodeURIComponent(attWithBlob.attachment.originalFilename || 'document.pdf')}"`
-          });
-          if (method === 'HEAD') {
+          const ifNoneMatch = req.headers['if-none-match'];
+          if (ifNoneMatch && (ifNoneMatch === contentEtag || ifNoneMatch === `"${content.sha256}"` || ifNoneMatch === '*')) {
+            readContext.release();
+            res.writeHead(304, {
+              'ETag': contentEtag,
+              'Cache-Control': 'private, max-age=86400',
+              'Accept-Ranges': 'bytes'
+            });
             res.end();
             return;
           }
-          fs.createReadStream(blobFilePath).pipe(res);
-          return;
-        }
 
-        // Parse Range header
-        const rangeMatch = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader.trim());
-        if (!rangeMatch) {
-          res.writeHead(416, {
-            'Content-Range': `bytes */${fileSize}`,
-            'Content-Type': 'text/plain'
-          });
-          res.end('416 Range Not Satisfiable');
-          return;
-        }
+          const baseHeaders = {
+            'Content-Type': content.mimeType || 'application/pdf',
+            'Accept-Ranges': 'bytes',
+            'ETag': contentEtag,
+            'Cache-Control': 'private, max-age=86400',
+            'Content-Disposition': `inline; filename="${encodeURIComponent(content.fileName || 'document.pdf')}"`
+          };
 
-        let start;
-        let end;
-        if (rangeMatch[1] === '' && rangeMatch[2] !== '') {
-          const suffix = Number(rangeMatch[2]);
-          if (suffix <= 0) {
+          const streamRange = (start, end) => {
+            const stream = readContext.createStream(start, end);
+            stream.on('close', () => readContext.release());
+            res.on('close', () => readContext.release());
+            return stream;
+          };
+
+          const rangeHeader = req.headers['range'];
+          if (!rangeHeader) {
+            res.writeHead(200, { ...baseHeaders, 'Content-Length': fileSize });
+            if (method === 'HEAD') {
+              readContext.release();
+              res.end();
+              return;
+            }
+            streamRange(0, fileSize - 1).pipe(res);
+            return;
+          }
+
+          // Parse Range header
+          const rangeMatch = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader.trim());
+          if (!rangeMatch) {
+            res.writeHead(416, {
+              'Content-Range': `bytes */${fileSize}`,
+              'Content-Type': 'text/plain'
+            });
+            res.end('416 Range Not Satisfiable');
+            return;
+          }
+
+          let start;
+          let end;
+          if (rangeMatch[1] === '' && rangeMatch[2] !== '') {
+            const suffix = Number(rangeMatch[2]);
+            if (suffix <= 0) {
+              res.writeHead(416, { 'Content-Range': `bytes */${fileSize}`, 'Content-Type': 'text/plain' });
+              res.end('416 Range Not Satisfiable');
+              return;
+            }
+            start = Math.max(0, fileSize - suffix);
+            end = fileSize - 1;
+          } else if (rangeMatch[1] !== '' && rangeMatch[2] === '') {
+            start = Number(rangeMatch[1]);
+            end = fileSize - 1;
+          } else if (rangeMatch[1] !== '' && rangeMatch[2] !== '') {
+            start = Number(rangeMatch[1]);
+            end = Number(rangeMatch[2]);
+          } else {
             res.writeHead(416, { 'Content-Range': `bytes */${fileSize}`, 'Content-Type': 'text/plain' });
             res.end('416 Range Not Satisfiable');
             return;
           }
-          start = Math.max(0, fileSize - suffix);
-          end = fileSize - 1;
-        } else if (rangeMatch[1] !== '' && rangeMatch[2] === '') {
-          start = Number(rangeMatch[1]);
-          end = fileSize - 1;
-        } else if (rangeMatch[1] !== '' && rangeMatch[2] !== '') {
-          start = Number(rangeMatch[1]);
-          end = Number(rangeMatch[2]);
-        } else {
-          res.writeHead(416, { 'Content-Range': `bytes */${fileSize}`, 'Content-Type': 'text/plain' });
-          res.end('416 Range Not Satisfiable');
-          return;
-        }
 
-        if (isNaN(start) || isNaN(end) || start < 0 || start > end || start >= fileSize || end >= fileSize) {
-          res.writeHead(416, {
-            'Content-Range': `bytes */${fileSize}`,
-            'Content-Type': 'text/plain'
+          if (isNaN(start) || isNaN(end) || start < 0 || start > end || start >= fileSize || end >= fileSize) {
+            res.writeHead(416, {
+              'Content-Range': `bytes */${fileSize}`,
+              'Content-Type': 'text/plain'
+            });
+            res.end('416 Range Not Satisfiable');
+            return;
+          }
+
+          const chunkLength = end - start + 1;
+          res.writeHead(206, {
+            ...baseHeaders,
+            'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+            'Content-Length': chunkLength
           });
-          res.end('416 Range Not Satisfiable');
+          if (method === 'HEAD') {
+            readContext.release();
+            res.end();
+            return;
+          }
+          streamRange(start, end).pipe(res);
           return;
+        } catch (err) {
+          readContext.release();
+          throw err;
         }
-
-        const chunkLength = end - start + 1;
-        res.writeHead(206, {
-          'Content-Type': attWithBlob.blob.mimeType || 'application/pdf',
-          'Content-Range': `bytes ${start}-${end}/${fileSize}`,
-          'Content-Length': chunkLength,
-          'Accept-Ranges': 'bytes',
-          'ETag': blobEtag,
-          'Cache-Control': 'private, max-age=86400',
-          'Content-Disposition': `inline; filename="${encodeURIComponent(attWithBlob.attachment.originalFilename || 'document.pdf')}"`
-        });
-        if (method === 'HEAD') {
-          res.end();
-          return;
-        }
-        fs.createReadStream(blobFilePath, { start, end }).pipe(res);
-        return;
       }
 
       // --- Native Annotations ---

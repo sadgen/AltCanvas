@@ -2,6 +2,9 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { DatabaseSync } from 'node:sqlite';
+import { resolveInsideRoot } from './native-fs.mjs';
+
+export const SOURCE_FILE_STATUSES = new Set(['active', 'duplicate', 'missing', 'unreadable', 'trashed']);
 
 const NODE_TYPES = new Set([
   'annotation', 'manual_note', 'zotero_item', 'attachment', 'image', 'ai_output', 'group'
@@ -463,6 +466,8 @@ function attachmentRow(row) {
     id: row.id,
     documentId: row.document_id,
     blobHash: row.blob_hash,
+    storageKind: row.storage_kind || 'managed_blob',
+    sourceFileId: row.source_file_id,
     mimeType: row.mime_type,
     originalFilename: row.original_filename,
     title: row.title,
@@ -505,6 +510,64 @@ function externalRefRow(row) {
     externalVersion: row.external_version,
     sourceUrl: row.source_url,
     importedAt: row.imported_at
+  };
+}
+
+function libraryRootRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    ownerKey: row.owner_key,
+    displayName: row.display_name,
+    absolutePath: row.absolute_path,
+    scanEnabled: row.scan_enabled === 1,
+    lastScanAt: row.last_scan_at,
+    lastScanStatus: row.last_scan_status,
+    version: row.version,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function sourceFileRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    ownerKey: row.owner_key,
+    rootId: row.root_id,
+    documentId: row.document_id,
+    attachmentId: row.attachment_id,
+    relativePath: row.relative_path,
+    filename: row.filename,
+    sha256: row.sha256,
+    sizeBytes: row.size_bytes,
+    modifiedAt: row.modified_at,
+    lastSeenAt: row.last_seen_at,
+    status: row.status,
+    version: row.version,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    missingAt: row.missing_at,
+    trashedAt: row.trashed_at
+  };
+}
+
+function fileOperationRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    ownerKey: row.owner_key,
+    operationType: row.operation_type,
+    sourceFileId: row.source_file_id,
+    sourcePath: row.source_path,
+    targetPath: row.target_path,
+    state: row.state,
+    payload: parseJson(row.payload_json) || {},
+    errorCode: row.error_code,
+    startedAt: row.started_at,
+    completedAt: row.completed_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
   };
 }
 
@@ -680,17 +743,23 @@ function ensureNativeCoreTables(db) {
     CREATE TABLE IF NOT EXISTS attachments (
       id TEXT PRIMARY KEY,
       document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
-      blob_hash TEXT NOT NULL REFERENCES blobs(sha256),
+      blob_hash TEXT REFERENCES blobs(sha256),
       mime_type TEXT NOT NULL DEFAULT 'application/pdf',
       original_filename TEXT NOT NULL DEFAULT '',
       title TEXT NOT NULL DEFAULT '',
       source_url TEXT,
       size_bytes INTEGER NOT NULL DEFAULT 0,
       page_count INTEGER,
+      storage_kind TEXT NOT NULL DEFAULT 'managed_blob' CHECK (storage_kind IN ('managed_blob', 'source_file')),
+      source_file_id TEXT REFERENCES source_files(id),
       version INTEGER NOT NULL DEFAULT 1,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
-      deleted_at TEXT
+      deleted_at TEXT,
+      CHECK (
+        (storage_kind = 'managed_blob' AND blob_hash IS NOT NULL AND source_file_id IS NULL)
+        OR (storage_kind = 'source_file' AND blob_hash IS NULL AND source_file_id IS NOT NULL)
+      )
     ) STRICT;
 
     CREATE TABLE IF NOT EXISTS annotations (
@@ -735,6 +804,112 @@ function ensureNativeCoreTables(db) {
       completed_at TEXT
     ) STRICT;
   `);
+}
+
+// --- M4: Schema v13 native library manager ---
+
+function ensureM4LibraryTables(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS library_roots (
+      id TEXT PRIMARY KEY,
+      owner_key TEXT NOT NULL,
+      display_name TEXT NOT NULL,
+      absolute_path TEXT NOT NULL,
+      scan_enabled INTEGER NOT NULL DEFAULT 1 CHECK (scan_enabled IN (0, 1)),
+      last_scan_at TEXT,
+      last_scan_status TEXT CHECK (last_scan_status IS NULL OR last_scan_status IN ('running', 'ok', 'failed')),
+      version INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      deleted_at TEXT
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS source_files (
+      id TEXT PRIMARY KEY,
+      owner_key TEXT NOT NULL,
+      root_id TEXT NOT NULL REFERENCES library_roots(id),
+      document_id TEXT REFERENCES documents(id),
+      attachment_id TEXT REFERENCES attachments(id),
+      relative_path TEXT NOT NULL,
+      filename TEXT NOT NULL,
+      sha256 TEXT,
+      size_bytes INTEGER NOT NULL DEFAULT 0,
+      modified_at INTEGER,
+      last_seen_at TEXT,
+      status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'duplicate', 'missing', 'unreadable', 'trashed')),
+      version INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      missing_at TEXT,
+      trashed_at TEXT,
+      deleted_at TEXT
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS file_operations (
+      id TEXT PRIMARY KEY,
+      owner_key TEXT NOT NULL,
+      operation_type TEXT NOT NULL CHECK (operation_type IN ('file.import', 'file.rename', 'file.move', 'file.trash', 'file.restore', 'file.delete_permanent', 'library.scan', 'library.reconcile')),
+      source_file_id TEXT,
+      source_path TEXT,
+      target_path TEXT,
+      state TEXT NOT NULL DEFAULT 'queued' CHECK (state IN ('queued', 'running', 'completed', 'failed', 'rolled_back')),
+      payload_json TEXT NOT NULL DEFAULT '{}',
+      error_code TEXT,
+      started_at TEXT,
+      completed_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    ) STRICT;
+  `);
+}
+
+// v13 lets an attachment be backed either by the immutable managed blob store
+// (existing rows) or directly by a file inside a library root. SQLite cannot
+// drop a NOT NULL constraint in place, so the table is rebuilt following the
+// official 12-step procedure; the constructor runs migrations with foreign
+// key enforcement off, and integrity is asserted via foreign_key_check after.
+function ensureM4AttachmentStorageKinds(db) {
+  const cols = db.prepare('PRAGMA table_info(attachments)').all();
+  if (!cols.length) return; // fresh DB: ensureNativeCoreTables already creates the v13 shape
+  const colByName = new Map(cols.map(c => [c.name, c]));
+  const blobNullable = colByName.get('blob_hash')?.notnull === 0;
+  const hasStorageKind = colByName.has('storage_kind');
+  const hasSourceFileId = colByName.has('source_file_id');
+  if (blobNullable && hasStorageKind && hasSourceFileId) return;
+
+  const legacyIndexes = db.prepare("SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='attachments' AND sql IS NOT NULL").all();
+  db.exec(`
+    CREATE TABLE attachments_v13 (
+      id TEXT PRIMARY KEY,
+      document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+      blob_hash TEXT REFERENCES blobs(sha256),
+      mime_type TEXT NOT NULL DEFAULT 'application/pdf',
+      original_filename TEXT NOT NULL DEFAULT '',
+      title TEXT NOT NULL DEFAULT '',
+      source_url TEXT,
+      size_bytes INTEGER NOT NULL DEFAULT 0,
+      page_count INTEGER,
+      storage_kind TEXT NOT NULL DEFAULT 'managed_blob' CHECK (storage_kind IN ('managed_blob', 'source_file')),
+      source_file_id TEXT REFERENCES source_files(id),
+      version INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      deleted_at TEXT,
+      CHECK (
+        (storage_kind = 'managed_blob' AND blob_hash IS NOT NULL AND source_file_id IS NULL)
+        OR (storage_kind = 'source_file' AND blob_hash IS NULL AND source_file_id IS NOT NULL)
+      )
+    ) STRICT;
+    INSERT INTO attachments_v13
+      (id, document_id, blob_hash, mime_type, original_filename, title, source_url, size_bytes, page_count, version, created_at, updated_at, deleted_at)
+    SELECT id, document_id, blob_hash, mime_type, original_filename, title, source_url, size_bytes, page_count, version, created_at, updated_at, deleted_at
+    FROM attachments;
+    DROP TABLE attachments;
+    ALTER TABLE attachments_v13 RENAME TO attachments;
+  `);
+  for (const idx of legacyIndexes) {
+    if (idx.sql) db.exec(idx.sql);
+  }
 }
 
 function ensureAllIndexes(db) {
@@ -880,6 +1055,28 @@ function ensureAllIndexes(db) {
   if (tableExists('import_jobs')) {
     db.exec("CREATE INDEX IF NOT EXISTS import_jobs_owner_idx ON import_jobs(owner_key, state, created_at);");
   }
+  if (tableExists('library_roots')) {
+    db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS library_roots_owner_path_idx ON library_roots(owner_key, absolute_path) WHERE deleted_at IS NULL;
+      CREATE INDEX IF NOT EXISTS library_roots_owner_idx ON library_roots(owner_key, deleted_at, updated_at);
+    `);
+  }
+  if (tableExists('source_files')) {
+    db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS source_files_owner_path_idx ON source_files(owner_key, root_id, relative_path) WHERE deleted_at IS NULL;
+      CREATE INDEX IF NOT EXISTS source_files_owner_sha_idx ON source_files(owner_key, sha256);
+      CREATE INDEX IF NOT EXISTS source_files_document_idx ON source_files(document_id);
+      CREATE INDEX IF NOT EXISTS source_files_attachment_idx ON source_files(attachment_id);
+      CREATE INDEX IF NOT EXISTS source_files_scan_idx ON source_files(owner_key, status, last_seen_at);
+    `);
+  }
+  if (tableExists('file_operations')) {
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS file_operations_state_idx ON file_operations(state, operation_type);
+      CREATE INDEX IF NOT EXISTS file_operations_owner_idx ON file_operations(owner_key, created_at);
+      CREATE INDEX IF NOT EXISTS file_operations_source_file_idx ON file_operations(source_file_id);
+    `);
+  }
 }
 
 export class CanvasStore {
@@ -911,7 +1108,7 @@ export class CanvasStore {
       ) STRICT;
     `);
     const current = this.db.prepare('SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations').get().version;
-    if (current > 12) {
+    if (current > 13) {
       throw new Error(`Canvas database schema ${current} is newer than this server supports`);
     }
     if (current < 1) {
@@ -1429,6 +1626,18 @@ export class CanvasStore {
         ensureAllIndexes(this.db);
         this.db.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(12, nowIso());
       });
+    }
+    if (current < 13) {
+      this.transaction(() => {
+        ensureM4LibraryTables(this.db);
+        ensureM4AttachmentStorageKinds(this.db);
+        ensureAllIndexes(this.db);
+        this.db.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(13, nowIso());
+      });
+      const violations = this.db.prepare('PRAGMA foreign_key_check').all();
+      if (violations.length > 0) {
+        throw new Error(`Schema v13 migration left foreign key violations: ${JSON.stringify(violations.slice(0, 5))}`);
+      }
     }
   }
 
@@ -4512,6 +4721,286 @@ export class CanvasStore {
       return this.getImportJob(actorKey, jobId);
     }
     return this.updateImportJob(actorKey, jobId, { state: 'cancelled' });
+  }
+
+  // ============================================================
+  // --- M4: library roots, source files, file operations ---
+  // ============================================================
+
+  // Syncs server-configured library roots (NATIVE_LIBRARY_ROOTS) for a user.
+  // Clients have no endpoint to register arbitrary absolute paths.
+  ensureLibraryRootsFromConfig(actorKey, roots) {
+    const timestamp = nowIso();
+    this.transaction(() => {
+      for (const root of roots) {
+        const absolutePath = path.resolve(root.absolutePath);
+        const displayName = String(root.displayName || path.basename(absolutePath)).trim().slice(0, 200) || path.basename(absolutePath);
+        const existing = this.db.prepare(
+          'SELECT * FROM library_roots WHERE owner_key = ? AND absolute_path = ? AND deleted_at IS NULL'
+        ).get(actorKey, absolutePath);
+        if (existing) {
+          if (existing.display_name !== displayName) {
+            this.db.prepare('UPDATE library_roots SET display_name = ?, updated_at = ? WHERE id = ?')
+              .run(displayName, timestamp, existing.id);
+          }
+          continue;
+        }
+        this.db.prepare(`
+          INSERT INTO library_roots (id, owner_key, display_name, absolute_path, scan_enabled, created_at, updated_at)
+          VALUES (?, ?, ?, ?, 1, ?, ?)
+        `).run(id(), actorKey, displayName, absolutePath, timestamp, timestamp);
+      }
+    });
+    return this.listLibraryRoots(actorKey);
+  }
+
+  listLibraryRoots(actorKey) {
+    return this.db.prepare(
+      'SELECT * FROM library_roots WHERE owner_key = ? AND deleted_at IS NULL ORDER BY created_at ASC'
+    ).all(actorKey).map(libraryRootRow);
+  }
+
+  getLibraryRoot(actorKey, rootId) {
+    return libraryRootRow(this.db.prepare(
+      'SELECT * FROM library_roots WHERE id = ? AND owner_key = ? AND deleted_at IS NULL'
+    ).get(rootId, actorKey));
+  }
+
+  requireLibraryRoot(actorKey, rootId) {
+    const root = this.getLibraryRoot(actorKey, rootId);
+    if (!root) throw new CanvasNotFoundError('library root not found');
+    return root;
+  }
+
+  setLibraryRootScanState(actorKey, rootId, { status, at = null } = {}) {
+    this.requireLibraryRoot(actorKey, rootId);
+    this.db.prepare('UPDATE library_roots SET last_scan_status = ?, last_scan_at = COALESCE(?, last_scan_at), updated_at = ? WHERE id = ?')
+      .run(status, at, nowIso(), rootId);
+    return this.getLibraryRoot(actorKey, rootId);
+  }
+
+  createSourceFile(actorKey, rootId, {
+    relativePath,
+    filename,
+    sha256 = null,
+    sizeBytes = 0,
+    modifiedAt = null,
+    status = 'active',
+    documentId = null,
+    attachmentId = null,
+    lastSeenAt = null
+  }) {
+    const sourceFileId = id();
+    const timestamp = nowIso();
+    this.db.prepare(`
+      INSERT INTO source_files
+        (id, owner_key, root_id, document_id, attachment_id, relative_path, filename,
+         sha256, size_bytes, modified_at, last_seen_at, status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      sourceFileId, actorKey, rootId, documentId, attachmentId,
+      relativePath, filename, sha256, sizeBytes, modifiedAt,
+      lastSeenAt || timestamp, status, timestamp, timestamp
+    );
+    return this.getSourceFile(actorKey, sourceFileId);
+  }
+
+  getSourceFile(actorKey, sourceFileId) {
+    return sourceFileRow(this.db.prepare(
+      'SELECT * FROM source_files WHERE id = ? AND owner_key = ? AND deleted_at IS NULL'
+    ).get(sourceFileId, actorKey));
+  }
+
+  requireSourceFile(actorKey, sourceFileId) {
+    const sourceFile = this.getSourceFile(actorKey, sourceFileId);
+    if (!sourceFile) throw new CanvasNotFoundError('source file not found');
+    return sourceFile;
+  }
+
+  getSourceFileByPath(actorKey, rootId, relativePath) {
+    return sourceFileRow(this.db.prepare(`
+      SELECT * FROM source_files
+      WHERE owner_key = ? AND root_id = ? AND relative_path = ? AND deleted_at IS NULL
+    `).get(actorKey, rootId, relativePath));
+  }
+
+  listSourceFilesBySha(actorKey, sha256) {
+    if (!sha256) return [];
+    return this.db.prepare(`
+      SELECT * FROM source_files WHERE owner_key = ? AND sha256 = ? AND deleted_at IS NULL ORDER BY relative_path ASC
+    `).all(actorKey, sha256).map(sourceFileRow);
+  }
+
+  listSourceFiles(actorKey, { rootId = null, status = null, limit = 200, offset = 0 } = {}) {
+    const clauses = ['owner_key = ?', 'deleted_at IS NULL'];
+    const params = [actorKey];
+    if (rootId) { clauses.push('root_id = ?'); params.push(rootId); }
+    if (status) { clauses.push('status = ?'); params.push(status); }
+    params.push(Math.max(0, Math.min(1000, limit)), Math.max(0, offset));
+    return this.db.prepare(`
+      SELECT * FROM source_files WHERE ${clauses.join(' AND ')}
+      ORDER BY root_id, relative_path ASC LIMIT ? OFFSET ?
+    `).all(...params).map(sourceFileRow);
+  }
+
+  // Full scan inventory of a root (not-deleted, non-trashed rows) used for
+  // incremental diffing; scanner compares this against the live directory.
+  listRootSourceFilesForScan(actorKey, rootId) {
+    return this.db.prepare(`
+      SELECT * FROM source_files
+      WHERE owner_key = ? AND root_id = ? AND deleted_at IS NULL AND status != 'trashed'
+      ORDER BY relative_path ASC
+    `).all(actorKey, rootId).map(sourceFileRow);
+  }
+
+  // Applies scanner-discovered facts to a source_files row. Version is
+  // incremented so concurrent scans conflict visibly instead of interleaving.
+  updateSourceFile(actorKey, sourceFileId, changes = {}) {
+    const current = this.requireSourceFile(actorKey, sourceFileId);
+    const timestamp = nowIso();
+    const next = {
+      relativePath: changes.relativePath !== undefined ? changes.relativePath : current.relativePath,
+      filename: changes.filename !== undefined ? changes.filename : current.filename,
+      sha256: changes.sha256 !== undefined ? changes.sha256 : current.sha256,
+      sizeBytes: changes.sizeBytes !== undefined ? changes.sizeBytes : current.sizeBytes,
+      modifiedAt: changes.modifiedAt !== undefined ? changes.modifiedAt : current.modifiedAt,
+      lastSeenAt: changes.lastSeenAt !== undefined ? changes.lastSeenAt : current.lastSeenAt,
+      status: changes.status !== undefined ? changes.status : current.status,
+      documentId: changes.documentId !== undefined ? changes.documentId : current.documentId,
+      attachmentId: changes.attachmentId !== undefined ? changes.attachmentId : current.attachmentId,
+      missingAt: changes.missingAt !== undefined ? changes.missingAt : current.missingAt,
+      trashedAt: changes.trashedAt !== undefined ? changes.trashedAt : current.trashedAt
+    };
+    this.db.prepare(`
+      UPDATE source_files SET
+        relative_path = ?, filename = ?, sha256 = ?, size_bytes = ?, modified_at = ?,
+        last_seen_at = ?, status = ?, document_id = ?, attachment_id = ?,
+        missing_at = ?, trashed_at = ?, version = version + 1, updated_at = ?
+      WHERE id = ? AND owner_key = ? AND deleted_at IS NULL
+    `).run(
+      next.relativePath, next.filename, next.sha256, next.sizeBytes, next.modifiedAt,
+      next.lastSeenAt, next.status, next.documentId, next.attachmentId,
+      next.missingAt, next.trashedAt, timestamp, sourceFileId, actorKey
+    );
+    return this.getSourceFile(actorKey, sourceFileId);
+  }
+
+  linkSourceFileToDocument(actorKey, sourceFileId, { documentId, attachmentId }) {
+    return this.updateSourceFile(actorKey, sourceFileId, { documentId, attachmentId });
+  }
+
+  // --- File operations (persistent operation log with crash compensation) ---
+
+  createFileOperation(actorKey, { operationType, sourceFileId = null, sourcePath = null, targetPath = null, payload = {} }) {
+    const fileOpId = id();
+    const timestamp = nowIso();
+    this.db.prepare(`
+      INSERT INTO file_operations
+        (id, owner_key, operation_type, source_file_id, source_path, target_path, state, payload_json, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)
+    `).run(fileOpId, actorKey, operationType, sourceFileId, sourcePath, targetPath, JSON.stringify(payload || {}), timestamp, timestamp);
+    return this.getFileOperation(actorKey, fileOpId);
+  }
+
+  getFileOperation(actorKey, fileOpId) {
+    return fileOperationRow(this.db.prepare(
+      'SELECT * FROM file_operations WHERE id = ? AND owner_key = ?'
+    ).get(fileOpId, actorKey));
+  }
+
+  startFileOperation(fileOpId) {
+    const timestamp = nowIso();
+    this.db.prepare(`
+      UPDATE file_operations SET state = 'running', started_at = COALESCE(started_at, ?), updated_at = ?
+      WHERE id = ? AND state IN ('queued', 'running')
+    `).run(timestamp, timestamp, fileOpId);
+  }
+
+  completeFileOperation(fileOpId) {
+    const timestamp = nowIso();
+    this.db.prepare(`
+      UPDATE file_operations SET state = 'completed', completed_at = ?, updated_at = ?
+      WHERE id = ? AND state IN ('queued', 'running')
+    `).run(timestamp, timestamp, fileOpId);
+  }
+
+  failFileOperation(fileOpId, errorCode) {
+    const timestamp = nowIso();
+    this.db.prepare(`
+      UPDATE file_operations SET state = 'failed', error_code = ?, updated_at = ?
+      WHERE id = ? AND state IN ('queued', 'running')
+    `).run(errorCode ? String(errorCode).slice(0, 128) : 'operation_failed', timestamp, fileOpId);
+  }
+
+  markFileOperationRolledBack(fileOpId) {
+    const timestamp = nowIso();
+    this.db.prepare(`
+      UPDATE file_operations SET state = 'rolled_back', error_code = COALESCE(error_code, 'interrupted'), updated_at = ?
+      WHERE id = ? AND state IN ('queued', 'running', 'failed')
+    `).run(timestamp, fileOpId);
+  }
+
+  // Startup recovery: operations that were queued/running when the process
+  // died. The executor decides per type whether to resume or roll back.
+  listResumableFileOperations() {
+    return this.db.prepare(`
+      SELECT * FROM file_operations WHERE state IN ('queued', 'running') ORDER BY created_at ASC
+    `).all().map(fileOperationRow);
+  }
+
+  // Unified attachment content access: Reader, Range serving, full-text
+  // analysis and annotation tooling all resolve bytes through this method and
+  // must not care whether the backing store is the managed blob store or a
+  // file inside a library root.
+  getAttachmentContent(actorKey, attachmentId) {
+    const row = this.db.prepare(`
+      SELECT a.*, d.id AS doc_id, d.title AS doc_title,
+             b.relative_path AS blob_relative_path, b.size_bytes AS blob_size_bytes, b.mime_type AS blob_mime_type,
+             sf.id AS sf_id, sf.relative_path AS sf_relative_path, sf.filename AS sf_filename,
+             sf.sha256 AS sf_sha256, sf.size_bytes AS sf_size_bytes, sf.status AS sf_status,
+             lr.id AS sf_root_id, lr.absolute_path AS sf_root_path
+      FROM attachments a
+      JOIN documents d ON d.id = a.document_id
+      LEFT JOIN blobs b ON b.sha256 = a.blob_hash
+      LEFT JOIN source_files sf ON sf.id = a.source_file_id AND sf.deleted_at IS NULL
+      LEFT JOIN library_roots lr ON lr.id = sf.root_id AND lr.deleted_at IS NULL
+      WHERE a.id = ? AND d.owner_key = ? AND a.deleted_at IS NULL AND d.deleted_at IS NULL
+    `).get(attachmentId, actorKey);
+    if (!row) return null;
+    const attachment = attachmentRow(row);
+    const document = { id: row.doc_id, title: row.doc_title };
+    if (attachment.storageKind === 'source_file') {
+      if (!row.sf_id || !row.sf_root_path) return null;
+      return {
+        kind: 'source_file',
+        attachment,
+        document,
+        sha256: row.sf_sha256,
+        mimeType: attachment.mimeType || 'application/pdf',
+        sizeBytes: row.sf_size_bytes,
+        fileName: row.sf_filename,
+        sourceFile: {
+          id: row.sf_id,
+          rootId: row.sf_root_id,
+          rootAbsolutePath: row.sf_root_path,
+          relativePath: row.sf_relative_path,
+          status: row.sf_status
+        }
+      };
+    }
+    if (!row.blob_relative_path) return null;
+    const blobDir = this.getBlobStorageDir();
+    return {
+      kind: 'managed_blob',
+      attachment,
+      document,
+      sha256: row.blob_hash,
+      mimeType: row.blob_mime_type || attachment.mimeType || 'application/pdf',
+      sizeBytes: row.blob_size_bytes,
+      fileName: attachment.originalFilename || 'document.pdf',
+      blob: { relativePath: row.blob_relative_path },
+      filePath: resolveInsideRoot(blobDir, row.blob_relative_path)
+    };
   }
 }
 

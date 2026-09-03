@@ -1107,7 +1107,7 @@ try {
 
     const migratedStore = new CanvasStore(v2DbPath);
     const maxV = migratedStore.db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v;
-    assert.equal(maxV, 12, 'Database must be upgraded to schema v12');
+    assert.equal(maxV, 13, 'Database must be upgraded to schema v13');
 
     // Verify document_metas table and methods
     const savedMeta = migratedStore.saveDocumentMeta(actor, {
@@ -1252,7 +1252,7 @@ try {
 
     const migratedV5Store = new CanvasStore(v5DbPath);
     const maxV = migratedV5Store.db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v;
-    assert.equal(maxV, 12, 'Database must be upgraded from v5 to v12');
+    assert.equal(maxV, 13, 'Database must be upgraded from v5 to v13');
 
     const v5Analysis = migratedV5Store.getDocumentAnalysis(actor, {
       libraryType: 'user', libraryId: '42', attachmentKey: 'ATT_V5', attachmentVersion: 1, model: 'gpt-4o', promptVersion: 'v1'
@@ -1335,7 +1335,7 @@ try {
 
     const migratedV7Store = new CanvasStore(v7DbPath);
     const maxV = migratedV7Store.db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v;
-    assert.equal(maxV, 12, 'Database must be upgraded from v7 to v12');
+    assert.equal(maxV, 13, 'Database must be upgraded from v7 to v13');
 
     // Assert existing knowledge relations were 100% preserved
     const rels = migratedV7Store.listKnowledgeRelations(actor);
@@ -1383,7 +1383,7 @@ try {
 
     const migratedV10Store = new CanvasStore(v10DbPath);
     const maxV10 = migratedV10Store.db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v;
-    assert.equal(maxV10, 12, 'Database must be upgraded from v10 to v12');
+    assert.equal(maxV10, 13, 'Database must be upgraded from v10 to v13');
 
     const migratedEdge = migratedV10Store.getEdge(actor, 'e-v10-1');
     assert.ok(migratedEdge);
@@ -1631,7 +1631,7 @@ try {
 
     const migratedV11Store = new CanvasStore(v11LineageDbPath);
     const maxV11 = migratedV11Store.db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v;
-    assert.equal(maxV11, 12, 'Genuine V11 DB must upgrade to schema v12 without errors on soft-deleted history');
+    assert.equal(maxV11, 13, 'Genuine V11 DB must upgrade to schema v13 without errors on soft-deleted history');
 
     // 1. Assert foreign key consistency across entire migrated schema
     const fkCheck = migratedV11Store.db.prepare('PRAGMA foreign_key_check').all();
@@ -1716,13 +1716,13 @@ try {
     migratedV11Store.close();
     const reopenedV11Store = new CanvasStore(v11LineageDbPath);
     const reopenedMaxV = reopenedV11Store.db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v;
-    assert.equal(reopenedMaxV, 12, 'Reopening must maintain version 12');
+    assert.equal(reopenedMaxV, 13, 'Reopening must maintain version 13');
     reopenedV11Store.close();
   } finally {
     fs.rmSync(v11LineageDir, { recursive: true, force: true });
   }
 
-  // --- Lineage Test 2b: Future Schema v13 DB must be rejected BEFORE any modifications ---
+  // --- Lineage Test 2b: Future Schema v14 DB must be rejected BEFORE any modifications ---
   const v13Dir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-v13-future-test-'));
   const v13DbPath = path.join(v13Dir, 'canvas-v13.sqlite');
   try {
@@ -1730,7 +1730,7 @@ try {
     rawV13.exec(`
       CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL) STRICT;
       INSERT INTO schema_migrations (version, applied_at) VALUES (1, '2026-08-30T00:00:00.000Z');
-      INSERT INTO schema_migrations (version, applied_at) VALUES (13, '2026-09-02T00:00:00.000Z');
+      INSERT INTO schema_migrations (version, applied_at) VALUES (14, '2026-09-02T00:00:00.000Z');
       CREATE TABLE custom_future_table (id TEXT PRIMARY KEY) STRICT;
     `);
     rawV13.close();
@@ -1738,7 +1738,7 @@ try {
     // CanvasStore must reject without executing DDL
     assert.throws(() => {
       new CanvasStore(v13DbPath);
-    }, /Canvas database schema 13 is newer than this server supports/);
+    }, /Canvas database schema 14 is newer than this server supports/);
 
     // Verify DB was NOT modified
     const inspectV13 = new DatabaseSync(v13DbPath);
@@ -1787,7 +1787,7 @@ try {
 
     const migratedNativeStore = new CanvasStore(nativeV10DbPath);
     const maxNativeV10 = migratedNativeStore.db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v;
-    assert.equal(maxNativeV10, 12, 'Native V10 DB must upgrade to schema v12');
+    assert.equal(maxNativeV10, 13, 'Native V10 DB must upgrade to schema v13');
 
     // Verify native data preserved
     assert.equal(migratedNativeStore.getDocument(actor, 'doc-native-v10').title, 'Native V10 Document');
@@ -1818,7 +1818,7 @@ try {
     const store1 = new CanvasStore(v12IdemDbPath);
     const v1 = store1.db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v;
     const migCount1 = store1.db.prepare('SELECT COUNT(*) AS c FROM schema_migrations').get().c;
-    assert.equal(v1, 12);
+    assert.equal(v1, 13);
     store1.createUser({ username: 'idem_user', password: 'Password123!' });
     store1.createWorkspace(actor, { name: 'Idempotency Workspace' });
     store1.close();
@@ -1827,7 +1827,7 @@ try {
     const store2 = new CanvasStore(v12IdemDbPath);
     const v2 = store2.db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v;
     const migCount2 = store2.db.prepare('SELECT COUNT(*) AS c FROM schema_migrations').get().c;
-    assert.equal(v2, 12, 'Version must remain 12 after restart');
+    assert.equal(v2, 13, 'Version must remain 13 after restart');
     assert.equal(migCount2, migCount1, 'Migrations count must remain identical');
     assert.ok(store2.hasUsers());
     assert.equal(store2.listWorkspaces(actor).length, 1);
@@ -1838,7 +1838,7 @@ try {
 
   // --- Schema v12: Topics, Topic Documents, Collection Bindings, Inbox, Jobs, Document Analyses, Document Metas, Knowledge Units & Relations, Edge Origins, Native Core ---
   const currentMigration = store.db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v;
-  assert.equal(currentMigration, 12, 'Schema migration version 12 must be applied');
+  assert.equal(currentMigration, 13, 'Schema migration version 13 must be applied');
 
   // Topic workspace with metadata
   const topic1 = store.createWorkspace(actor, {
