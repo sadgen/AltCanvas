@@ -1446,6 +1446,156 @@ assert.match(html, /config\.authMode === 'altero' &&\s*config\.capabilities\?\.e
   assert.equal(openNativeDocCalled.att.id, 'att-uni-1');
 }
 
+// Behavioral Test: Quick-Import UI multiline keyboard interactions, badges, 503/400 errors, and ISBN retention
+{
+  const resolveQuickImportMatch = html.match(/async function resolveQuickImport\(\) \{([\s\S]*?)\n    \}/);
+  const executeQuickImportMatch = html.match(/async function executeQuickImport\(targetWorkspaceId = null, confirmFuzzy = false\) \{([\s\S]*?)\n    \}/);
+  assert.ok(resolveQuickImportMatch && executeQuickImportMatch, 'Quick import functions must exist');
+
+  // 1. Keyboard event handling on #input-quick-import-query
+  const keydownMatch = html.match(/document\.getElementById\('input-quick-import-query'\)\?\.addEventListener\('keydown',\s*event\s*=>\s*\{([\s\S]*?)\n    \}\);/);
+  assert.ok(keydownMatch, 'input-quick-import-query keydown listener must exist');
+
+  let resolveCalled = false;
+  const keydownRunner = new Function('event', 'resolveQuickImport', keydownMatch[1]);
+
+  // 1a. Single-line Enter triggers resolve and prevents default newline
+  let prevented = false;
+  resolveCalled = false;
+  keydownRunner(
+    { key: 'Enter', ctrlKey: false, metaKey: false, target: { value: '10.1038/s41586' }, preventDefault: () => { prevented = true; } },
+    () => { resolveCalled = true; }
+  );
+  assert.equal(prevented, true, 'Single-line Enter must call preventDefault');
+  assert.equal(resolveCalled, true, 'Single-line Enter must trigger resolveQuickImport');
+
+  // 1b. Multi-line plain Enter retains newline (does NOT trigger resolve, does NOT preventDefault)
+  prevented = false;
+  resolveCalled = false;
+  keydownRunner(
+    { key: 'Enter', ctrlKey: false, metaKey: false, target: { value: '@article{key,\n  title={A}\n}' }, preventDefault: () => { prevented = true; } },
+    () => { resolveCalled = true; }
+  );
+  assert.equal(prevented, false, 'Multi-line plain Enter must NOT call preventDefault (preserves newline)');
+  assert.equal(resolveCalled, false, 'Multi-line plain Enter must NOT trigger resolveQuickImport');
+
+  // 1c. Multi-line Ctrl+Enter or Cmd+Enter triggers resolve
+  prevented = false;
+  resolveCalled = false;
+  keydownRunner(
+    { key: 'Enter', ctrlKey: true, metaKey: false, target: { value: '@article{key,\n  title={A}\n}' }, preventDefault: () => { prevented = true; } },
+    () => { resolveCalled = true; }
+  );
+  assert.equal(prevented, true, 'Multi-line Ctrl+Enter must call preventDefault');
+  assert.equal(resolveCalled, true, 'Multi-line Ctrl+Enter must trigger resolveQuickImport');
+
+  // 2. resolveQuickImport badge and error semantics
+  const runResolve = async (fetchMock) => {
+    const texts = {};
+    const classes = { 'quick-import-result-card': new Set(['hidden']), 'quick-import-duplicate-warning': new Set(['hidden']) };
+    const elements = {};
+    const getEl = (id) => {
+      if (!elements[id]) {
+        elements[id] = {
+          value: '@article{test, title={TS Paper}}',
+          set textContent(v) { texts[id] = v; },
+          get textContent() { return texts[id] || ''; },
+          set innerHTML(v) { texts[`${id}_html`] = v; },
+          classList: {
+            add: (c) => classes[id]?.add(c),
+            remove: (c) => classes[id]?.delete(c),
+            contains: (c) => classes[id]?.has(c) ?? false
+          },
+          disabled: false
+        };
+      }
+      return elements[id];
+    };
+    const toasts = [];
+    const resolveRunner = new Function(
+      'document', 'canvasFetch', 'showToast', 'errorMessage', 'escapeHTML', 'texts', 'elements', 'toasts',
+      `
+      let currentResolvedImport = null;
+      ${resolveQuickImportMatch[0]}
+      return {
+        run: async () => { await resolveQuickImport(); return { currentResolvedImport, texts, elements, toasts }; }
+      };
+      `
+    );
+    return resolveRunner(
+      { getElementById: getEl },
+      fetchMock,
+      (msg, type) => toasts.push({ msg, type }),
+      e => e.message,
+      s => s,
+      texts,
+      elements,
+      toasts
+    ).run();
+  };
+
+  // 2a. Translation Server parsed item shows (TS) badge with purple styling
+  const tsRes = await runResolve(async () => ({
+    resolved: { title: 'TS Paper', sourceType: 'bibtex', creators: [{ name: 'A' }] },
+    duplicateCandidates: [],
+    parsedBy: 'translation_server'
+  }));
+  assert.equal(tsRes.elements['quick-import-source-badge'].textContent, 'BIBTEX (TS)', 'Translation server parse must display (TS) badge');
+  assert.match(tsRes.elements['quick-import-source-badge'].className, /bg-purple-950/, 'Translation server badge must use purple background');
+
+  // 2b. Native resolver parsed item shows clean source badge without (TS)
+  const nativeRes = await runResolve(async () => ({
+    resolved: { title: 'DOI Paper', sourceType: 'doi', creators: [{ name: 'A' }] },
+    duplicateCandidates: [],
+    parsedBy: 'native_resolver'
+  }));
+  assert.equal(nativeRes.elements['quick-import-source-badge'].textContent, 'DOI', 'Native resolver parse must not display (TS)');
+  assert.match(nativeRes.elements['quick-import-source-badge'].className, /bg-indigo-950/, 'Native resolver badge must use indigo background');
+
+  // 2c. 503 error toast surfaces Translation Server unconfigured status
+  const unavail503Res = await runResolve(async () => {
+    const err = new Error('Translation Server 未配置，无法解析 BIBTEX 书目内容');
+    err.status = 503;
+    throw err;
+  });
+  assert.ok(unavail503Res.toasts.some(t => t.msg.includes('Translation Server 未配置')), '503 error toast must mention Translation Server 未配置');
+
+  // 2d. 400 error toast surfaces parse syntax error
+  const err400Res = await runResolve(async () => {
+    const err = new Error('Syntax error on line 4');
+    err.status = 400;
+    throw err;
+  });
+  assert.ok(err400Res.toasts.some(t => t.msg.includes('Syntax error on line 4')), '400 error toast must surface syntax error detail');
+
+  // 3. executeQuickImport preserves resolved.isbn through the fetch payload
+  let postedPayload = null;
+  const execRunner = new Function(
+    'currentResolvedImport', 'document', 'fetch', 'showToast', 'closeQuickImportModal',
+    'loadCollectionsAndLibrary', 'loadInboxEntries', 'errorMessage',
+    `
+    ${executeQuickImportMatch[0]}
+    return executeQuickImport;
+    `
+  );
+  const execFn = execRunner(
+    { title: 'Book With ISBN', isbn: '978-1-4028-9462-6', sourceType: 'ris' },
+    { getElementById: () => ({ disabled: false, classList: { add() {} } }) },
+    async (url, opts) => {
+      postedPayload = JSON.parse(opts.body);
+      return { ok: true, status: 201, json: async () => ({ data: { outcome: 'created' } }) };
+    },
+    () => {},
+    () => {},
+    () => {},
+    () => {},
+    e => e.message
+  );
+  await execFn(null, false);
+  assert.ok(postedPayload, 'executeQuickImport must post payload to /canvas/imports/native');
+  assert.equal(postedPayload.resolved.isbn, '978-1-4028-9462-6', 'Resolved ISBN must be preserved in the POST payload');
+}
+
 assert.match(devServer, /style-src-attr 'unsafe-inline'/, 'CSP must permit dynamic Canvas geometry styles');
 assert.match(devServer, /script-src 'self'/, 'script CSP must remain restricted');
 

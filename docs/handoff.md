@@ -1072,3 +1072,59 @@
    - 增加 Native 收件箱缓存命中/未命中直接打开行为测试（断言 `libraryApiPrefix` 0 调用）；
    - 增加 Native 主题 PDF 解析与 Canvas 来源跳转行为测试（断言 0 Altero 调用）。
    - `npm test` 7 套测试全部通过，`git diff --check` 通过。
+
+---
+
+## 2026-09-03 会话（M3.2 终审整改：1 MiB 输入放宽、规范化 DTO 与 ISBN 流转、TS 错误状态码映射与 UI 行为测试）
+
+### 修复清单（审计 3 个 P1 + 1 个 P2）
+
+1. **[P1] 1 MiB 输入放宽与请求体限额扩大** ([`server/canvas-api.mjs`](file:///home/sadgen/Projects/AltCanvas/server/canvas-api.mjs))：
+   - `FIELD_LIMITS.input` 放宽至 1,048,576 字符（1 MiB）；配置 `MAX_IMPORT_BODY_BYTES = 2 * 1024 * 1024`（2 MiB）覆盖 `/canvas/imports/native`、`/canvas/imports/native/batch`、`/canvas/imports/resolve` 与 `/canvas/imports`；
+   - 解决批量与直接单篇导入中 >2KB BibTeX/RIS 输入被 400 截断拦截的漏洞。
+
+2. **[P1] 统一 DTO 规范化与 ISBN 完整保留** ([`server/canvas-api.mjs`](file:///home/sadgen/Projects/AltCanvas/server/canvas-api.mjs) & [`server/canvas-store.mjs`](file:///home/sadgen/Projects/AltCanvas/server/canvas-store.mjs))：
+   - 抽取并导出 `normalizeResolvedImportMetadata` 作为权威元数据规范化函数：严格限制字段长度、校验 1400–2200 年份整数、实施 `creators <= 100` 数量上限并要求非空姓名、剥离未授权非法字段；
+   - `executeNativeImportItem` 完整接收并流转 `isbn: resolved?.isbn || normalized.isbn || null`，写入 `documents.isbn` 列；
+   - 后续重复导入相同 ISBN 书目能够准确触发 `match.strategy === 'isbn'` 优先级复用。
+
+3. **[P1] Translation Server 运行时故障精确状态码映射** ([`server/import-resolver.mjs`](file:///home/sadgen/Projects/AltCanvas/server/import-resolver.mjs) & [`server/canvas-api.mjs`](file:///home/sadgen/Projects/AltCanvas/server/canvas-api.mjs))：
+   - 在 `resolveImportInput` 与 `executeNativeImportItem` 中彻底消除将 TS 故障静默转换为通用 400 "无法识别输入" 的吞并捕获；
+   - 精确映射并透传 HTTP 状态码与错误代码：
+     - 超时：`504 Gateway Timeout`（`total_timeout`, `connect_timeout`, `response_timeout`）；
+     - 上游/传输/重定向阻断：`502 Bad Gateway`（`upstream_error`, `transport_error`, `redirect_not_allowed`, `forbidden_address`）；
+     - TS 未配置：`503 Service Unavailable`（`translation_server_unavailable`）；
+     - 语法错误：`400 Bad Request`（`translation_server_error`）；
+     - 体积超限：`413 Payload Too Large`（`request_too_large`, `response_too_large`）；
+     - 无法识别的纯文本输入：`400 Bad Request`（`unsupported_import_input`）。
+   - 批量导入中 `appendImportJobItemReport` 持久化记录 `errorCode: itemErr.code`，使任务报告呈现精确错误分类。
+
+4. **[P2] 前端快速导入交互生产行为测试补齐** ([`test/canvas-ui.test.mjs`](file:///home/sadgen/Projects/AltCanvas/test/canvas-ui.test.mjs))：
+   - 针对 `index.html` 真实交互逻辑编写运行时测试：
+     - 单行文本下按 `Enter` 触发解析并阻止默认换行；
+     - 多行文本下按普通 `Enter` 保留换行；
+     - 多行文本下按 `Ctrl+Enter` / `Cmd+Enter` 触发解析；
+     - 验证 `parsedBy === 'translation_server'` 时自适应渲染紫色 `(TS)` 徽标；
+     - 验证 TS 未配置返回 503 时弹出配置提示 toast，语法错误 400 时弹出语法错误 toast；
+     - 验证快速导入在提交给 `/canvas/imports/native` 的 payload 中完整保留并携带 `isbn` 字段。
+
+### 测试验证与覆盖 ([`test/canvas.test.mjs`](file:///home/sadgen/Projects/AltCanvas/test/canvas.test.mjs))
+- 验证 >2KB 长输入在单篇与批量导入均成功入库（解除 2KB 限制）；
+- 验证批处理失败项的 report item 正确记录 `errorCode: 'unsupported_import_input'`；
+- 验证 TS 返回 ISBN 成功写入 document 并在二次导入时按 ISBN 策略命中复用；
+- 验证 `creators > 100` 在写入 DB 前被 400 拦截；
+- 验证 504 `total_timeout`、502 `upstream_error`、400 `translation_server_error` 与 400 `unsupported_import_input` 状态码映射；
+- **全套 8 套自动化测试通过**：
+  - BFF 单元测试 (PASS)
+  - BFF 流程测试 (PASS)
+  - AI 安全测试 (PASS)
+  - Canvas 存储与持久化测试 (PASS)
+  - Canvas UI 结构与行为测试 (PASS)
+  - 开发日志测试 (PASS)
+  - Native M1 最小闭环测试 (PASS)
+  - M3.1 Translation Server 适配测试 (PASS)
+- `git diff --check` 100% 通过。
+
+### 里程碑状态更新
+- **M3.2 统一解析与导入工作流：PASS（正式关闭）**。
+- **下一阶段：M3.3 / M4 准备与交接**。

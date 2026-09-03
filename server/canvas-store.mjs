@@ -4464,6 +4464,7 @@ export class CanvasStore {
         outcome: itemReport.outcome || null,
         matchStrategy: itemReport.matchStrategy || null,
         error: itemReport.error ? String(itemReport.error).slice(0, 500) : null,
+        errorCode: itemReport.errorCode ? String(itemReport.errorCode).slice(0, 64) : (itemReport.error ? 'item_failed' : null),
         warning: itemReport.warning ? String(itemReport.warning).slice(0, 500) : undefined,
         candidates: Array.isArray(itemReport.candidates) ? itemReport.candidates : undefined,
         conflicts: Array.isArray(itemReport.conflicts) ? itemReport.conflicts : undefined,

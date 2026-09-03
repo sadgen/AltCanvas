@@ -525,19 +525,40 @@ export async function resolveImportInput(input, options = {}) {
 
   // 1. Bibliography text (BibTeX, RIS, or explicitly requested format)
   if (format === 'bibtex' || format === 'ris') {
-    const tsRes = await callTs({ input: cleanInput, format }, {
-      config: options.translationServerConfig,
-      lookupFn: options.lookupFn,
-      transportFn: options.transportFn
-    });
+    let tsRes;
+    try {
+      tsRes = await callTs({ input: cleanInput, format }, {
+        config: options.translationServerConfig,
+        lookupFn: options.lookupFn,
+        transportFn: options.transportFn
+      });
+    } catch (tsErr) {
+      if (['total_timeout', 'connect_timeout', 'response_timeout'].includes(tsErr.code)) {
+        tsErr.status = 504;
+        throw tsErr;
+      }
+      if (['upstream_error', 'transport_error', 'redirect_not_allowed', 'forbidden_address', 'invalid_payload'].includes(tsErr.code)) {
+        tsErr.status = 502;
+        throw tsErr;
+      }
+      if (tsErr.code === 'request_too_large' || tsErr.code === 'response_too_large') {
+        tsErr.status = 413;
+        throw tsErr;
+      }
+      tsErr.status = tsErr.status || 502;
+      throw tsErr;
+    }
+
     if (!tsRes.available) {
       const err = new Error(`Translation Server 未配置，无法解析 ${format.toUpperCase()} 书目内容（需配置 TRANSLATION_SERVER_URL）`);
       err.code = 'translation_server_unavailable';
+      err.status = 503;
       throw err;
     }
     if (!tsRes.ok) {
       const err = new Error(`Translation Server 解析失败: ${tsRes.error || '未知错误'}`);
       err.code = 'translation_server_error';
+      err.status = 400;
       throw err;
     }
     const item = tsRes.item;
@@ -578,13 +599,33 @@ export async function resolveImportInput(input, options = {}) {
   }
 
   // 5. Fallback for raw citation text / unrecognized formats via Translation Server
+  let fallbackTs;
   try {
-    const fallbackTs = await callTs({ input: cleanInput, format: options.format || null }, {
+    fallbackTs = await callTs({ input: cleanInput, format: options.format || null }, {
       config: options.translationServerConfig,
       lookupFn: options.lookupFn,
       transportFn: options.transportFn
     });
-    if (fallbackTs.available && fallbackTs.ok && fallbackTs.item?.title) {
+  } catch (tsErr) {
+    // If Translation Server encountered a real runtime/timeout/upstream failure,
+    // do NOT swallow it into "unrecognized input"! Propagate with authoritative HTTP status.
+    if (['total_timeout', 'connect_timeout', 'response_timeout'].includes(tsErr.code)) {
+      tsErr.status = 504;
+      throw tsErr;
+    }
+    if (['upstream_error', 'transport_error', 'redirect_not_allowed', 'forbidden_address', 'invalid_payload'].includes(tsErr.code)) {
+      tsErr.status = 502;
+      throw tsErr;
+    }
+    if (tsErr.code === 'request_too_large' || tsErr.code === 'response_too_large') {
+      tsErr.status = 413;
+      throw tsErr;
+    }
+    throw tsErr;
+  }
+
+  if (fallbackTs && fallbackTs.available) {
+    if (fallbackTs.ok && fallbackTs.item?.title) {
       const item = fallbackTs.item;
       return {
         sourceType: item.sourceType || 'text',
@@ -601,9 +642,18 @@ export async function resolveImportInput(input, options = {}) {
         resolvedBy: 'translation_server'
       };
     }
-  } catch {}
+    if (!fallbackTs.ok && fallbackTs.error) {
+      const err = new Error(`Translation Server 解析失败: ${fallbackTs.error}`);
+      err.code = 'translation_server_error';
+      err.status = 400;
+      throw err;
+    }
+  }
 
-  throw new TypeError('Input could not be recognized as a valid DOI, arXiv identifier, HTTP(S) URL, or supported bibliography format (BibTeX/RIS)');
+  const unsupportedErr = new Error('Input could not be recognized as a valid DOI, arXiv identifier, HTTP(S) URL, or supported bibliography format (BibTeX/RIS)');
+  unsupportedErr.code = 'unsupported_import_input';
+  unsupportedErr.status = 400;
+  throw unsupportedErr;
 }
 
 export function findDuplicateCandidates(store, actorKey, metadata) {

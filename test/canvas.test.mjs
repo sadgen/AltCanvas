@@ -6,7 +6,7 @@ import os from 'os';
 import path from 'path';
 import { DatabaseSync } from 'node:sqlite';
 import { CanvasConflictError, CanvasNotFoundError, CanvasStore, canvasActorKey } from '../server/canvas-store.mjs';
-import { createCanvasHandler, fetchAllUpstreamItems, recoverQueuedAndRunningJobs, defaultPromoteBlob } from '../server/canvas-api.mjs';
+import { createCanvasHandler, fetchAllUpstreamItems, recoverQueuedAndRunningJobs, defaultPromoteBlob, normalizeResolvedImportMetadata } from '../server/canvas-api.mjs';
 import { createSession, destroySession } from '../server/session.mjs';
 
 class MockResponse extends EventEmitter {
@@ -3956,11 +3956,46 @@ try {
   let tsCallCount = 0;
   const mockTsResolver = async ({ input, format }) => {
     tsCallCount++;
+    if (input.includes('TIMEOUT_ERROR')) {
+      const err = new Error('translation task exceeded total timeout of 60000ms');
+      err.code = 'total_timeout';
+      throw err;
+    }
+    if (input.includes('UPSTREAM_ERROR')) {
+      const err = new Error('translation server returned HTTP 502');
+      err.code = 'upstream_error';
+      throw err;
+    }
     if (input.includes('SYNTAX_ERROR')) {
       return {
         available: true,
         ok: false,
         error: 'Syntax error in BibTeX entry at line 2'
+      };
+    }
+    if (input.includes('TOO_MANY_CREATORS')) {
+      return {
+        available: true,
+        ok: true,
+        item: {
+          sourceType: 'bibtex',
+          title: 'Physics Mega Collaboration',
+          creators: Array.from({ length: 101 }, (_, i) => ({ name: `Physicist ${i}` }))
+        }
+      };
+    }
+    if (input.includes('ISBN_BOOK')) {
+      return {
+        available: true,
+        ok: true,
+        item: {
+          sourceType: 'ris',
+          title: 'Operating Systems: Three Easy Pieces',
+          abstract: 'A book about operating systems.',
+          isbn: '978-1-4028-9462-6',
+          year: 2018,
+          creators: [{ firstName: 'Remzi', lastName: 'Arpaci-Dusseau' }]
+        }
       };
     }
     if (format === 'bibtex' && input.includes('@article')) {
@@ -4102,14 +4137,16 @@ try {
   assert.equal(bibtexReimportRes.payload.data.match.strategy, 'sha256', 'Exact same PDF content matches by priority 1 (SHA-256)');
   assert.equal(bibtexReimportRes.payload.data.document.id, bibtexImportHttpRes.payload.data.document.id);
 
-  // 18. M3.2 Batch pipeline with mixed inputs (BibTeX parsed by TS + native DOI + invalid format)
+  // 18. M3.2 Batch pipeline with mixed inputs (BibTeX parsed by TS + native DOI + invalid format + >2KB input)
+  const longBibtexComment = '% '.repeat(2000) + '\n@article{vaswani2017, title={BibTeX Paper in Batch}}';
+  assert.ok(longBibtexComment.length > 3000, 'Batch input should exceed 2KB');
   const mixedBatchRes = await call(tsHandler, '/canvas/imports/native/batch', {
     method: 'POST', cookie,
     body: {
       sourceType: 'batch_mixed',
       targetWorkspaceId: apiTopic.id,
       items: [
-        { input: '@article{vaswani2017, title={BibTeX Paper in Batch}}' },
+        { input: longBibtexComment },
         { title: 'Batch Standalone Paper', doi: '10.9999/batch-mixed-doi' },
         { title: '', input: '123_invalid_cannot_resolve' }
       ]
@@ -4123,6 +4160,86 @@ try {
   assert.equal(mixedBatchRes.payload.data.job.report.items[0].ok, true);
   assert.equal(mixedBatchRes.payload.data.job.report.items[1].ok, true);
   assert.equal(mixedBatchRes.payload.data.job.report.items[2].ok, false);
+  assert.equal(mixedBatchRes.payload.data.job.report.items[2].errorCode, 'unsupported_import_input');
+
+  // 19. M3.2 Single import: >2KB input accepted (1 MiB support)
+  const singleLongInputRes = await call(tsHandler, '/canvas/imports/native', {
+    method: 'POST', cookie,
+    body: {
+      input: '% ' + 'x'.repeat(4000) + '\n@article{vaswani2017, title={Long Input Paper}}'
+    }
+  });
+  assert.equal(singleLongInputRes.statusCode, 200, 'Reused or imported without 400 length error');
+
+  // 20. M3.2 ISBN flow: DTO persistence to document record and dedup reuse by ISBN
+  const isbnImportRes = await call(tsHandler, '/canvas/imports/native', {
+    method: 'POST', cookie,
+    body: {
+      input: 'ISBN_BOOK',
+      targetWorkspaceId: apiTopic.id
+    }
+  });
+  assert.equal(isbnImportRes.statusCode, 201);
+  assert.equal(isbnImportRes.payload.data.outcome, 'created');
+  assert.equal(isbnImportRes.payload.data.document.title, 'Operating Systems: Three Easy Pieces');
+  assert.equal(isbnImportRes.payload.data.document.isbn, '978-1-4028-9462-6', 'ISBN must be persisted into document');
+
+  // Second import with identical ISBN but different title and no DOI/PDF -> matches by ISBN strategy
+  const isbnReimportRes = await call(tsHandler, '/canvas/imports/native', {
+    method: 'POST', cookie,
+    body: {
+      title: 'OSTEP Second Edition',
+      isbn: '978-1-4028-9462-6'
+    }
+  });
+  assert.equal(isbnReimportRes.statusCode, 200);
+  assert.equal(isbnReimportRes.payload.data.outcome, 'reused');
+  assert.equal(isbnReimportRes.payload.data.match.strategy, 'isbn', 'Matches existing document by ISBN');
+  assert.equal(isbnReimportRes.payload.data.document.id, isbnImportRes.payload.data.document.id);
+
+  // 21. M3.2 Creators cap validation: creators > 100 rejected before DB write
+  const tooManyCreatorsRes = await call(tsHandler, '/canvas/imports/native', {
+    method: 'POST', cookie,
+    body: {
+      input: 'TOO_MANY_CREATORS'
+    }
+  });
+  assert.equal(tooManyCreatorsRes.statusCode, 400);
+  assert.equal(tooManyCreatorsRes.payload.error.code, 'invalid_request');
+  assert.ok(tooManyCreatorsRes.payload.error.message.includes('at most 100 entries'), 'Must enforce creators limit <= 100');
+
+  // 22. M3.2 Translation Server error status code mapping
+  // 22a. 504 total_timeout
+  const timeoutRes = await call(tsHandler, '/canvas/imports/native', {
+    method: 'POST', cookie,
+    body: { input: 'TIMEOUT_ERROR' }
+  });
+  assert.equal(timeoutRes.statusCode, 504);
+  assert.equal(timeoutRes.payload.error.code, 'total_timeout');
+
+  // 22b. 502 upstream_error
+  const upstreamRes = await call(tsHandler, '/canvas/imports/native', {
+    method: 'POST', cookie,
+    body: { input: 'UPSTREAM_ERROR' }
+  });
+  assert.equal(upstreamRes.statusCode, 502);
+  assert.equal(upstreamRes.payload.error.code, 'upstream_error');
+
+  // 22c. 400 translation_server_error
+  const syntaxErrRes = await call(tsHandler, '/canvas/imports/native', {
+    method: 'POST', cookie,
+    body: { input: 'SYNTAX_ERROR' }
+  });
+  assert.equal(syntaxErrRes.statusCode, 400);
+  assert.equal(syntaxErrRes.payload.error.code, 'translation_server_error');
+
+  // 22d. 400 unsupported_import_input for unresolvable raw text
+  const unsupportedRes = await call(tsHandler, '/canvas/imports/native', {
+    method: 'POST', cookie,
+    body: { input: 'unrecognized_plain_query_cannot_parse' }
+  });
+  assert.equal(unsupportedRes.statusCode, 400);
+  assert.equal(unsupportedRes.payload.error.code, 'unsupported_import_input');
 
   const clearedAiConfigResponse = await call(handler, '/canvas/ai/config', { method: 'DELETE', cookie });
   assert.equal(clearedAiConfigResponse.statusCode, 200);

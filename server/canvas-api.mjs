@@ -29,6 +29,7 @@ const AI_PROMPT_VERSION = 'altcanvas-ai-v1';
 const MAX_IMPORT_NODES = 500;
 const MAX_IMPORT_EDGES = 1000;
 const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_BYTES || 104_857_600); // 100 MiB default
+const MAX_IMPORT_BODY_BYTES = Number(process.env.MAX_IMPORT_BODY_BYTES || 2 * 1024 * 1024); // 2 MiB for import requests
 let defaultStore;
 
 async function streamUploadToFile(req, targetDir, maxBytes = MAX_UPLOAD_BYTES) {
@@ -1226,6 +1227,99 @@ function compensatePromotedBlob(store, sha256, targetBlobPath) {
   } catch {}
 }
 
+// Unified M2/M3 metadata normalizer: the single authoritative normalizer for any
+// resolved metadata dictionary (body.resolved, Translation Server DTO, DOI/arXiv/URL
+// resolver output, and the final DTO before DB write). Enforces field types, lengths,
+// year range, and creators count <= 100 with non-empty name checks.
+export function normalizeResolvedImportMetadata(resolved, label = 'resolved') {
+  if (!resolved || typeof resolved !== 'object' || Array.isArray(resolved)) {
+    throw new TypeError(`${label} must be an object`);
+  }
+
+  const rawTitle = resolved.title;
+  if (typeof rawTitle !== 'string' || !rawTitle.trim() || rawTitle.length > 500) {
+    throw new TypeError(`${label}.title must be a non-empty string of at most 500 characters`);
+  }
+
+  const STRING_LIMITS = {
+    abstractNote: 20_000,
+    abstract: 20_000,
+    sourceType: 64,
+    doi: 2000,
+    url: 2000,
+    isbn: 64,
+    arxivId: 64,
+    arXivId: 64,
+    pdfUrl: 2000,
+    publisher: 300
+  };
+  for (const [field, maxLen] of Object.entries(STRING_LIMITS)) {
+    if (resolved[field] !== undefined && resolved[field] !== null) {
+      if (typeof resolved[field] !== 'string') {
+        throw new TypeError(`${label}.${field} must be a string`);
+      }
+      if (resolved[field].length > maxLen) {
+        throw new TypeError(`${label}.${field} must be at most ${maxLen} characters`);
+      }
+    }
+  }
+
+  const pdfUrl = resolved.pdfUrl ? String(resolved.pdfUrl).trim() : null;
+  if (pdfUrl && !/^https?:\/\//i.test(pdfUrl)) {
+    throw new TypeError(`${label}.pdfUrl must be an http(s) URL`);
+  }
+
+  if (resolved.year !== undefined && resolved.year !== null) {
+    if (typeof resolved.year !== 'number' || !Number.isInteger(resolved.year) || resolved.year < 1400 || resolved.year > 2200) {
+      throw new TypeError(`${label}.year must be an integer between 1400 and 2200`);
+    }
+  }
+
+  let creators = resolved.creators || [];
+  if (!Array.isArray(creators)) {
+    throw new TypeError(`${label}.creators must be an array`);
+  }
+  if (creators.length > 100) {
+    throw new TypeError(`${label}.creators must contain at most 100 entries`);
+  }
+  const cleanCreators = creators.map((c, idx) => {
+    if (!c || typeof c !== 'object' || Array.isArray(c)) {
+      throw new TypeError(`${label}.creators[${idx}] must be an object`);
+    }
+    const entry = {};
+    for (const field of ['creatorType', 'firstName', 'lastName', 'name']) {
+      if (c[field] !== undefined && c[field] !== null) {
+        if (typeof c[field] !== 'string' || c[field].length > 200) {
+          throw new TypeError(`${label}.creators[${idx}].${field} must be a string of at most 200 characters`);
+        }
+        entry[field] = c[field];
+      }
+    }
+    if (!entry.firstName && !entry.lastName && !entry.name) {
+      throw new TypeError(`${label}.creators[${idx}] must carry at least one of firstName, lastName, or name`);
+    }
+    return entry;
+  });
+
+  const abstractText = resolved.abstractNote || resolved.abstract || '';
+
+  return {
+    sourceType: resolved.sourceType || 'manual',
+    title: rawTitle.trim(),
+    abstractNote: abstractText,
+    abstract: abstractText,
+    creators: cleanCreators,
+    year: resolved.year ?? null,
+    doi: resolved.doi ? String(resolved.doi).trim() : null,
+    isbn: resolved.isbn ? String(resolved.isbn).trim() : null,
+    arxivId: (resolved.arxivId || resolved.arXivId) ? String(resolved.arxivId || resolved.arXivId).trim() : null,
+    url: resolved.url ? String(resolved.url).trim() : null,
+    pdfUrl: pdfUrl || null,
+    publisher: resolved.publisher ? String(resolved.publisher).trim() : undefined,
+    resolvedBy: resolved.resolvedBy || undefined
+  };
+}
+
 // Unified M2 input normalizer: the single source of truth for import item structure.
 // Throws TypeError on any contract violation so single and batch endpoints share one contract.
 function normalizeNativeImportItem(item, indexLabel = 'item') {
@@ -1293,7 +1387,7 @@ function normalizeNativeImportItem(item, indexLabel = 'item') {
     throw new TypeError(`${indexLabel}.pdfUrl must be an http(s) URL`);
   }
 
-  const FIELD_LIMITS = { abstract: 20_000, pdfUrl: 2000, isbn: 64, arxivId: 64, doi: 2000, url: 2000, sourceType: 64, input: 2000 };
+  const FIELD_LIMITS = { abstract: 20_000, pdfUrl: 2000, isbn: 64, arxivId: 64, doi: 2000, url: 2000, sourceType: 64, input: 1024 * 1024 };
   for (const [field, maxLen] of Object.entries(FIELD_LIMITS)) {
     if (item[field] !== undefined && item[field] !== null) {
       if (typeof item[field] !== 'string') {
@@ -1410,17 +1504,21 @@ async function executeNativeImportItem(store, actorKey, normalized, {
       throw resolveErr;
     }
   }
+  if (resolved) {
+    resolved = normalizeResolvedImportMetadata(resolved, 'resolved');
+  }
   if (!resolved && !normalized.title) {
     throw new TypeError('resolved metadata or a title is required');
   }
 
   const title = resolved?.title || normalized.title;
-  const abstract = resolved?.abstractNote || normalized.abstract || '';
-  const creators = Array.isArray(resolved?.creators) && resolved.creators.length ? resolved.creators : normalized.creators;
-  const year = resolved?.year || normalized.year || null;
+  const abstract = resolved?.abstractNote || resolved?.abstract || normalized.abstract || '';
+  const creators = (Array.isArray(resolved?.creators) && resolved.creators.length) ? resolved.creators : normalized.creators;
+  const year = resolved?.year ?? normalized.year ?? null;
   const doi = resolved?.doi || normalized.doi || null;
+  const isbn = resolved?.isbn || normalized.isbn || null;
   const url = resolved?.url || normalized.url || null;
-  const arxivId = resolved?.arxivId || resolved?.arXivId || normalized.arxivId || null;
+  const arxivId = resolved?.arxivId || normalized.arxivId || null;
   const externalRefs = normalized.externalRefs;
   const targetWorkspaceId = normalized.targetWorkspaceId || fallbackTargetWorkspaceId;
 
@@ -1462,9 +1560,7 @@ async function executeNativeImportItem(store, actorKey, normalized, {
   };
 
   const precheckInput = {
-    title, year, doi,
-    isbn: normalized.isbn,
-    arxivId,
+    title, year, doi, isbn, arxivId,
     attachment,
     externalRefs,
     forceNew: normalized.forceNew,
@@ -1504,7 +1600,7 @@ async function executeNativeImportItem(store, actorKey, normalized, {
       year,
       doi,
       url,
-      isbn: normalized.isbn,
+      isbn,
       arxivId,
       externalRefs,
       attachment,
@@ -1635,7 +1731,7 @@ export function createCanvasHandler(store, {
 
       // --- M2 Unified Native Import Pipeline ---
       if (pathname === '/canvas/imports/native' && method === 'POST') {
-        const body = await readJson(req);
+        const body = await readJson(req, MAX_IMPORT_BODY_BYTES);
         if (!body || typeof body !== 'object' || Array.isArray(body)) {
           throw new TypeError('request body must be an object');
         }
@@ -1664,6 +1760,10 @@ export function createCanvasHandler(store, {
         } catch (execErr) {
           if (execErr.code === 'pdf_download_failed' || execErr.code === 'blob_persist_failed') {
             error(res, execErr.status || 502, execErr.code, execErr.message);
+            return;
+          }
+          if (execErr.status) {
+            error(res, execErr.status, execErr.code || 'import_error', execErr.message);
             return;
           }
           if (execErr.code === 'resolve_error') {
@@ -1696,7 +1796,7 @@ export function createCanvasHandler(store, {
       }
 
       if (pathname === '/canvas/imports/native/batch' && method === 'POST') {
-        const body = await readJson(req);
+        const body = await readJson(req, MAX_IMPORT_BODY_BYTES);
         if (!body || typeof body !== 'object' || Array.isArray(body)) {
           throw new TypeError('request body must be an object');
         }
@@ -1774,6 +1874,7 @@ export function createCanvasHandler(store, {
               ok: false,
               title: fallbackTitle,
               error: itemErr.message,
+              errorCode: itemErr.code || undefined,
               warning: /PDF 附件下载失败/.test(itemErr.message) ? itemErr.message : undefined
             });
           }
@@ -2125,7 +2226,7 @@ export function createCanvasHandler(store, {
         return;
       }
       if (pathname === '/canvas/imports/resolve' && method === 'POST') {
-        const body = await readJson(req);
+        const body = await readJson(req, MAX_IMPORT_BODY_BYTES);
         if (!body || typeof body !== 'object' || Array.isArray(body)) {
           throw new TypeError('request body must be an object');
         }
@@ -2153,7 +2254,7 @@ export function createCanvasHandler(store, {
         return;
       }
       if (pathname === '/canvas/imports' && method === 'POST') {
-        const body = await readJson(req);
+        const body = await readJson(req, MAX_IMPORT_BODY_BYTES);
         if (!body || typeof body !== 'object' || Array.isArray(body)) {
           throw new TypeError('request body must be an object');
         }
@@ -3868,7 +3969,9 @@ ${textSnippet.slice(0, 8000) || '无'}`;
       else if (err instanceof TypeError || err.status === 400) error(res, 400, 'invalid_request', err.message);
       else if (err.status === 403) error(res, 403, 'source_forbidden', err.message);
       else if (err.status === 413) error(res, 413, 'payload_too_large', err.message);
-      else {
+      else if (typeof err.status === 'number' && err.status >= 400 && err.status < 600) {
+        error(res, err.status, err.code || 'request_failed', err.message);
+      } else {
         console.error('Canvas API error:', err);
         error(res, 500, 'internal_error', 'Canvas request failed');
       }
