@@ -3966,6 +3966,11 @@ try {
       err.code = 'upstream_error';
       throw err;
     }
+    if (input.includes('TOO_LARGE_ERROR')) {
+      const err = new Error('translation response exceeded 2 MiB cap');
+      err.code = 'response_too_large';
+      throw err;
+    }
     if (input.includes('SYNTAX_ERROR')) {
       return {
         available: true,
@@ -4240,6 +4245,121 @@ try {
   });
   assert.equal(unsupportedRes.statusCode, 400);
   assert.equal(unsupportedRes.payload.error.code, 'unsupported_import_input');
+
+  // 23. M3.2 audit P1: pure structured (top-level) imports must pass the SAME unified
+  // creators contract as resolver-sourced metadata — count cap AND non-blank names.
+  const apiActorKey = canvasActorKey('https://issuer.example', 'api-subject');
+  const docCountBefore23 = store.listDocuments(apiActorKey, { limit: 200, offset: 0 }).length;
+
+  // 23a. top-level 101 creators -> 400 with zero documents written
+  const topLevel101Res = await call(tsHandler, '/canvas/imports/native', {
+    method: 'POST', cookie,
+    body: {
+      title: 'Top-Level Mega Collaboration',
+      creators: Array.from({ length: 101 }, (_, i) => ({ name: `Author ${i}` }))
+    }
+  });
+  assert.equal(topLevel101Res.statusCode, 400);
+  assert.equal(topLevel101Res.payload.error.code, 'invalid_request');
+  assert.ok(topLevel101Res.payload.error.message.includes('at most 100 entries'), 'Top-level creators must be capped at 100');
+  assert.equal(store.listDocuments(apiActorKey, { limit: 200, offset: 0 }).length, docCountBefore23, 'No document may be written for a rejected top-level payload');
+
+  // 23b. top-level whitespace-only name creator -> 400
+  const blankNameRes = await call(tsHandler, '/canvas/imports/native', {
+    method: 'POST', cookie,
+    body: { title: 'Blank Name Paper', creators: [{ name: '   ' }] }
+  });
+  assert.equal(blankNameRes.statusCode, 400);
+  assert.ok(blankNameRes.payload.error.message.includes('non-blank name'), 'Whitespace-only creator names must be rejected');
+
+  // 23c. top-level creator without any name field -> 400
+  const noNameRes = await call(tsHandler, '/canvas/imports/native', {
+    method: 'POST', cookie,
+    body: { title: 'No Name Paper', creators: [{ creatorType: 'author' }] }
+  });
+  assert.equal(noNameRes.statusCode, 400);
+  assert.ok(noNameRes.payload.error.message.includes('non-blank name'), 'Creators without name fields must be rejected');
+
+  // 23d. valid top-level creators -> normal write with persisted creator rows
+  const validTopLevelRes = await call(tsHandler, '/canvas/imports/native', {
+    method: 'POST', cookie,
+    body: {
+      title: 'Top-Level Structured Paper',
+      doi: '10.7777/top-level-structured',
+      creators: [
+        { creatorType: 'author', firstName: 'Grace', lastName: 'Hopper' },
+        { creatorType: 'author', name: 'Alan Turing' }
+      ]
+    }
+  });
+  assert.equal(validTopLevelRes.statusCode, 201);
+  assert.equal(validTopLevelRes.payload.data.outcome, 'created');
+  assert.equal(validTopLevelRes.payload.data.document.creators.length, 2);
+  assert.equal(validTopLevelRes.payload.data.document.creators[0].firstName, 'Grace');
+  assert.equal(validTopLevelRes.payload.data.document.creators[1].name, 'Alan Turing');
+
+  // 23e. batch pre-validation rejects 101 top-level creators BEFORE creating any job
+  const jobCountBefore23e = store.listImportJobs(apiActorKey, { limit: 200 }).length;
+  const batch101Res = await call(tsHandler, '/canvas/imports/native/batch', {
+    method: 'POST', cookie,
+    body: {
+      sourceType: 'batch_structured',
+      items: [
+        { title: 'Batch 101 Creators', creators: Array.from({ length: 101 }, (_, i) => ({ name: `Author ${i}` })) }
+      ]
+    }
+  });
+  assert.equal(batch101Res.statusCode, 400);
+  assert.equal(store.listImportJobs(apiActorKey, { limit: 200 }).length, jobCountBefore23e, 'Rejected batch must not leave a pending job behind');
+
+  // 24. M3.2 audit P1: /canvas/imports/resolve must forward authoritative TS statuses
+  // 24a. 504 total_timeout
+  const resolveTimeoutRes = await call(tsHandler, '/canvas/imports/resolve', {
+    method: 'POST', cookie,
+    body: { input: 'TIMEOUT_ERROR' }
+  });
+  assert.equal(resolveTimeoutRes.statusCode, 504);
+  assert.equal(resolveTimeoutRes.payload.error.code, 'total_timeout');
+
+  // 24b. 502 upstream_error
+  const resolveUpstreamRes = await call(tsHandler, '/canvas/imports/resolve', {
+    method: 'POST', cookie,
+    body: { input: 'UPSTREAM_ERROR' }
+  });
+  assert.equal(resolveUpstreamRes.statusCode, 502);
+  assert.equal(resolveUpstreamRes.payload.error.code, 'upstream_error');
+
+  // 24c. 413 response_too_large
+  const resolveTooLargeRes = await call(tsHandler, '/canvas/imports/resolve', {
+    method: 'POST', cookie,
+    body: { input: 'TOO_LARGE_ERROR' }
+  });
+  assert.equal(resolveTooLargeRes.statusCode, 413);
+  assert.equal(resolveTooLargeRes.payload.error.code, 'response_too_large');
+
+  // 24d. 400 translation_server_error (syntax)
+  const resolveSyntaxRes = await call(tsHandler, '/canvas/imports/resolve', {
+    method: 'POST', cookie,
+    body: { input: 'SYNTAX_ERROR' }
+  });
+  assert.equal(resolveSyntaxRes.statusCode, 400);
+  assert.equal(resolveSyntaxRes.payload.error.code, 'translation_server_error');
+
+  // 24e. 400 unsupported_import_input
+  const resolveUnsupportedRes = await call(tsHandler, '/canvas/imports/resolve', {
+    method: 'POST', cookie,
+    body: { input: 'unrecognized_plain_query_cannot_parse' }
+  });
+  assert.equal(resolveUnsupportedRes.statusCode, 400);
+  assert.equal(resolveUnsupportedRes.payload.error.code, 'unsupported_import_input');
+
+  // 25. Legacy /canvas/imports entry must also forward authoritative resolver statuses
+  const legacyImportsTimeoutRes = await call(tsHandler, '/canvas/imports', {
+    method: 'POST', cookie,
+    body: { input: 'TIMEOUT_ERROR' }
+  });
+  assert.equal(legacyImportsTimeoutRes.statusCode, 504);
+  assert.equal(legacyImportsTimeoutRes.payload.error.code, 'total_timeout');
 
   const clearedAiConfigResponse = await call(handler, '/canvas/ai/config', { method: 'DELETE', cookie });
   assert.equal(clearedAiConfigResponse.statusCode, 200);

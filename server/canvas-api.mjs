@@ -1295,8 +1295,8 @@ export function normalizeResolvedImportMetadata(resolved, label = 'resolved') {
         entry[field] = c[field];
       }
     }
-    if (!entry.firstName && !entry.lastName && !entry.name) {
-      throw new TypeError(`${label}.creators[${idx}] must carry at least one of firstName, lastName, or name`);
+    if (![entry.firstName, entry.lastName, entry.name].some(v => typeof v === 'string' && v.trim())) {
+      throw new TypeError(`${label}.creators[${idx}] must carry at least one non-blank name field (firstName, lastName, or name)`);
     }
     return entry;
   });
@@ -1403,6 +1403,9 @@ function normalizeNativeImportItem(item, indexLabel = 'item') {
   if (!Array.isArray(creators)) {
     throw new TypeError(`${indexLabel}.creators must be an array`);
   }
+  if (creators.length > 100) {
+    throw new TypeError(`${indexLabel}.creators must contain at most 100 entries`);
+  }
   creators = creators.map(c => {
     if (!c || typeof c !== 'object' || Array.isArray(c)) {
       throw new TypeError(`${indexLabel}.creators entries must be objects`);
@@ -1415,6 +1418,9 @@ function normalizeNativeImportItem(item, indexLabel = 'item') {
         }
         out[field] = c[field];
       }
+    }
+    if (![out.firstName, out.lastName, out.name].some(v => typeof v === 'string' && v.trim())) {
+      throw new TypeError(`${indexLabel}.creators entries must carry at least one non-blank name (firstName, lastName, or name)`);
     }
     return out;
   });
@@ -1504,21 +1510,40 @@ async function executeNativeImportItem(store, actorKey, normalized, {
       throw resolveErr;
     }
   }
-  if (resolved) {
-    resolved = normalizeResolvedImportMetadata(resolved, 'resolved');
-  }
   if (!resolved && !normalized.title) {
     throw new TypeError('resolved metadata or a title is required');
   }
 
-  const title = resolved?.title || normalized.title;
-  const abstract = resolved?.abstractNote || resolved?.abstract || normalized.abstract || '';
-  const creators = (Array.isArray(resolved?.creators) && resolved.creators.length) ? resolved.creators : normalized.creators;
-  const year = resolved?.year ?? normalized.year ?? null;
-  const doi = resolved?.doi || normalized.doi || null;
-  const isbn = resolved?.isbn || normalized.isbn || null;
-  const url = resolved?.url || normalized.url || null;
-  const arxivId = resolved?.arxivId || normalized.arxivId || null;
+  // Build the single FINAL metadata object merging the resolver output with the
+  // top-level structured fields, then normalize it exactly once. Every source —
+  // Translation Server DTO, native resolver output, or a pure structured payload —
+  // passes the identical contract (creators <= 100 with non-blank names, string
+  // limits, year range) before any database write. Never stitch normalized
+  // fragments by hand.
+  const meta = normalizeResolvedImportMetadata({
+    sourceType: resolved?.sourceType || normalized.sourceType,
+    title: resolved?.title || normalized.title,
+    abstractNote: resolved?.abstractNote || resolved?.abstract || normalized.abstract,
+    creators: (Array.isArray(resolved?.creators) && resolved.creators.length)
+      ? resolved.creators
+      : normalized.creators,
+    year: resolved?.year ?? normalized.year,
+    doi: resolved?.doi || normalized.doi,
+    isbn: resolved?.isbn || normalized.isbn,
+    arxivId: resolved?.arxivId || resolved?.arXivId || normalized.arxivId,
+    url: resolved?.url || normalized.url,
+    pdfUrl: resolved?.pdfUrl || normalized.pdfUrl,
+    publisher: resolved?.publisher
+  }, 'item');
+
+  const title = meta.title;
+  const abstract = meta.abstractNote;
+  const creators = meta.creators;
+  const year = meta.year;
+  const doi = meta.doi;
+  const isbn = meta.isbn;
+  const url = meta.url;
+  const arxivId = meta.arxivId;
   const externalRefs = normalized.externalRefs;
   const targetWorkspaceId = normalized.targetWorkspaceId || fallbackTargetWorkspaceId;
 
@@ -1527,7 +1552,7 @@ async function executeNativeImportItem(store, actorKey, normalized, {
   let attachment = null;
   let tempFilePath = null;
   const explicitPdfUrl = normalized.pdfUrl && normalized.pdfUrl.trim() ? normalized.pdfUrl.trim() : null;
-  const pdfUrl = explicitPdfUrl || resolved?.pdfUrl || null;
+  const pdfUrl = explicitPdfUrl || meta.pdfUrl;
 
   if (pdfUrl && typeof pdfUrl === 'string' && /^https?:\/\//i.test(pdfUrl)) {
     try {
@@ -1593,7 +1618,7 @@ async function executeNativeImportItem(store, actorKey, normalized, {
   let result;
   try {
     result = store.importNativeDocument(actorKey, {
-      sourceType: resolved?.sourceType || normalized.sourceType || 'manual',
+      sourceType: meta.sourceType,
       title,
       abstract,
       creators,
@@ -2238,7 +2263,9 @@ export function createCanvasHandler(store, {
         try {
           resolved = await resolveImportInput(rawInput, { format, translationServerFn });
         } catch (err) {
-          const status = err.code === 'translation_server_unavailable' ? 503 : 400;
+          // Authoritative status from the resolver (504 timeout, 502 upstream,
+          // 503 unconfigured, 413 size cap, 400 syntax/unsupported input).
+          const status = Number.isInteger(err.status) ? err.status : 400;
           error(res, status, err.code || 'resolve_error', `Failed to resolve input: ${err.message}`);
           return;
         }
@@ -2265,7 +2292,8 @@ export function createCanvasHandler(store, {
           try {
             resolved = await resolveImportInput(rawInput, { translationServerFn });
           } catch (err) {
-            error(res, 400, 'resolve_error', `Failed to resolve input: ${err.message}`);
+            const status = Number.isInteger(err.status) ? err.status : 400;
+            error(res, status, err.code || 'resolve_error', `Failed to resolve input: ${err.message}`);
             return;
           }
         }

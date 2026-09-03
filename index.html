@@ -6701,7 +6701,13 @@
         btnInboxOnly.disabled = false;
         btnTopic.disabled = false;
       } catch (err) {
-        showToast(`解析失败: ${errorMessage(err)}`, 'error');
+        if (err?.status === 503 || err?.code === 'translation_server_unavailable') {
+          showToast('解析服务未配置：解析 BibTeX/RIS 书目需先在服务端配置 Translation Server（TRANSLATION_SERVER_URL）', 'error');
+        } else if (err?.status === 504 || ['total_timeout', 'connect_timeout', 'response_timeout'].includes(err?.code)) {
+          showToast('解析服务响应超时，请稍后重试', 'error');
+        } else {
+          showToast(`解析失败: ${errorMessage(err)}`, 'error');
+        }
       } finally {
         resolveBtn.disabled = false;
         resolveBtn.textContent = '🔍 解析';

@@ -1552,21 +1552,36 @@ assert.match(html, /config\.authMode === 'altero' &&\s*config\.capabilities\?\.e
   assert.equal(nativeRes.elements['quick-import-source-badge'].textContent, 'DOI', 'Native resolver parse must not display (TS)');
   assert.match(nativeRes.elements['quick-import-source-badge'].className, /bg-indigo-950/, 'Native resolver badge must use indigo background');
 
-  // 2c. 503 error toast surfaces Translation Server unconfigured status
+  // 2c. HTTP 503 branches to the dedicated "Translation Server 未配置" toast.
+  // The raw error message is IDENTICAL across 2c/2d/2e — only the status differs,
+  // so these assertions prove the branch keys on err.status, not on message text.
   const unavail503Res = await runResolve(async () => {
-    const err = new Error('Translation Server 未配置，无法解析 BIBTEX 书目内容');
+    const err = new Error('SAME_MESSAGE_DIFFERENT_STATUS');
     err.status = 503;
+    err.code = 'translation_server_unavailable';
     throw err;
   });
-  assert.ok(unavail503Res.toasts.some(t => t.msg.includes('Translation Server 未配置')), '503 error toast must mention Translation Server 未配置');
+  assert.ok(unavail503Res.toasts.some(t => t.msg.includes('解析服务未配置') && t.msg.includes('Translation Server')), '503 must branch to the unconfigured Translation Server toast');
+  assert.ok(!unavail503Res.toasts.some(t => t.msg.includes('SAME_MESSAGE_DIFFERENT_STATUS')), '503 toast must not passthrough the raw error message');
 
-  // 2d. 400 error toast surfaces parse syntax error
+  // 2d. HTTP 504 branches to the timeout toast, not the generic passthrough.
+  const timeout504Res = await runResolve(async () => {
+    const err = new Error('SAME_MESSAGE_DIFFERENT_STATUS');
+    err.status = 504;
+    err.code = 'total_timeout';
+    throw err;
+  });
+  assert.ok(timeout504Res.toasts.some(t => t.msg.includes('解析服务响应超时')), '504 must branch to the timeout toast');
+  assert.ok(!timeout504Res.toasts.some(t => t.msg.includes('SAME_MESSAGE_DIFFERENT_STATUS')), '504 toast must not passthrough the raw error message');
+
+  // 2e. HTTP 400 keeps the generic branch and surfaces the server message verbatim.
   const err400Res = await runResolve(async () => {
     const err = new Error('Syntax error on line 4');
     err.status = 400;
+    err.code = 'translation_server_error';
     throw err;
   });
-  assert.ok(err400Res.toasts.some(t => t.msg.includes('Syntax error on line 4')), '400 error toast must surface syntax error detail');
+  assert.ok(err400Res.toasts.some(t => t.msg.includes('解析失败') && t.msg.includes('Syntax error on line 4')), '400 error toast must surface syntax error detail via the generic branch');
 
   // 3. executeQuickImport preserves resolved.isbn through the fetch payload
   let postedPayload = null;

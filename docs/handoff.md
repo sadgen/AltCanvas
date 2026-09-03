@@ -1081,6 +1081,7 @@
 
 1. **[P1] 1 MiB 输入放宽与请求体限额扩大** ([`server/canvas-api.mjs`](file:///home/sadgen/Projects/AltCanvas/server/canvas-api.mjs))：
    - `FIELD_LIMITS.input` 放宽至 1,048,576 字符（1 MiB）；配置 `MAX_IMPORT_BODY_BYTES = 2 * 1024 * 1024`（2 MiB）覆盖 `/canvas/imports/native`、`/canvas/imports/native/batch`、`/canvas/imports/resolve` 与 `/canvas/imports`；
+   - 口径澄清（终审指正）：**"输入字段最多 1 MiB 字符"仅指字段校验上限，且必须在 2 MiB 序列化请求体上限之内**；Translation Server 侧限制的是最终序列化请求体 1 MiB，因此恰好 1 MiB 的原始输入会因 JSON 封套超限触发 413——这是既有安全设计，不承诺完整 1 MiB 原文一定可发送；
    - 解决批量与直接单篇导入中 >2KB BibTeX/RIS 输入被 400 截断拦截的漏洞。
 
 2. **[P1] 统一 DTO 规范化与 ISBN 完整保留** ([`server/canvas-api.mjs`](file:///home/sadgen/Projects/AltCanvas/server/canvas-api.mjs) & [`server/canvas-store.mjs`](file:///home/sadgen/Projects/AltCanvas/server/canvas-store.mjs))：
@@ -1128,3 +1129,32 @@
 ### 里程碑状态更新
 - **M3.2 统一解析与导入工作流：PASS（正式关闭）**。
 - **下一阶段：M3.3 / M4 准备与交接**。
+
+---
+
+## 2026-09-03 会话（M3.2 终审二轮整改：结构化导入 creators 统一契约与 /imports/resolve 状态码旁路封堵）
+
+### 修复清单（终审 2 个 P1 + 1 个 P2 测试口径）
+
+1. **[P1] 纯结构化导入统一 creators 契约** ([`server/canvas-api.mjs`](file:///home/sadgen/Projects/AltCanvas/server/canvas-api.mjs))：
+   - `executeNativeImportItem` 重构：将 resolver 输出与 top-level 结构化字段**合并为单一最终元数据对象**，无论来源（Translation Server DTO、native resolver、客户端结构化载荷）都**恰好调用一次** `normalizeResolvedImportMetadata()` 后再写库，不再分别规范化后手工拼接；
+   - 空白姓名判定收紧为 trim 感知：`{name: "   "}`、`{creatorType: "author"}`（无任何姓名字段）均被拒绝；
+   - `normalizeNativeImportItem` 的 creators 路径同步加上 `≤100` 数量上限与非空姓名校验，批量前置校验在建任务前即整体拒绝（400 且零任务残留）。
+2. **[P1] `/canvas/imports/resolve` 与旧 `/canvas/imports` 状态码旁路封堵** ([`server/canvas-api.mjs`](file:///home/sadgen/Projects/AltCanvas/server/canvas-api.mjs))：
+   - 两处解析 catch 分支统一改为 `const status = Number.isInteger(err.status) ? err.status : 400`，透传 resolver 的权威状态码与 `err.code`；
+   - `total_timeout → 504`、`upstream_error → 502`、`translation_server_unavailable → 503`、`request/response_too_large → 413`、语法/不支持输入 `→ 400`，不再统一压成 400。
+3. **[P2] UI 错误提示按状态码分支 + 测试口径修正** ([`index.html`](file:////home/sadgen/Projects/AltCanvas/index.html) & [`test/canvas-ui.test.mjs`](file:////home/sadgen/Projects/AltCanvas/test/canvas-ui.test.mjs))：
+   - 前端 `resolveQuickImport` catch 按 `err.status`/`err.code` 分支：503 → "解析服务未配置（TRANSLATION_SERVER_URL）"、504/超时类 → "解析服务响应超时"、其余 → 透传服务端消息；
+   - UI 测试重写为**分支行为验证**：503/504/400 三组注入完全相同的原始 message、仅状态码不同，断言 toast 分别命中专属文案且不含透传原文——证明分支依据 HTTP 状态而非消息文本（旧测试只比较不同 message，无法发现状态码映射缺陷）。
+4. **1 MiB 口径澄清**：上节表述已修正为"序列化请求体上限内、输入字段最多 1 MiB 字符"（TS 侧以最终序列化请求体 1 MiB 为上限，恰好 1 MiB 原文会因 JSON 封套触发 413，属既有安全设计）。
+
+### 测试新增 ([`test/canvas.test.mjs`](file:///home/sadgen/Projects/AltCanvas/test/canvas.test.mjs))
+- top-level 101 位 creators → 400（`at most 100 entries`）且文档计数零增长；
+- top-level 空白姓名 creator、无姓名字段 creator → 400（`non-blank name`）；
+- 合法 top-level creators → 201 且 `document.creators` 逐行持久化（firstName/name 断言）；
+- 批量含 101 位 creators 条目 → 400 前置拒绝、import_jobs 计数零增长；
+- `/canvas/imports/resolve` 状态码全矩阵：504 `total_timeout`、502 `upstream_error`、413 `response_too_large`、400 `translation_server_error`、400 `unsupported_import_input`（503 已有覆盖）；
+- 旧 `/canvas/imports` 入口：TIMEOUT_ERROR → 504 `total_timeout`。
+
+### 里程碑状态
+- **M3.2 统一解析与导入工作流：PASS（正式关闭，终审二轮整改完成）**。
