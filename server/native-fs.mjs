@@ -305,15 +305,18 @@ export function listDirectoryPage(rootPath, relativeDir = '', { cursor = 0, limi
     let dirent;
     while ((dirent = dir.readSync()) !== null) {
       if (dirent.name.startsWith('.')) continue; // hidden entries (trash area, temp files) are not listed
+      if (names.length >= MAX_DIRECTORY_LIST) {
+        // An entry beyond the cap exists: the listing is genuinely incomplete.
+        // A directory with EXACTLY MAX entries must not be reported truncated,
+        // so the flag is decided by the (MAX+1)-th entry, never by reaching MAX.
+        truncated = true;
+        break;
+      }
       names.push({
         name: dirent.name,
         isDir: dirent.isDirectory(),
         isSymlink: dirent.isSymbolicLink()
       });
-      if (names.length >= MAX_DIRECTORY_LIST) {
-        truncated = true;
-        break;
-      }
     }
   } catch (err) {
     if (err.code === 'EACCES') throw new NativePathError('directory is not readable', 'directory_unreadable');

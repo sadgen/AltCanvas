@@ -50,6 +50,10 @@ assert.match(html, /async function executeQuickDirectoryImport\(/, 'M4 quick imp
 assert.match(html, /async function scanLibraryRootWithFeedback|function sourceScanFlow\(/, 'M4 source-files view must support recursive scanning with feedback');
 assert.match(html, /function promptM4FileName\(/, 'M4 must provide the original-filename conflict dialog');
 assert.match(html, /M4_SOURCE_STATUS_LABELS/, 'M4 must label source-file states (正常/重复/缺失/损坏/回收站)');
+assert.match(html, /function loadMoreSourceFiles\(/, 'source-files view must consume nextCursor pagination');
+assert.match(html, /btn-source-load-more/, 'source-files view must render a load-more control while nextCursor exists');
+assert.match(html, /append: true/, 'directory pagination must append pages instead of dropping entries beyond the first');
+assert.match(html, /目录项目过多，当前结果不完整/, 'the UI must surface meta.truncated as an explicit incompleteness notice');
 assert.match(html, /canvas-node-quick-verify/, 'Canvas cards with sourceRef must render quick-verify button');
 assert.match(html, /documentMetas\.get\(docMetaKey\(/,
   'rendering must use composite key to lookup document metadata');

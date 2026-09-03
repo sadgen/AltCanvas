@@ -748,7 +748,7 @@ async function testM4Scanner() {
     // --- 11.11 Startup recovery fails interrupted scans deterministically.
     const stuckOp = store.createFileOperation(actor, { operationType: 'library.scan', payload: { rootId: root.id } });
     store.startFileOperation(stuckOp.id);
-    const recovery = recoverInterruptedFileOperations(store);
+    const recovery = await recoverInterruptedFileOperations(store);
     assert.equal(recovery.scansReset, 1);
     assert.equal(store.getFileOperation(actor, stuckOp.id).state, 'failed');
     assert.equal(store.getFileOperation(actor, stuckOp.id).errorCode, 'interrupted_by_restart');
@@ -1310,7 +1310,7 @@ async function testM4AuditFixDeterministicRecovery() {
       sourcePath: 'rec-a.pdf', targetPath: 'rec-b.pdf', payload: { filename: 'rec-b.pdf' }
     });
     fs.renameSync(path.join(rootDir, 'rec-a.pdf'), path.join(rootDir, 'rec-b.pdf'));
-    summary = recoverInterruptedFileOperations(store);
+    summary = await recoverInterruptedFileOperations(store);
     assert.equal(summary.completed, 1);
     assert.equal(store.getFileOperation(actor, opA.id).state, 'completed');
     const rowAAfter = store.getSourceFile(actor, rowA.id);
@@ -1325,7 +1325,7 @@ async function testM4AuditFixDeterministicRecovery() {
       operationType: 'file.rename', sourceFileId: rowC.id,
       sourcePath: 'rec-c.pdf', targetPath: 'rec-d.pdf', payload: { filename: 'rec-d.pdf' }
     });
-    summary = recoverInterruptedFileOperations(store);
+    summary = await recoverInterruptedFileOperations(store);
     assert.equal(summary.rolledBack, 1);
     assert.equal(store.getFileOperation(actor, opC.id).state, 'rolled_back');
     assert.equal(store.getSourceFile(actor, rowC.id).relativePath, 'rec-c.pdf');
@@ -1339,7 +1339,7 @@ async function testM4AuditFixDeterministicRecovery() {
     });
     fs.mkdirSync(path.join(rootDir, '.altcanvas-trash'), { recursive: true });
     fs.renameSync(path.join(rootDir, 'rec-e.pdf'), path.join(rootDir, '.altcanvas-trash', `${rowE.id}.pdf`));
-    summary = recoverInterruptedFileOperations(store);
+    summary = await recoverInterruptedFileOperations(store);
     assert.equal(summary.completed, 1);
     assert.equal(store.getFileOperation(actor, opE.id).state, 'completed');
     assert.equal(store.getSourceFile(actor, rowE.id).status, 'trashed');
@@ -1350,7 +1350,7 @@ async function testM4AuditFixDeterministicRecovery() {
       operationType: 'file.trash', sourceFileId: rowF.id,
       sourcePath: 'rec-f.pdf', targetPath: `.altcanvas-trash/${rowF.id}.pdf`
     });
-    summary = recoverInterruptedFileOperations(store);
+    summary = await recoverInterruptedFileOperations(store);
     assert.equal(summary.rolledBack, 1);
     assert.equal(store.getFileOperation(actor, opF.id).state, 'rolled_back');
     assert.equal(store.getSourceFile(actor, rowF.id).status, 'active');
@@ -1366,7 +1366,7 @@ async function testM4AuditFixDeterministicRecovery() {
       sourcePath: `.altcanvas-trash/${rowG.id}.pdf`, targetPath: 'rec-g.pdf'
     });
     fs.renameSync(path.join(rootDir, '.altcanvas-trash', `${rowG.id}.pdf`), path.join(rootDir, 'rec-g.pdf'));
-    summary = recoverInterruptedFileOperations(store);
+    summary = await recoverInterruptedFileOperations(store);
     assert.equal(summary.completed, 1);
     assert.equal(store.getFileOperation(actor, opG.id).state, 'completed');
     const rowGAfter = store.getSourceFile(actor, rowG.id);
@@ -1393,7 +1393,7 @@ async function testM4AuditFixDeterministicRecovery() {
       payload: { rootId: root.id, targetDir: '', filename: 'rec-orphan.pdf' }
     });
     fs.writeFileSync(path.join(rootDir, 'rec-orphan.pdf'), makePdfBytes('recovery-orphan'));
-    summary = recoverInterruptedFileOperations(store);
+    summary = await recoverInterruptedFileOperations(store);
     assert.equal(summary.rolledBack, 1);
     assert.equal(store.getFileOperation(actor, opI.id).state, 'rolled_back');
     assert.equal(fs.existsSync(path.join(rootDir, 'rec-orphan.pdf')), false,
@@ -1407,7 +1407,7 @@ async function testM4AuditFixDeterministicRecovery() {
       targetPath: `${rootAbs}/rec-committed.pdf`,
       payload: { rootId: root.id, targetDir: '', filename: 'rec-committed.pdf' }
     });
-    summary = recoverInterruptedFileOperations(store);
+    summary = await recoverInterruptedFileOperations(store);
     assert.equal(summary.completed, 1);
     assert.equal(store.getFileOperation(actor, opJ.id).state, 'completed');
     assert.equal(fs.existsSync(path.join(rootDir, 'rec-committed.pdf')), true);
@@ -1418,7 +1418,7 @@ async function testM4AuditFixDeterministicRecovery() {
       operationType: 'file.mkdir', targetPath: `${rootAbs}/恢复目录/子目录`,
       payload: { rootId: root.id, path: '恢复目录/子目录' }
     });
-    summary = recoverInterruptedFileOperations(store);
+    summary = await recoverInterruptedFileOperations(store);
     assert.equal(summary.completed, 1);
     assert.equal(store.getFileOperation(actor, opK.id).state, 'completed');
     assert.equal(fs.existsSync(path.join(rootDir, '恢复目录', '子目录')), true,
@@ -1430,7 +1430,7 @@ async function testM4AuditFixDeterministicRecovery() {
       operationType: 'file.delete_permanent', sourceFileId: rowL.id,
       sourcePath: `.altcanvas-trash/${rowL.id}.pdf`
     });
-    summary = recoverInterruptedFileOperations(store);
+    summary = await recoverInterruptedFileOperations(store);
     assert.equal(summary.completed, 1);
     assert.equal(store.getFileOperation(actor, opL.id).state, 'completed');
     assert.equal(store.getSourceFile(actor, rowL.id), null, 'row must be purged (soft-deleted)');
@@ -1884,7 +1884,7 @@ async function testRecoverySafePaths() {
     fs.symlinkSync(outsideDir, path.join(rootDir, 'd1'));
     fs.writeFileSync(path.join(outsideDir, 'orphan.pdf'), decoyBytes);
 
-    let summary = recoverInterruptedFileOperations(store);
+    let summary = await recoverInterruptedFileOperations(store);
     assert.equal(summary.failed >= 1, true);
     assert.equal(store.getFileOperation(actor, op1.id).state, 'failed');
     assert.equal(store.getFileOperation(actor, op1.id).errorCode, 'unsafe_path');
@@ -1906,7 +1906,7 @@ async function testRecoverySafePaths() {
     store.startFileOperation(op2.id);
     fs.chmodSync(path.join(rootDir, 'd2'), 0o500);
     try {
-      summary = recoverInterruptedFileOperations(store);
+      summary = await recoverInterruptedFileOperations(store);
       assert.equal(store.getFileOperation(actor, op2.id).state, 'failed');
       assert.equal(store.getFileOperation(actor, op2.id).errorCode, 'compensation_failed');
       assert.equal(fs.existsSync(path.join(rootDir, 'd2', 'stuck.pdf')), true, 'file survives a failed unlink');
@@ -1932,7 +1932,7 @@ async function testRecoverySafePaths() {
     fs.rmSync(path.join(rootDir, 'd3'), { recursive: true, force: true });
     fs.symlinkSync(outsideDir, path.join(rootDir, 'd3'));
     fs.writeFileSync(path.join(outsideDir, 'x.pdf'), decoy2);
-    summary = recoverInterruptedFileOperations(store);
+    summary = await recoverInterruptedFileOperations(store);
     assert.equal(store.getFileOperation(actor, op3.id).state, 'failed');
     assert.equal(fs.readFileSync(path.join(outsideDir, 'x.pdf')).equals(decoy2), true,
       'recovery must not see or move files through a symlinked parent');
@@ -1957,7 +1957,7 @@ async function testRecoverySafePaths() {
     store.startFileOperation(op4.id);
     fs.rmSync(path.join(rootDir, 'd4'), { recursive: true, force: true });
     fs.symlinkSync(outsideDir, path.join(rootDir, 'd4'));
-    summary = recoverInterruptedFileOperations(store);
+    summary = await recoverInterruptedFileOperations(store);
     assert.equal(store.getFileOperation(actor, op4.id).state, 'rolled_back');
     assert.equal(fs.existsSync(path.join(rootDir, '.altcanvas-trash', `${sf2.id}.pdf`)), true,
       'trash payload stays in the controlled area');
@@ -2072,6 +2072,179 @@ async function testM4Audit2Fixes() {
   await testBoundedScanStaging();
 }
 
+
+// ============================================================
+// 22. Third-audit P1: recovery must verify target content identity;
+//     P2: truncation boundary at MAX/MAX+1 directory entries.
+// ============================================================
+async function testRecoveryContentIdentity() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-ci-store-'));
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-ci-root-'));
+  const store = new CanvasStore(path.join(tempDir, 'canvas.sqlite'));
+  const actor = canvasActorKey('local', 'm4-ci');
+  try {
+    const [root] = store.ensureLibraryRootsFromConfig(actor, [{ absolutePath: rootDir, displayName: '内容验证文库' }]);
+
+    // Helper: enrolled row + journaled op mimicking a crash right after the FS step.
+    const enrollWithBytes = (relativePath, bytes) => {
+      fs.mkdirSync(path.dirname(path.join(rootDir, relativePath)), { recursive: true });
+      fs.writeFileSync(path.join(rootDir, relativePath), bytes);
+      const row = store.createSourceFile(actor, root.id, {
+        relativePath, filename: path.basename(relativePath),
+        sha256: sha256Of(bytes), sizeBytes: bytes.length,
+        status: 'active'
+      });
+      return { row, bytes };
+    };
+    const startCrashedOp = (operationType, detail) => {
+      const op = store.createFileOperation(actor, { operationType, ...detail });
+      store.startFileOperation(op.id);
+      return op;
+    };
+
+    // 22.1 move-like: target replaced by a DIFFERENT pdf (SHA-B) while the row
+    // records SHA-A -> content_mismatch, DB untouched.
+    const bytesA = makePdfBytes('identity-A');
+    const { row: rowA } = enrollWithBytes('mv-a-src.pdf', bytesA);
+    fs.writeFileSync(path.join(rootDir, 'mv-a-dst.pdf'), makePdfBytes('identity-B'));
+    fs.rmSync(path.join(rootDir, 'mv-a-src.pdf'));
+    const opA = startCrashedOp('file.rename', {
+      sourceFileId: rowA.id, sourcePath: 'mv-a-src.pdf', targetPath: 'mv-a-dst.pdf'
+    });
+    let summary = await recoverInterruptedFileOperations(store);
+    assert.equal(store.getFileOperation(actor, opA.id).state, 'failed');
+    assert.equal(store.getFileOperation(actor, opA.id).errorCode, 'content_mismatch');
+    const rowAAfter = store.getSourceFile(actor, rowA.id);
+    assert.equal(rowAAfter.relativePath, 'mv-a-src.pdf', 'DB path must not move onto foreign content');
+    assert.equal(rowAAfter.sha256, sha256Of(bytesA), 'recorded identity must stay intact');
+
+    // 22.2 move-like: target is a DIRECTORY -> content_mismatch, DB untouched.
+    const { row: rowB } = enrollWithBytes('mv-b-src.pdf', makePdfBytes('identity-B2'));
+    fs.rmSync(path.join(rootDir, 'mv-b-src.pdf'));
+    fs.mkdirSync(path.join(rootDir, 'mv-b-dst.pdf')); // a directory where the file should land
+    const opB = startCrashedOp('file.rename', {
+      sourceFileId: rowB.id, sourcePath: 'mv-b-src.pdf', targetPath: 'mv-b-dst.pdf'
+    });
+    await recoverInterruptedFileOperations(store);
+    assert.equal(store.getFileOperation(actor, opB.id).state, 'failed');
+    assert.equal(store.getFileOperation(actor, opB.id).errorCode, 'content_mismatch');
+    assert.equal(store.getSourceFile(actor, rowB.id).relativePath, 'mv-b-src.pdf');
+
+    // 22.3 trash: recycle-area file replaced by different bytes -> failed, row
+    // stays active, nothing committed as trashed.
+    fs.mkdirSync(path.join(rootDir, '.altcanvas-trash'), { recursive: true });
+    const bytesC = makePdfBytes('identity-C');
+    const { row: rowC } = enrollWithBytes('trash-c.pdf', bytesC);
+    fs.renameSync(path.join(rootDir, 'trash-c.pdf'), path.join(rootDir, '.altcanvas-trash', `${rowC.id}.pdf`));
+    fs.writeFileSync(path.join(rootDir, '.altcanvas-trash', `${rowC.id}.pdf`), makePdfBytes('identity-C-prime'));
+    const opC = startCrashedOp('file.trash', {
+      sourceFileId: rowC.id, sourcePath: 'trash-c.pdf', targetPath: `.altcanvas-trash/${rowC.id}.pdf`
+    });
+    await recoverInterruptedFileOperations(store);
+    assert.equal(store.getFileOperation(actor, opC.id).state, 'failed');
+    assert.equal(store.getFileOperation(actor, opC.id).errorCode, 'content_mismatch');
+    assert.equal(store.getSourceFile(actor, rowC.id).status, 'active',
+      'a foreign trash payload must never flip the row to trashed');
+
+    // 22.4 restore: target replaced by different content -> content_mismatch,
+    // row stays trashed, trash payload intact.
+    const bytesD = makePdfBytes('identity-D');
+    const { row: rowD } = enrollWithBytes('res-d.pdf', bytesD);
+    store.updateSourceFile(actor, rowD.id, { status: 'trashed' });
+    fs.mkdirSync(path.join(rootDir, '.altcanvas-trash'), { recursive: true });
+    fs.renameSync(path.join(rootDir, 'res-d.pdf'), path.join(rootDir, '.altcanvas-trash', `${rowD.id}.pdf`));
+    // Crash point: the rename back already consumed the trash payload, and the
+    // restored target was then overwritten with DIFFERENT bytes.
+    fs.renameSync(path.join(rootDir, '.altcanvas-trash', `${rowD.id}.pdf`), path.join(rootDir, 'res-d.pdf'));
+    fs.writeFileSync(path.join(rootDir, 'res-d.pdf'), makePdfBytes('identity-D-prime'));
+    const opD = startCrashedOp('file.restore', {
+      sourceFileId: rowD.id, sourcePath: `.altcanvas-trash/${rowD.id}.pdf`, targetPath: 'res-d.pdf'
+    });
+    await recoverInterruptedFileOperations(store);
+    assert.equal(store.getFileOperation(actor, opD.id).state, 'failed');
+    assert.equal(store.getFileOperation(actor, opD.id).errorCode, 'content_mismatch');
+    assert.equal(store.getSourceFile(actor, rowD.id).status, 'trashed');
+    assert.equal(fs.readFileSync(path.join(rootDir, 'res-d.pdf')).equals(makePdfBytes('identity-D-prime')), true,
+      'the foreign target content must be left exactly as found');
+
+    // 22.5 import: DB row exists but the file is GONE -> failed, not completed.
+    const bytesE = makePdfBytes('identity-E');
+    const { row: rowE } = enrollWithBytes('imp-e.pdf', bytesE);
+    const opE = startCrashedOp('file.import', {
+      targetPath: `${rootDir}/imp-e.pdf`,
+      payload: { rootId: root.id, targetDir: '', filename: 'imp-e.pdf' }
+    });
+    fs.rmSync(path.join(rootDir, 'imp-e.pdf'));
+    await recoverInterruptedFileOperations(store);
+    assert.equal(store.getFileOperation(actor, opE.id).state, 'failed');
+    assert.equal(store.getFileOperation(actor, opE.id).errorCode, 'file_missing');
+    assert.ok(store.getSourceFile(actor, rowE.id), 'row survives for the next scan to reconcile');
+
+    // 22.6 import: DB row exists and the file matches -> completed (positive control).
+    const bytesF = makePdfBytes('identity-F');
+    const { row: rowF } = enrollWithBytes('imp-f.pdf', bytesF);
+    const opF = startCrashedOp('file.import', {
+      targetPath: `${rootDir}/imp-f.pdf`,
+      payload: { rootId: root.id, targetDir: '', filename: 'imp-f.pdf' }
+    });
+    summary = await recoverInterruptedFileOperations(store);
+    assert.equal(store.getFileOperation(actor, opF.id).state, 'completed');
+    assert.equal(fs.existsSync(path.join(rootDir, 'imp-f.pdf')), true);
+
+    // 22.7 matching content still completes a move-like reconciliation.
+    const bytesG = makePdfBytes('identity-G');
+    const { row: rowG } = enrollWithBytes('mv-g-src.pdf', bytesG);
+    fs.renameSync(path.join(rootDir, 'mv-g-src.pdf'), path.join(rootDir, 'mv-g-dst.pdf'));
+    const opG = startCrashedOp('file.rename', {
+      sourceFileId: rowG.id, sourcePath: 'mv-g-src.pdf', targetPath: 'mv-g-dst.pdf'
+    });
+    await recoverInterruptedFileOperations(store);
+    assert.equal(store.getFileOperation(actor, opG.id).state, 'completed');
+    assert.equal(store.getSourceFile(actor, rowG.id).relativePath, 'mv-g-dst.pdf');
+
+    console.log('✅ recovery content identity: mismatched bytes / directory targets / missing files never complete, matching content does passed');
+  } finally {
+    try { store.close(); } catch {}
+    fs.rmSync(tempDir, { recursive: true, force: true });
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+}
+
+async function testListingTruncationBoundary() {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-trunc-'));
+  const { MAX_DIRECTORY_LIST, listDirectoryPage } = await import('../server/native-fs.mjs');
+  try {
+    const boundaries = [
+      { count: MAX_DIRECTORY_LIST - 1, truncated: false, total: MAX_DIRECTORY_LIST - 1 },
+      { count: MAX_DIRECTORY_LIST, truncated: false, total: MAX_DIRECTORY_LIST },
+      { count: MAX_DIRECTORY_LIST + 1, truncated: true, total: MAX_DIRECTORY_LIST }
+    ];
+    for (const { count, truncated, total } of boundaries) {
+      const dir = path.join(rootDir, `d${count}`);
+      fs.mkdirSync(dir);
+      const tiny = Buffer.from('%PDF-1.4 x');
+      for (let i = 0; i < count; i++) {
+        fs.writeFileSync(path.join(dir, `f${i}.pdf`), tiny);
+      }
+      const listing = listDirectoryPage(dir, '');
+      assert.equal(listing.truncated, truncated,
+        `${count} entries must report truncated=${truncated} (got ${listing.truncated})`);
+      assert.equal(listing.total, total,
+        `${count} entries must expose total=${total}`);
+      assert.equal(listing.entries.length, total, 'page (unlimited) carries every buffered entry');
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+    console.log(`✅ listing truncation boundary: ${MAX_DIRECTORY_LIST - 1}/${MAX_DIRECTORY_LIST}/${MAX_DIRECTORY_LIST + 1} entries decide truncated correctly passed`);
+  } finally {
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+}
+
+async function testM4Audit3Fixes() {
+  await testRecoveryContentIdentity();
+  await testListingTruncationBoundary();
+}
+
 try {
   await main();
   await testV12Migration();
@@ -2079,6 +2252,7 @@ try {
   await testM4FileOps();
   await testM4AuditFixes();
   await testM4Audit2Fixes();
+  await testM4Audit3Fixes();
   process.exit(0);
 } catch (err) {
   console.error('❌ Native M4 test failure:', err);

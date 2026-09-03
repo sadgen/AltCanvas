@@ -70,7 +70,9 @@ if (process.env.NODE_ENV === 'production') {
   if (!process.env.PUBLIC_ORIGIN) {
     throw new Error('PUBLIC_ORIGIN is required in production');
   }
-  if (!process.env.PUBLIC_ORIGIN.startsWith('https://') && process.env.ALLOW_INSECURE_OAUTH !== 'true') {
+  if (!process.env.PUBLIC_ORIGIN.startsWith('https://')) {
+    // [M4] The legacy insecure-origin bypass was removed: production
+    // deployments always require an HTTPS public origin.
     throw new Error('PUBLIC_ORIGIN must use HTTPS in production');
   }
 }
@@ -330,9 +332,9 @@ server.listen(PORT, '0.0.0.0', () => {
       }
     }
     if (canvasStore) {
-      import('../server/library-scanner.mjs').then(({ recoverInterruptedFileOperations }) => {
-        const fileOpSummary = recoverInterruptedFileOperations(canvasStore);
-        if (fileOpSummary && (fileOpSummary.interruptedScans || fileOpSummary.interruptedFileOps)) {
+      import('../server/library-scanner.mjs').then(async ({ recoverInterruptedFileOperations }) => {
+        const fileOpSummary = await recoverInterruptedFileOperations(canvasStore);
+        if (fileOpSummary && (fileOpSummary.failed > 0 || fileOpSummary.scansReset > 0 || fileOpSummary.completed > 0 || fileOpSummary.rolledBack > 0)) {
           console.log(`[dev-server] 文件操作恢复完成: ${JSON.stringify(fileOpSummary)}`);
         }
       }).catch(err => {

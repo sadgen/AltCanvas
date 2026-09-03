@@ -22,7 +22,7 @@ archived implementation is preserved on the git tag
 
 ## Current status
 
-M4 (native file and library management) is complete. AltCanvas runs as a single
+M4 (native file and library management) is in final acceptance (CONDITIONAL PASS pending re-audit and manual verification). AltCanvas runs as a single
 Node.js service with local-account authentication, an independent SQLite
 Canvas database, content-addressed PDF storage under `data/blobs/`, and
 server-configured native library roots (`NATIVE_LIBRARY_ROOTS`) that point at

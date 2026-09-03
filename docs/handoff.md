@@ -1490,3 +1490,54 @@
   /auth/session 仅 local、首页 200。
 - M4 维持 CONDITIONAL PASS：等待本轮整改复审；复审通过后才进行人工实机
   验收（步骤见前节，验收时注意 data/library 挂载已在 compose/env 配好）。
+
+---
+
+## 2026-09-03 会话（M4 三轮审计整改：恢复内容身份 / OAuth 旁路 / 前端分页 / 截断边界）
+
+二轮整改复审后仍余 2 P1 + 2 P2 + README 状态问题，本轮全部闭环：
+
+### P1 恢复器内容身份验证
+
+- 新增 `verifyRecoveryTargetContent`：完成任何 rename/move/trash/restore
+  对账前，经安全文件句柄（O_NOFOLLOW + realpath + 常规文件校验）重算目标
+  SHA-256，必须与 `source_files.sha256` 一致；不一致（含目标被换 PDF、
+  目标是目录、行哈希为空不可验证）→ `content_mismatch` failed，数据库零
+  更新，交由下次扫描对账真实状态。
+- `reconcileImport` 在 DB 行已存在时也必须核实：文件缺失 → `file_missing`
+  failed；哈希不符 → `content_mismatch` failed；只有行存在且内容一致才
+  completed。
+- `recoverInterruptedFileOperations` 改为 async（dev-server 接线已适配）。
+- 测试组 22：换 PDF / 目录占位 / DB 已写但文件缺失 / 匹配内容正反例，
+  trash 与 restore 的回收载荷被替换场景。
+
+### P1 退役 OAuth 变量旁路
+
+- dev-server 删除 `ALLOW_INSECURE_OAUTH` 读取：生产环境恒要求
+  `PUBLIC_ORIGIN=https://`，无任何豁免。
+- deploy-config 测试扩展：递归扫描 server/ 与 scripts/ 全部 .mjs 断言
+  不出现 `process.env.<退役变量>`（8 个变量，含 ALLOW_INSECURE_OAUTH 与
+  AUTH_MODE），.env.example 同样零出现；并断言生产 HTTPS 要求无旁路。
+
+### P2 前端目录分页消费
+
+- `loadSourceFiles` 支持 `{append}`：携带 cursor 追加下一页，列表尾部渲染
+  “加载更多（已显示 X / 共 Y）”；切换目录/根目录/重扫时 cursor 重置；
+  `meta.truncated` 时列表顶部显示“目录项目过多，当前结果不完整”警示。
+- canvas-ui 增加对应结构断言（loadMoreSourceFiles/append/btn-source-load-more/
+  截断文案）。
+
+### P2 截断边界
+
+- `listDirectoryPage` 改为读到第 MAX+1 项才置 `truncated`：恰好 20000 项
+  不再误报；19999/20000/20001 三个边界的行为测试（真实磁盘文件）。
+
+### README 状态
+
+- "M4 is complete" 改为 "in final acceptance (CONDITIONAL PASS pending
+  re-audit and manual verification)"。
+
+### 验证
+
+- `npm test` 10 套全部通过（exit 0），`git diff --check` 干净，服务已重启
+  且首页 200。M4 维持 CONDITIONAL PASS，等待最后一轮自动化复审。

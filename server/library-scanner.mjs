@@ -131,7 +131,7 @@ export function enrollScannedFile(store, actorKey, rootId, entry) {
 //   delete_permanent  file already gone        -> finish the DB purge
 //   mkdir        idempotently ensure the directory
 //   library.scan nothing to reconcile; the next scan redoes it safely
-export function recoverInterruptedFileOperations(store) {
+export async function recoverInterruptedFileOperations(store) {
   const resumable = store.listResumableFileOperations();
   const summary = { completed: 0, rolledBack: 0, failed: 0, scansReset: 0 };
   for (const op of resumable) {
@@ -144,22 +144,22 @@ export function recoverInterruptedFileOperations(store) {
           break;
         case 'file.rename':
         case 'file.move':
-          summary[reconcileMoveLike(store, op)] += 1;
+          summary[await reconcileMoveLike(store, op)] += 1;
           break;
         case 'file.trash':
-          summary[reconcileTrash(store, op)] += 1;
+          summary[await reconcileTrash(store, op)] += 1;
           break;
         case 'file.restore':
-          summary[reconcileRestore(store, op)] += 1;
+          summary[await reconcileRestore(store, op)] += 1;
           break;
         case 'file.import':
-          summary[reconcileImport(store, op)] += 1;
+          summary[await reconcileImport(store, op)] += 1;
           break;
         case 'file.delete_permanent':
-          summary[reconcilePermanentDelete(store, op)] += 1;
+          summary[await reconcilePermanentDelete(store, op)] += 1;
           break;
         case 'file.mkdir':
-          summary[reconcileMkdir(store, op)] += 1;
+          summary[await reconcileMkdir(store, op)] += 1;
           break;
         default:
           store.failFileOperation(op.id, 'unknown_operation_type');
@@ -171,6 +171,27 @@ export function recoverInterruptedFileOperations(store) {
     }
   }
   return summary;
+}
+
+// Content-identity gate for recovery completion: the file at the recorded
+// target is re-hashed through the safe fd path (O_NOFOLLOW + realpath
+// containment + regular-file check). Completing a reconciliation requires the
+// hash to equal source_files.sha256; anything else — different bytes, a
+// directory in the target's place, an unreadable file, or a null recorded
+// hash that cannot be verified — is a content_mismatch failure that leaves
+// the database untouched (the next scan reconciles the real state).
+async function verifyRecoveryTargetContent(rootAbsolutePath, relativePath, expectedSha256) {
+  if (!expectedSha256) return { ok: false, reason: 'unverifiable_hash' };
+  try {
+    const hashed = await hashFileInsideRoot(rootAbsolutePath, relativePath);
+    if (hashed.sha256 !== expectedSha256) return { ok: false, reason: 'content_mismatch' };
+    return { ok: true };
+  } catch (err) {
+    if (err?.code === 'file_not_found' || err?.code === 'not_a_regular_file' || err?.code === 'symlink_rejected') {
+      return { ok: false, reason: 'content_mismatch' };
+    }
+    throw err;
+  }
 }
 
 function resetRootScanState(store, rootId) {
@@ -190,7 +211,7 @@ function basenameOf(relativePath) {
 // Renames and moves share the same facts: DB row is either still on
 // source_path (FS ran but DB not updated -> finish it) or already on
 // target_path (nothing to do).
-function reconcileMoveLike(store, op) {
+async function reconcileMoveLike(store, op) {
   const row = op.sourceFileId ? store.db.prepare('SELECT * FROM source_files WHERE id = ?').get(op.sourceFileId) : null;
   if (!row || row.deleted_at) {
     store.failFileOperation(op.id, 'source_file_missing');
@@ -210,6 +231,15 @@ function reconcileMoveLike(store, op) {
   const targetOnDisk = targetProbe.present;
 
   if (targetOnDisk && !sourceOnDisk) {
+    // The target file must still be the SAME file: re-hash it through the
+    // safe fd path and compare against the recorded identity before any DB
+    // completion. A replaced file (or a directory in its place) is a
+    // content_mismatch that leaves the database untouched.
+    const verification = await verifyRecoveryTargetContent(root.absolute_path, op.targetPath, row.sha256);
+    if (!verification.ok) {
+      store.failFileOperation(op.id, verification.reason === 'unverifiable_hash' ? 'content_mismatch' : verification.reason);
+      return 'failed';
+    }
     if (row.relative_path === op.targetPath) {
       store.completeFileOperation(op.id);
       return 'completed';
@@ -238,7 +268,7 @@ function reconcileMoveLike(store, op) {
   return 'failed';
 }
 
-function reconcileTrash(store, op) {
+async function reconcileTrash(store, op) {
   const row = op.sourceFileId ? store.db.prepare('SELECT * FROM source_files WHERE id = ?').get(op.sourceFileId) : null;
   if (!row || row.deleted_at) {
     store.failFileOperation(op.id, 'source_file_missing');
@@ -255,6 +285,11 @@ function reconcileTrash(store, op) {
   const sourceOnDisk = sourceProbe.present;
 
   if (trashOnDisk && !sourceOnDisk) {
+    const verification = await verifyRecoveryTargetContent(root.absolute_path, op.targetPath, row.sha256);
+    if (!verification.ok) {
+      store.failFileOperation(op.id, verification.reason === 'unverifiable_hash' ? 'content_mismatch' : verification.reason);
+      return 'failed';
+    }
     if (row.status !== 'trashed') {
       store.db.prepare(`
         UPDATE source_files SET status = 'trashed', trashed_at = COALESCE(trashed_at, ?),
@@ -279,7 +314,7 @@ function reconcileTrash(store, op) {
   return 'failed';
 }
 
-function reconcileRestore(store, op) {
+async function reconcileRestore(store, op) {
   const row = op.sourceFileId ? store.db.prepare('SELECT * FROM source_files WHERE id = ?').get(op.sourceFileId) : null;
   if (!row || row.deleted_at) {
     store.failFileOperation(op.id, 'source_file_missing');
@@ -296,6 +331,11 @@ function reconcileRestore(store, op) {
   const targetOnDisk = targetProbe.present;
 
   if (targetOnDisk && !trashOnDisk) {
+    const verification = await verifyRecoveryTargetContent(root.absolute_path, op.targetPath, row.sha256);
+    if (!verification.ok) {
+      store.failFileOperation(op.id, verification.reason === 'unverifiable_hash' ? 'content_mismatch' : verification.reason);
+      return 'failed';
+    }
     store.db.prepare(`
       UPDATE source_files SET status = 'active', trashed_at = NULL, relative_path = ?, filename = ?,
         version = version + 1, updated_at = ?
@@ -312,7 +352,7 @@ function reconcileRestore(store, op) {
   return 'failed';
 }
 
-function reconcileImport(store, op) {
+async function reconcileImport(store, op) {
   const rootId = op.payload?.rootId;
   const targetDir = op.payload?.targetDir || '';
   const filename = op.payload?.filename;
@@ -345,6 +385,18 @@ function reconcileImport(store, op) {
     return 'rolledBack';
   }
   if (dbRow) {
+    // A DB row alone is not proof the import landed: the file must exist and
+    // still carry the recorded content identity. A missing file or different
+    // bytes is a failure (the next scan reconciles the row), never completed.
+    if (!probe.present) {
+      store.failFileOperation(op.id, 'file_missing');
+      return 'failed';
+    }
+    const verification = await verifyRecoveryTargetContent(root.absolute_path, relativePath, dbRow.sha256);
+    if (!verification.ok) {
+      store.failFileOperation(op.id, verification.reason === 'unverifiable_hash' ? 'content_mismatch' : verification.reason);
+      return 'failed';
+    }
     store.completeFileOperation(op.id);
     return 'completed';
   }

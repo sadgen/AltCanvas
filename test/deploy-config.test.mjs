@@ -1,5 +1,7 @@
 import assert from 'assert/strict';
 import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
 console.log('🧪 Running deployment configuration regression tests...');
 
@@ -119,5 +121,44 @@ for (const docPath of archivedDocs) {
     `${docPath} must reference the archive/last-altero-compatible git tag`);
 }
 console.log('✅ All four historical design documents are marked as archived');
+
+
+// 8. The retirement must hold in server/runtime code too, not only in the
+//    deployment files: no server or script source may READ a retired variable
+//    through process.env, and the example environment file must not mention
+//    any of them. (ALLOW_INSECURE_OAUTH previously bypassed the production
+//    HTTPS requirement, so reads of it are forbidden outright.)
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+function listSourceFiles(dir) {
+  const out = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) out.push(...listSourceFiles(full));
+    else if (entry.name.endsWith('.mjs')) out.push(full);
+  }
+  return out;
+}
+const runtimeSources = [...listSourceFiles(path.join(repoRoot, 'server')), ...listSourceFiles(path.join(repoRoot, 'scripts'))];
+assert.equal(runtimeSources.length > 0, true, 'server/ and scripts/ sources must be discovered');
+for (const sourcePath of runtimeSources) {
+  const source = fs.readFileSync(sourcePath, 'utf8');
+  for (const retiredVar of retiredEnvVars) {
+    assert.equal(source.includes(`process.env.${retiredVar}`), false,
+      `${path.relative(repoRoot, sourcePath)} must not read the retired variable ${retiredVar}`);
+  }
+}
+const envExample = readRepoFile('.env.example');
+for (const retiredVar of retiredEnvVars) {
+  assert.equal(envExample.includes(retiredVar), false,
+    `.env.example must not mention the retired variable ${retiredVar}`);
+}
+console.log('✅ server/, scripts/ and .env.example never read or document retired variables');
+
+// 9. Production HTTPS must be unconditional: the dev-server keeps requiring an
+//    https PUBLIC_ORIGIN in production with no escape hatch.
+const devServer = readRepoFile('scripts/dev-server.mjs');
+assert.equal(devServer.includes('PUBLIC_ORIGIN must use HTTPS in production'), true,
+  'dev-server must keep the production HTTPS requirement');
+console.log('✅ production HTTPS requirement has no bypass');
 
 console.log('🎉 All deployment configuration regression tests passed!');

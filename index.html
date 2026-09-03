@@ -2143,7 +2143,10 @@
     const M4_SOURCE_STATUS_LABELS = {
       active: '正常', duplicate: '重复未入库', missing: '缺失', unreadable: '损坏', trashed: '回收站'
     };
-    const sourceFilesState = { roots: [], rootId: null, path: '', entries: [], meta: null, loading: false };
+    const sourceFilesState = {
+      roots: [], rootId: null, path: '', entries: [], meta: null,
+      loading: false, loadingMore: false, nextCursor: null
+    };
     let libraryFilterState = 'all';
 
     async function m4Fetch(path, options = {}) {
@@ -2202,29 +2205,49 @@
       }
     }
 
-    async function loadSourceFiles(relativePath = sourceFilesState.path) {
+    async function loadSourceFiles(relativePath = sourceFilesState.path, { append = false } = {}) {
       const container = document.getElementById('source-files-items');
-      if (!container || sourceFilesState.loading) return;
+      if (!container) return;
+      if (append && sourceFilesState.loadingMore) return;
+      if (!append && sourceFilesState.loading) return;
       if (!sourceFilesState.rootId) {
         container.innerHTML = '<div class="text-center text-slate-500 py-12 text-xs">未配置文库根目录（服务端 NATIVE_LIBRARY_ROOTS）</div>';
         return;
       }
-      sourceFilesState.loading = true;
-      sourceFilesState.path = relativePath || '';
+      if (append) sourceFilesState.loadingMore = true;
+      else sourceFilesState.loading = true;
+      if (!append) {
+        sourceFilesState.path = relativePath || '';
+        sourceFilesState.nextCursor = null;
+      }
       const pathLabel = document.getElementById('source-files-path-label');
-      if (pathLabel) pathLabel.textContent = '/' + (sourceFilesState.path || '');
+      if (pathLabel && !append) pathLabel.textContent = '/' + (sourceFilesState.path || '');
       try {
         const params = new URLSearchParams({ limit: '200' });
         if (sourceFilesState.path) params.set('path', sourceFilesState.path);
+        const cursor = append ? sourceFilesState.nextCursor : 0;
+        if (cursor) params.set('cursor', String(cursor));
         const payload = await m4Fetch(`/native/library-roots/${sourceFilesState.rootId}/tree?${params.toString()}`);
-        sourceFilesState.entries = payload.data || [];
+        const pageEntries = payload.data || [];
+        sourceFilesState.entries = append ? sourceFilesState.entries.concat(pageEntries) : pageEntries;
         sourceFilesState.meta = payload.meta || null;
+        sourceFilesState.nextCursor = sourceFilesState.meta?.nextCursor ?? null;
         renderSourceFilesEntries();
       } catch (err) {
-        container.innerHTML = `<div class="text-center text-rose-400 py-10 text-xs">原始文件加载失败: ${escapeHTML(errorMessage(err))}</div>`;
+        if (!append) {
+          container.innerHTML = `<div class="text-center text-rose-400 py-10 text-xs">原始文件加载失败: ${escapeHTML(errorMessage(err))}</div>`;
+        } else {
+          showToast(`加载更多失败: ${errorMessage(err)}`, 'error');
+        }
       } finally {
-        sourceFilesState.loading = false;
+        sourceFilesState.loading = append ? false : false;
+        sourceFilesState.loadingMore = false;
       }
+    }
+
+    function loadMoreSourceFiles() {
+      if (sourceFilesState.nextCursor === null || sourceFilesState.nextCursor === undefined) return;
+      return loadSourceFiles(sourceFilesState.path, { append: true });
     }
 
     function renderSourceFilesEntries() {
@@ -2236,6 +2259,12 @@
         return;
       }
       container.innerHTML = '';
+      if (sourceFilesState.meta?.truncated) {
+        const notice = document.createElement('div');
+        notice.className = 'p-2 mb-1 rounded bg-amber-950/50 border border-amber-800/60 text-[11px] text-amber-300';
+        notice.textContent = '⚠️ 目录项目过多，当前结果不完整（已截断到前 20000 项）；请将文件整理到子目录后浏览。';
+        container.appendChild(notice);
+      }
       for (const entry of entries) {
         const div = document.createElement('div');
         div.role = 'button';
@@ -2286,6 +2315,21 @@
           }
         };
         container.appendChild(div);
+      }
+      if (sourceFilesState.nextCursor !== null && sourceFilesState.nextCursor !== undefined) {
+        const more = document.createElement('button');
+        more.type = 'button';
+        more.id = 'btn-source-load-more';
+        more.className = 'w-full p-2 mt-1 rounded bg-slate-900 hover:bg-slate-800 border border-slate-800 text-[11px] text-slate-300 transition';
+        const shown = sourceFilesState.entries.length;
+        const total = sourceFilesState.meta?.total;
+        more.textContent = sourceFilesState.loadingMore
+          ? '⏳ 加载中...'
+          : `加载更多（已显示 ${shown}${typeof total === 'number' ? ` / ${total}` : ''}）`;
+        more.onclick = () => {
+          void loadMoreSourceFiles();
+        };
+        container.appendChild(more);
       }
     }
 
