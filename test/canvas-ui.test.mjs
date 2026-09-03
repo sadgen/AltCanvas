@@ -299,8 +299,8 @@ assert.match(html, /局域网 HTTP 会明文传输卡片内容与凭据/,
   'AI settings must warn about plaintext private-network transport');
 assert.match(html, /libraryType === 'native'/,
   'normalizeLibraryContext must preserve native library type without mapping to user');
-assert.match(html, /library\.libraryType === 'native'/,
-  'libraryApiPrefix must handle native library without mapping to users');
+assert.match(html, /function libraryApiPrefix\(\) \{\s*throw new Error\('Altero 外部文库已于 M4 移除'\);\s*\}/,
+  'libraryApiPrefix must be reduced to the explicit M4-removal guard');
 assert.match(html, /async function uploadNativePdfFile\(/,
   'UI must provide uploadNativePdfFile handler for PDF uploads');
 assert.match(html, /async function openNativeDocument\(/,
@@ -319,8 +319,8 @@ assert.match(html, /async function openDocument\(/,
   'UI must provide unified openDocument router');
 assert.match(html, /await openItem\(itemData, nativeLib\)/,
   'openNativeDocument must call openItem with nativeLib');
-assert.match(html, /throw new Error\('Native library does not support Zotero API endpoints'\)/,
-  'libraryApiPrefix must strictly reject native library');
+assert.doesNotMatch(html, /Native library does not support Zotero API endpoints/,
+  'the Zotero-era native rejection must be gone together with the external library');
 
 // --- Behavioral Execution Tests for Native Opening & Reader Annotation Sync ---
 {
@@ -565,13 +565,15 @@ assert.match(html, /function openQuickEvidencePopover\(/);
   assert.equal(popoverTexts['evidence-popover-page-badge'], 'p.5');
 }
 
-// --- Capabilities-Driven UI Tests ---
+// --- Capabilities-Driven UI Tests (M4: local-only capabilities) ---
 assert.match(html, /function applyCapabilitiesUI\(\)/,
   'UI must define applyCapabilitiesUI to control capability-driven views');
-assert.match(html, /config\.capabilities = data\.capabilities/,
-  'checkSession must store capabilities');
-assert.match(html, /collectionsContainer\.classList\.toggle\('hidden', !caps\.collections\)/,
-  'collections container must toggle based on collections capability');
+assert.match(html, /config\.capabilities = data\.capabilities \|\| \{ nativeUpload: true \}/,
+  'checkSession must store capabilities with nativeUpload as the only local default');
+assert.doesNotMatch(html, /caps\.(collections|upstreamSync|externalLibrary)/,
+  'Altero-only capability flags must be gone from the capability UI');
+assert.doesNotMatch(html, /collections-container/,
+  'the Altero collections filter container must be gone from the library pane');
 assert.match(html, /function openQuickImportModal\(/);
 assert.match(html, /async function resolveQuickImport\(\)/);
 assert.match(html, /快速导入文献 \(DOI \/ arXiv \/ URL \/ BibTeX \/ RIS\)/,
@@ -579,52 +581,59 @@ assert.match(html, /快速导入文献 \(DOI \/ arXiv \/ URL \/ BibTeX \/ RIS\)/
 assert.match(html, /<textarea id="input-quick-import-query"/,
   'quick-import query input must use textarea for multi-line bibliography support');
 
-// --- Behavioral test: openLoginModal in local mode with externalLibrary disabled ---
+// --- M4: openLoginModal must be local-only (no Altero section, no mode toggle) ---
 {
   const openLoginMatch = /function openLoginModal\(\)\s*\{([\s\S]*?)\n    \}/.exec(scripts[0]);
   assert.ok(openLoginMatch, 'openLoginModal must be extractable from script');
 
-  const classes = {
-    'login-modal': new Set(['hidden']),
-    'local-auth-section': new Set(['hidden']),
-    'altero-auth-section': new Set(['hidden']),
-    'btn-toggle-auth-mode': new Set(),
-    'local-auth-error': new Set()
-  };
+  assert.doesNotMatch(openLoginMatch[0], /altero|oauth|toggle-auth-mode|dynamicAlteroAllowed|externalLibrary/i,
+    'openLoginModal must not retain any Altero auth logic after M4');
+  assert.doesNotMatch(html, /id="altero-auth-section"/,
+    'the Altero auth section markup must be gone');
+  assert.doesNotMatch(html, /id="btn-toggle-auth-mode"/,
+    'the auth-mode toggle button must be gone');
+  assert.doesNotMatch(html, /id="input-oauth-server"/,
+    'the OAuth server input must be gone');
+
+  const classes = { 'login-modal': new Set(['hidden']), 'local-auth-error': new Set() };
   const texts = {};
+  const focusedIds = [];
 
   const mockDoc = {
     getElementById: (id) => ({
       classList: {
         add: (c) => classes[id]?.add(c),
         remove: (c) => classes[id]?.delete(c),
-        toggle: (c, force) => force ? classes[id]?.add(c) : classes[id]?.delete(c),
         contains: (c) => classes[id]?.has(c) ?? false
       },
       set textContent(v) { texts[id] = v; },
       get textContent() { return texts[id] || ''; },
-      focus: () => {}
+      focus: () => focusedIds.push(id)
     })
   };
 
   const openLoginRunner = new Function(
-    'document', 'authMode', 'needsSetup', 'dynamicAlteroAllowed', 'config', 'requestAnimationFrame',
+    'document', 'needsSetup', 'config', 'requestAnimationFrame',
     openLoginMatch[1]
   );
 
-  // Test with externalLibrary = false and defaultAlteroApi present
+  // Whatever config.capabilities claims, the modal must stay purely local:
+  // there is no altero section to reveal and no toggle button to show.
   openLoginRunner(
     mockDoc,
-    'local',
     false,
-    false,
-    { capabilities: { externalLibrary: false }, defaultAlteroApi: 'https://altero.example.com' },
+    { capabilities: { externalLibrary: true } },
     (fn) => fn()
   );
 
-  assert.ok(classes['btn-toggle-auth-mode'].has('hidden'), 'btn-toggle-auth-mode must remain hidden in local auth mode when externalLibrary is false');
-  assert.ok(!classes['local-auth-section'].has('hidden'), 'local-auth-section must be visible');
-  assert.ok(classes['altero-auth-section'].has('hidden'), 'altero-auth-section must be hidden');
+  assert.ok(!classes['login-modal'].has('hidden'), 'login modal must open');
+  assert.equal(texts['login-title-text'], '登录 AltCanvas', 'login modal must use the local login title');
+  assert.deepEqual(focusedIds, ['input-local-username'], 'focus must go to the local username input only');
+
+  // First-run bootstrap copy stays on the same local-only modal.
+  openLoginRunner(mockDoc, true, {}, (fn) => fn());
+  assert.equal(texts['login-title-text'], '🎉 创建管理员账户', 'first-run must render admin setup copy');
+  assert.deepEqual(focusedIds, ['input-local-username', 'input-local-username'], 'focus must stay on the local username input');
 }
 
 // =========================================================================
@@ -846,44 +855,12 @@ assert.match(html, /<textarea id="input-quick-import-query"/,
       'Session confirmation failure must show a specific error message');
   }
 
-  // --- Case 5: Altero OAuth branch still redirects (callback init stays intact) ---
+  // --- Case 5: [M4] The Altero OAuth server redirect branch must be GONE ---
   {
-    const inputs = { 'input-oauth-server': { value: 'https://altero.example.com' } };
-    const mockDoc = {
-      getElementById: (id) => ({
-        get value() { return inputs[id]?.value ?? ''; },
-        set value(v) { inputs[id].value = v; },
-        classList: { add() {}, remove() {}, contains: () => false },
-        textContent: '',
-        focus: () => {}
-      })
-    };
-    let redirectHref = '';
-    const runner = new Function(
-      'authMode', 'needsSetup', 'document', 'fetch', 'localStorage',
-      'closeLoginModal', 'showToast', 'checkSession', 'initializeAuthenticatedApp', 'openLoginModal',
-      'window',
-      `return async function submitLogin() { ${submitLoginMatch[1]} };`
-    );
-    const submit = runner(
-      'altero', false, mockDoc,
-      async () => { throw new Error('must not fetch'); },
-      { setItem: (k, v) => { if (k === 'altcanvas_altero_server') redirectHref = `stored:${v}`; } },
-      () => {},
-      () => {},
-      async () => {},
-      async () => {},
-      () => {},
-      {
-        location: {
-          set href(v) { redirectHref = v; },
-          get href() { return redirectHref; }
-        }
-      }
-    );
-    await submit();
-    assert.match(redirectHref, /^\/auth\/login\?altero_api=/,
-      'Altero OAuth branch must still redirect to the OAuth login flow');
+    assert.doesNotMatch(submitLoginSrc, /input-oauth-server|altcanvas_altero_server|altero_api|altero\.example\.com/,
+      'submitLogin must not retain the Altero OAuth server redirect path');
+    assert.doesNotMatch(submitLoginSrc, /window\.location\.href/,
+      'local login must never hard-redirect the page');
   }
 }
 
@@ -978,11 +955,34 @@ assert.match(html, /<textarea id="input-quick-import-query"/,
 // --- P1 Native Library Routing & Capability Isolation Tests ---
 assert.doesNotMatch(html, /\ballLibraryItems\b/, 'allLibraryItems must not exist in index.html');
 assert.match(html, /async function loadNativeLibrary\(/, 'loadNativeLibrary must exist');
-assert.match(html, /async function loadExternalLibrary\(/, 'loadExternalLibrary must exist');
+assert.doesNotMatch(html, /async function loadExternalLibrary\(/,
+  'loadExternalLibrary must be removed after the M4 native migration');
+assert.doesNotMatch(html, /config\.authMode === 'altero'/,
+  'altero routing must be gone from the library loader');
 assert.match(html, /function nativeDocumentToLibraryItem\(/, 'nativeDocumentToLibraryItem must exist');
 assert.match(html, /function renderNativeLibraryError\(/, 'renderNativeLibraryError must exist');
-assert.match(html, /config\.authMode === 'altero' &&\s*config\.capabilities\?\.externalLibrary === true/,
-  'capability must be the only routing criterion for external library');
+
+// --- M4 structural guarantees: the Altero/Zotero external library is fully removed ---
+assert.match(html, /function getApiUrl\(\)/,
+  'getApiUrl must remain only as an explicit throwing placeholder');
+assert.match(html, /Altero 外部文库已于 M4 移除/,
+  'the M4 removal guard message must be present (getApiUrl / libraryApiPrefix)');
+assert.doesNotMatch(html, /altero\.example\.com/, 'no Altero example host may remain');
+assert.doesNotMatch(html, /Zotero-API-Key/, 'no Zotero API key header may remain');
+assert.doesNotMatch(html, /Zotero-API-Version/, 'no Zotero API version header may remain');
+assert.doesNotMatch(html, /altcanvas_altero_server/, 'no Altero server storage key may remain');
+assert.doesNotMatch(html, /dynamicAlteroAllowed|allowDynamicAltero/,
+  'dynamic Altero login flags must be gone');
+assert.doesNotMatch(html, /altero-auth-section|btn-toggle-auth-mode|input-oauth-server/,
+  'Altero auth markup and handlers must be gone');
+assert.doesNotMatch(html, /legacy-direct-settings|btn-test-conn|btn-toggle-key|input-user-id/,
+  'direct-mode settings markup and handlers must be gone');
+assert.doesNotMatch(html, /upstreamSync|externalLibrary/,
+  'Altero-only capability flags must be gone');
+assert.doesNotMatch(html, /renderCollections|currentSelectedCollection|collections-container/,
+  'collection filtering UI and state must be gone');
+assert.match(html, /function getHeaders\(extra = \{\}\) \{\s*return \{\s*'Accept': 'application\/json'/,
+  'getHeaders must only send Accept JSON');
 
   // Behavioral Test: loadCollectionsAndLibrary in Local + externalLibrary: false mode
   {
@@ -1086,7 +1086,7 @@ assert.match(html, /config\.authMode === 'altero' &&\s*config\.capabilities\?\.e
     assert.equal(resultingItems[0].libraryType, 'native');
     assert.equal(resultingItems[0].children.length, 1);
     assert.equal(itemsRendered, true, 'renderItems must be called');
-    assert.equal(collectionsRendered, true, 'renderCollections must be called');
+    assert.equal(collectionsRendered, false, 'renderCollections must no longer exist or be invoked after M4');
 
     // Verify NO Altero requests were made
     assert.ok(requestedUrls.some(u => u.includes('/canvas/native/documents')), 'Must request native documents');
@@ -1163,11 +1163,9 @@ assert.match(html, /config\.authMode === 'altero' &&\s*config\.capabilities\?\.e
     assert.ok(!requestedUrls.some(u => u.includes('/api/users/') || u.includes('/api/groups/')), '500 Native error must not fallback to Altero API');
   }
 
-  // Case 3: Altero capability enabled
+  // Case 3: [M4] Even an altero-shaped config must stay on the native loading path
   {
     const requestedUrls = [];
-    let itemsRendered = false;
-    let collectionsRendered = false;
 
     const mockDocument = {
       getElementById: (id) => ({
@@ -1185,30 +1183,28 @@ assert.match(html, /config\.authMode === 'altero' &&\s*config\.capabilities\?\.e
 
     const mockFetch = async (url) => {
       requestedUrls.push(url);
-      if (url.includes('/collections')) {
-        return { ok: true, status: 200, json: async () => [{ key: 'col-1', data: { name: 'Col 1' } }] };
+      if (url.startsWith('/canvas/native/documents')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ data: [{ id: 'doc-nat-2', version: 1, title: 'Native Paper 2' }] })
+        };
       }
-      if (url.includes('/items/top')) {
-        return { ok: true, status: 200, json: async () => [{ key: 'item-1', data: { title: 'Altero Doc' } }] };
-      }
-      if (url.includes('/canvas/documents/metadata')) {
+      if (url.startsWith('/canvas/documents/metadata')) {
         return { ok: true, json: async () => ({ data: [] }) };
       }
       return { ok: false, status: 404 };
     };
 
-    const loadExternalFnMatch = html.match(/async function loadExternalLibrary\(signal\) \{([\s\S]*?)\n    \}/);
-    assert.ok(loadExternalFnMatch, 'loadExternalLibrary must exist');
-
-    const testAlteroRunner = new Function(
+    const testLocalOnlyRunner = new Function(
       'config', 'document', 'fetch', 'documentMetas', 'docMetaKey', 'renderCollections', 'renderItems',
-      'getApiUrl', 'getHeaders', 'errorMessage', 'escapeHTML', 'updateAuthUI', 'openSettingsModal', 'beginLogin',
+      'nativeDocumentToLibraryItem', 'renderNativeLibraryError', 'errorMessage', 'escapeHTML', 'updateAuthUI', 'openSettingsModal', 'beginLogin',
       `
       let libraryController = null;
       let allItems = [];
-      function renderNativeLibraryError() {}
-      async function loadNativeLibrary() {}
-      ${loadExternalFnMatch[0]}
+      ${nativeDocToItemMatch[0]}
+      ${renderNativeErrMatch[0]}
+      ${loadNativeFnMatch[0]}
       ${loadFnMatch[0]}
       return {
         run: async () => { await loadCollectionsAndLibrary(); return { allItems }; }
@@ -1216,16 +1212,16 @@ assert.match(html, /config\.authMode === 'altero' &&\s*config\.capabilities\?\.e
       `
     );
 
-    const instanceAltero = testAlteroRunner(
+    const instanceLocalOnly = testLocalOnlyRunner(
       mockConfig,
       mockDocument,
       mockFetch,
       new Map(),
       () => '',
-      () => { collectionsRendered = true; },
-      () => { itemsRendered = true; },
-      path => `/api${path}`,
-      () => ({}),
+      () => {},
+      () => {},
+      (d) => d,
+      () => {},
       e => e.message,
       s => s,
       () => {},
@@ -1233,12 +1229,11 @@ assert.match(html, /config\.authMode === 'altero' &&\s*config\.capabilities\?\.e
       () => {}
     );
 
-    const result = await instanceAltero.run();
-    assert.equal(result.allItems.length, 1, 'Altero mode must load items');
-    assert.ok(requestedUrls.some(u => u.includes('/users/altero-user-123/collections')), 'Altero mode must request collections');
-    assert.ok(requestedUrls.some(u => u.includes('/users/altero-user-123/items/top')), 'Altero mode must request items');
-    assert.equal(itemsRendered, true);
-    assert.equal(collectionsRendered, true);
+    const result = await instanceLocalOnly.run();
+    assert.equal(result.allItems.length, 1, 'altero-shaped config must still load the NATIVE library');
+    assert.ok(requestedUrls.some(u => u.includes('/canvas/native/documents')), 'native documents endpoint must be requested');
+    assert.ok(!requestedUrls.some(u => u.includes('/api/') || u.includes('/collections') || u.includes('/items/top')),
+      'altero-shaped config must never issue Altero collections/items requests');
   }
 }
 

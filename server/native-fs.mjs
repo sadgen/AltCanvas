@@ -196,13 +196,81 @@ export function walkDirectory(rootPath, relativeDir = '', { onEntry, onDirectory
 export function ensureDirectoryInsideRoot(rootPath, relativeDir) {
   const normalized = normalizeRelativePath(relativeDir);
   const rootReal = resolveRootRealPath(rootPath);
-  const target = resolveInsideRoot(rootReal, normalized);
-  fs.mkdirSync(target, { recursive: true, mode: 0o755 });
-  const real = fs.realpathSync(target);
+  return ensureVerifiedDirectory(rootReal, normalized);
+}
+
+// Per-component directory resolution used by every WRITE path. Starting from
+// the verified root realpath, each segment is lstat-ed in turn: a symlink at
+// ANY level is rejected before anything is written, missing segments are
+// created one at a time when `create` is set, and the final result is
+// re-resolved through realpath to assert containment. This closes the
+// parent-directory symlink escape that lexical resolution cannot see.
+export function ensureVerifiedDirectory(rootReal, relativeDir, { create = false } = {}) {
+  let current = rootReal;
+  const segments = relativeDir ? relativeDir.split('/') : [];
+  for (const segment of segments) {
+    const candidate = current + path.sep + segment;
+    let stat = null;
+    try {
+      stat = fs.lstatSync(candidate);
+    } catch (err) {
+      if (err.code === 'ENOENT' && create) {
+        try {
+          fs.mkdirSync(candidate, { mode: 0o755 });
+        } catch (mkdirErr) {
+          if (mkdirErr.code === 'EEXIST') {
+            // Lost a race (or a symlink just appeared): re-inspect below.
+          } else {
+            throw mkdirErr;
+          }
+        }
+        try {
+          stat = fs.lstatSync(candidate);
+        } catch {
+          throw new NativePathError(`directory segment is not addressable: ${segment}`, 'invalid_path');
+        }
+      } else if (err.code === 'ENOENT') {
+        throw new NativePathError(`directory does not exist: ${relativeDir}`, 'directory_not_found');
+      } else {
+        throw err;
+      }
+    }
+    if (stat.isSymbolicLink()) {
+      throw new NativePathError(`symbolic link in path is not addressable: ${segment}`, 'symlink_rejected');
+    }
+    if (!stat.isDirectory()) {
+      throw new NativePathError(`path segment is not a directory: ${segment}`, 'invalid_path');
+    }
+    current = candidate;
+  }
+  const real = fs.realpathSync(current);
   if (real !== rootReal && !real.startsWith(rootReal + path.sep)) {
     throw new NativePathError('resolved path escapes the library root', 'path_escape');
   }
-  return target;
+  return { dirPath: current, realpath: real };
+}
+
+// Resolves the parent directory of a target file path with per-component
+// symlink rejection (optionally creating missing directories). Returns the
+// verified parent realpath plus the lexical target path inside it.
+export function ensureParentInsideRoot(rootPath, targetRelativePath, { create = false } = {}) {
+  const rootReal = resolveRootRealPath(rootPath);
+  const target = resolveInsideRoot(rootReal, targetRelativePath);
+  const parentRelative = path.posix.dirname(targetRelativePath.split('\\').join('/'));
+  const normalizedParent = parentRelative === '.' ? '' : parentRelative;
+  const parent = ensureVerifiedDirectory(rootReal, normalizedParent, { create });
+  return { parentReal: parent.realpath, parentPath: parent.dirPath, targetPath: target };
+}
+
+// Post-write containment assertion: verifies a freshly written entry still
+// resolves inside the root. Callers MUST compensate (remove/rename back) when
+// this throws, guaranteeing zero side effects outside the root.
+export function assertWrittenInsideRoot(rootReal, absolutePath) {
+  const real = fs.realpathSync(absolutePath);
+  if (real !== rootReal && !real.startsWith(rootReal + path.sep)) {
+    throw new NativePathError('written path escaped the library root', 'path_escape');
+  }
+  return real;
 }
 
 // Lists a single directory level for the paginated tree view. Symlinks are

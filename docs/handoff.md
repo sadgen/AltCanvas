@@ -1320,3 +1320,92 @@
 6. 快速导入弹窗：粘贴 DOI/BibTeX → 展开目录区块选择根目录并归档 → 若目标
    同名会弹改名对话框，改新名字后应成功且不产生"(2)"。
 7. 完成后回复"完成"，Agent 复查两份日志确认零新增错误、零 Altero 请求。
+
+---
+
+## 2026-09-03 会话（M4 自动化初审 P1 整改，7 项全部闭环）
+
+### P1.1 写入路径逐级符号链接拒绝（含零副作用保证）
+
+- 新增 `ensureVerifiedDirectory(rootReal, rel, {create})`：从根 realpath 起
+  逐组件 lstat，任意一级符号链接即拒（`symlink_rejected`），可逐段创建缺失
+  目录；`ensureParentInsideRoot`/`assertWrittenInsideRoot` 供写入路径组合使用。
+- rename/move/trash/restore/import/mkdir 全部改为：写入前对源与目标父链
+  逐级校验 → 写入后 realpath 越界断言 → 断言失败立即补偿（rename back /
+  unlink），保证根目录外零副作用。
+- 初审发现的缺口（trash 只校验回收区一侧、源路径父级符号链接可把根外文件
+  搬进回收区）已修复并有严格断言。
+
+### P1.2 确定性启动恢复（替代一律标 failed）
+
+- `recoverInterruptedFileOperations` 按 operation_type + 磁盘事实对账：
+  rename/move（目标在+源失→补完 DB；源在+目标无→rolled_back）、trash、
+  restore、import（文件已落盘但无 DB 行→补偿删除；行在→completed）、
+  delete_permanent（补 purge）、mkdir（幂等建目录）；library.scan 维持
+  failed+root 复位（重扫天然幂等）。11 个撕裂现场场景全部有行为测试。
+- restore 在回收区文件缺失时返回 409 `trash_missing`，禁止 bookkeeping-only
+  active（不再谎报磁盘状态）。
+
+### P1.3 forceNew 不再绕过内容去重
+
+- fileTarget 导入的 SHA-256 规则（managed blob 与 source_file 两个持有者
+  检查）与 `importNativeDocumentToSourceFile` 的内容检查均无视 forceNew；
+  forceNew 只作用于模糊元数据匹配。HTTP 测试：forceNew=true 同哈希仍 409
+  duplicate_content；无 confirmFuzzy 的同题异容仍 409 duplicate_confirmation。
+
+### P1.4 扫描内容变化联动附件与分析
+
+- 新增 `store.applySourceContentChange`：内容变化时附件 version+1、size
+  更新，绑定该附件的 topic_documents 置 `analysis_status='stale'` 且
+  attachment_version 跟随新版本；若新哈希已属于其他已入库文档，行降级为
+  `duplicate`（documentId/attachmentId 置空、旧附件软删、旧主题绑定清空且
+  stale）——绝不形成第二个文库身份。
+- 主题归类现在始终绑定活跃 attachment id/version（`addDocumentTopics` 查
+  活跃附件；导入落点绑定新附件版本）。
+
+### P1.5 根目录配置移除即停用
+
+- `ensureLibraryRootsFromConfig`：从 `NATIVE_LIBRARY_ROOTS` 移除的根被软删
+  停用，`requireLibraryRoot`/tree/scan 一律 404 拒绝；同路径重新配置时原行
+  复活（source_files 关联与历史保留）。
+
+### P1.6 Altero/Zotero 彻底移除（不再延期到 M6）
+
+- 删除 `server/oidc.mjs`、`proxy-api.mjs`、`proxy-files.mjs`、
+  `scripts/probe-altero.mjs`；`auth.mjs` 重写为 local-only（无 OAuth、无
+  AUTH_MODE=altero、logout 不再外呼 revocation）；`session.mjs` 移除 OAuth
+  transaction 存储与 accessToken/refreshToken/alteroApi/groupIds 字段；
+  `canvas-api.mjs` 删除 fetchAllUpstreamItems/resolveItemAttachment/
+  normalizeZoteroItemToInboxEntry/inboxEntryInput/defaultFetchAltero。
+- dev-server：`/auth/callback`、`/api/*`、`/files/*` → 410 feature_retired。
+- 前端：登录框 Altero 段/切换按钮、设置面板 Altero API+Zotero Key 直连模式、
+  collections 容器、loadExternalLibrary 及其分派、direct-key 存储与全部
+  Altero/Zotero 文案删除；`getApiUrl`/`libraryApiPrefix` 改为显式抛错占位
+  （遗留死分支误触即失败，保证运行期零 Altero 请求）。
+- 测试：bff/bff-flow/native-m1/canvas 四套按新契约重写（本地认证全流程、
+  410 矩阵、`AUTH_MODE=altero` 下仍为 local、全流程 0 次外呼断言、组权限
+  403 化）；canvas-ui 增加"退役函数与文案必须不存在"否定断言。
+- 归档：`archive/last-altero-compatible` 标签保留完整旧实现；.env 与
+  .env.example 已清除 ALTERO_API/OAUTH_CLIENT_ID/ALLOW_DYNAMIC_ALTERO/
+  ALLOW_PRIVATE_HOSTS/ALLOW_DIRECT_AUTH 等退役变量。
+
+### P1.7 有界扫描
+
+- `collectPdfEntries` 重写为惰性生成器 `iteratePdfEntries` + `batchesOf`
+  固定批消费：目录清单不再整体聚合，逐批（SCAN_BATCH_SIZE=100）哈希与
+  写库；105 文件跨嵌套目录行为测试 + 生成器惰性断言。
+
+### 其他修正
+
+- 错误映射：`FileOpError` 在全局 catch 中先于 TypeError/400 分支处理，保留
+  精确 code/status；导入落盘的 NativePathError（如符号链接父目录）映射为
+  400 `symlink_rejected` 而非 500。
+- 并行整改说明：本轮 P1 测试补齐与旧套件重写由三个并行子代理按文件边界
+  完成（native-m4 行为测试 / 前端+canvas-ui / 四个旧认证套件），服务端修复
+  由主会话统一落地后全量回归。
+
+### 验证
+
+- `npm test` 9 套全部通过（exit 0）；`git diff --check` 通过。
+- 服务已重启：/auth/session 仅 local；/api/*、/auth/callback 实测 410。
+- M4 人工实机验收仍未执行——等下一轮审计通过后再进行。

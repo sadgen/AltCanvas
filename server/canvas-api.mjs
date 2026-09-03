@@ -771,307 +771,10 @@ function collectionBindingChanges(body) {
   return changes;
 }
 
-function inboxEntryInput(item, session) {
-  if (!item || typeof item !== 'object' || Array.isArray(item)) throw new TypeError('inbox entry must be an object');
-  const { libraryType, libraryId } = validateLibraryAccess(item.libraryType, item.libraryId, session);
-  const itemKey = key(item.itemKey, 'inboxEntry.itemKey', false);
-
-  let attachmentKey = undefined;
-  let attachmentVersion = undefined;
-
-  const hasAttachmentKey = item.attachmentKey !== undefined;
-  const hasAttachmentVersion = item.attachmentVersion !== undefined;
-
-  if (hasAttachmentKey || hasAttachmentVersion) {
-    if (item.attachmentKey === null && item.attachmentVersion === null) {
-      attachmentKey = null;
-      attachmentVersion = null;
-    } else if (item.attachmentKey && item.attachmentVersion !== null && item.attachmentVersion !== undefined) {
-      attachmentKey = key(item.attachmentKey, 'inboxEntry.attachmentKey');
-      attachmentVersion = number(item.attachmentVersion, 'inboxEntry.attachmentVersion', { min: 0, max: Number.MAX_SAFE_INTEGER, integer: true });
-    } else {
-      throw new TypeError('attachmentKey and attachmentVersion must be provided together as an atomic pair or both omitted/null');
-    }
-  }
-
-  const detectedFrom = item.detectedFrom !== undefined ? string(item.detectedFrom, 'inboxEntry.detectedFrom', { max: 128 }) : 'scan';
-  const title = item.title !== undefined ? string(item.title, 'inboxEntry.title', { max: 500 }) : '';
-  const abstractNote = item.abstractNote !== undefined ? string(item.abstractNote, 'inboxEntry.abstractNote', { max: 20_000 }) : '';
-  const year = item.year === undefined || item.year === null ? null : number(item.year, 'inboxEntry.year', { min: 0, max: 3000, integer: true });
-  const itemVersion = item.itemVersion === undefined || item.itemVersion === null
-    ? null : number(item.itemVersion, 'inboxEntry.itemVersion', { min: 0, max: Number.MAX_SAFE_INTEGER, integer: true });
-  const creators = Array.isArray(item.creators) ? item.creators.slice(0, 100).map(c => {
-    if (typeof c === 'string') return string(c, 'inboxEntry.creators', { max: 200 });
-    if (c && typeof c === 'object' && !Array.isArray(c)) {
-      const creator = {};
-      if (c.creatorType !== undefined) creator.creatorType = string(c.creatorType, 'inboxEntry.creators.creatorType', { max: 64 });
-      if (c.firstName !== undefined) creator.firstName = string(c.firstName, 'inboxEntry.creators.firstName', { max: 200 });
-      if (c.lastName !== undefined) creator.lastName = string(c.lastName, 'inboxEntry.creators.lastName', { max: 200 });
-      if (c.name !== undefined) creator.name = string(c.name, 'inboxEntry.creators.name', { max: 200 });
-      return creator;
-    }
-    return '';
-  }).filter(c => (typeof c === 'string' ? Boolean(c) : Object.keys(c).length > 0)) : [];
-  const collectionKeys = Array.isArray(item.collectionKeys)
-    ? item.collectionKeys.slice(0, 100).map(k => key(k, 'inboxEntry.collectionKeys'))
-    : [];
-  const tags = Array.isArray(item.tags)
-    ? item.tags.slice(0, 100).map(t => {
-      if (typeof t === 'string') return string(t, 'inboxEntry.tags', { max: 200 });
-      if (t && typeof t === 'object' && !Array.isArray(t) && t.tag !== undefined) {
-        return string(t.tag, 'inboxEntry.tags.tag', { max: 200 });
-      }
-      return '';
-    }).filter(Boolean)
-    : [];
-
-  const entry = {
-    libraryType,
-    libraryId,
-    itemKey,
-    detectedFrom,
-    title,
-    creators,
-    year,
-    abstractNote,
-    collectionKeys,
-    tags,
-    itemVersion
-  };
-  if (attachmentKey !== undefined) entry.attachmentKey = attachmentKey;
-  if (attachmentVersion !== undefined) entry.attachmentVersion = attachmentVersion;
-  return entry;
-}
-
-export function normalizeZoteroItemToInboxEntry(item, libraryType, libraryId) {
-  if (!item || typeof item !== 'object') return null;
-  const itemData = item.data && typeof item.data === 'object' ? item.data : item;
-  const itemKey = itemData.key || item.key;
-  if (!itemKey) return null;
-  const itemType = itemData.itemType;
-  if (itemType === 'annotation' || itemType === 'note') return null;
-
-  const isAttachment = itemType === 'attachment';
-  const isPdfAttachment = isAttachment && (
-    itemData.contentType === 'application/pdf' ||
-    String(itemData.filename || '').toLowerCase().endsWith('.pdf')
-  );
-  if (isAttachment && !isPdfAttachment) return null;
-
-  let title = String(itemData.title || itemData.name || '').slice(0, 500);
-  if (!title && isAttachment && itemData.filename) {
-    title = String(itemData.filename).replace(/\.[pP][dD][fF]$/, '').slice(0, 500);
-  }
-  if (!title) {
-    title = isAttachment ? '无标题研报' : '无标题文档';
-  }
-  const creators = Array.isArray(itemData.creators) ? itemData.creators.slice(0, 100).map(c => {
-    if (typeof c === 'string') return c.slice(0, 200);
-    if (c && typeof c === 'object') {
-      const res = {};
-      if (c.creatorType) res.creatorType = String(c.creatorType).slice(0, 64);
-      if (c.firstName) res.firstName = String(c.firstName).slice(0, 200);
-      if (c.lastName) res.lastName = String(c.lastName).slice(0, 200);
-      if (c.name) res.name = String(c.name).slice(0, 200);
-      return res;
-    }
-    return '';
-  }).filter(c => (typeof c === 'string' ? Boolean(c) : Object.keys(c).length > 0)) : [];
-
-  let year = null;
-  if (itemData.date) {
-    const m = /\b(\d{4})\b/.exec(String(itemData.date));
-    if (m) year = Number(m[1]);
-  }
-
-  const abstractNote = String(itemData.abstractNote || itemData.abstract || '').slice(0, 20000);
-  const collectionKeys = Array.isArray(itemData.collections) ? itemData.collections.slice(0, 100).map(String) : [];
-  const tags = Array.isArray(itemData.tags) ? itemData.tags.slice(0, 100).map(t => (typeof t === 'string' ? t.slice(0, 200) : String(t?.tag || '').slice(0, 200))).filter(Boolean) : [];
-  const itemVersion = itemData.version !== undefined ? Number(itemData.version) : (item.version !== undefined ? Number(item.version) : null);
-
-  let attachmentKey = itemData.attachmentKey || item.attachmentKey || null;
-  let attachmentVersion = itemData.attachmentVersion !== undefined ? Number(itemData.attachmentVersion) : (item.attachmentVersion !== undefined ? Number(item.attachmentVersion) : null);
-
-  if (isPdfAttachment) {
-    attachmentKey = attachmentKey || itemKey;
-    if (attachmentVersion === null) {
-      attachmentVersion = itemVersion;
-    }
-  } else if (!attachmentKey && Array.isArray(item.children)) {
-    const pdfChild = item.children.find(c => (c?.data?.itemType || c?.itemType) === 'attachment' && (c?.data?.contentType === 'application/pdf' || String(c?.data?.filename || '').toLowerCase().endsWith('.pdf')));
-    if (pdfChild) {
-      attachmentKey = pdfChild.key || pdfChild.data?.key || null;
-      const childVer = pdfChild.data?.version ?? pdfChild.version;
-      if (childVer !== undefined) attachmentVersion = Number(childVer);
-    }
-  }
-
-  return {
-    libraryType: libraryType === 'group' ? 'group' : 'user',
-    libraryId: String(libraryId),
-    itemKey: String(itemKey),
-    attachmentKey: attachmentKey ? String(attachmentKey) : null,
-    attachmentVersion: Number.isFinite(attachmentVersion) ? attachmentVersion : null,
-    detectedFrom: 'scan',
-    title,
-    creators,
-    year: Number.isFinite(year) ? year : null,
-    abstractNote,
-    collectionKeys,
-    tags,
-    itemVersion: Number.isFinite(itemVersion) ? itemVersion : null
-  };
-}
-
-export async function resolveItemAttachment(fetchFn, session, libraryType, libraryId, item) {
-  if (!item || typeof item !== 'object') return item;
-  const itemData = item.data && typeof item.data === 'object' ? item.data : item;
-  const itemKey = itemData.key || item.key;
-  if (!itemKey) return item;
-
-  let attachmentKey = itemData.attachmentKey || item.attachmentKey || null;
-  let attachmentVersion = itemData.attachmentVersion !== undefined ? Number(itemData.attachmentVersion) : (item.attachmentVersion !== undefined ? Number(item.attachmentVersion) : null);
-
-  if (attachmentKey && attachmentVersion !== null) {
-    return { ...item, attachmentKey, attachmentVersion };
-  }
-
-  if (itemData.itemType === 'attachment') {
-    const isPdf = itemData.contentType === 'application/pdf' || String(itemData.filename || '').toLowerCase().endsWith('.pdf');
-    if (isPdf) {
-      const version = itemData.version !== undefined ? Number(itemData.version) : (item.version !== undefined ? Number(item.version) : null);
-      return {
-        ...item,
-        attachmentKey: itemKey,
-        attachmentVersion: Number.isFinite(version) ? version : null
-      };
-    }
-    return item;
-  }
-
-  // Fetch children from Altero upstream
-  const prefix = libraryType === 'group' ? 'groups' : 'users';
-  const childrenRes = await fetchFn(session, `/${prefix}/${encodeURIComponent(libraryId)}/items/${encodeURIComponent(itemKey)}/children`);
-  if (!childrenRes || !childrenRes.ok) {
-    const status = childrenRes ? childrenRes.status : 'no response';
-    throw new Error(`Failed to fetch child attachments for item ${itemKey}: upstream returned HTTP ${status}`);
-  }
-
-  const children = await childrenRes.json();
-  if (!Array.isArray(children)) {
-    throw new Error(`Invalid child attachments response for item ${itemKey}: expected array`);
-  }
-
-  const pdfChild = children.find(c => (c?.data?.itemType || c?.itemType) === 'attachment' && (c?.data?.contentType === 'application/pdf' || String(c?.data?.filename || '').toLowerCase().endsWith('.pdf')));
-  if (pdfChild) {
-    attachmentKey = pdfChild.key || pdfChild.data?.key || null;
-    const childVer = pdfChild.data?.version ?? pdfChild.version;
-    if (childVer !== undefined) attachmentVersion = Number(childVer);
-    return { ...item, attachmentKey, attachmentVersion };
-  }
-
-  return item;
-}
-
-async function defaultFetchAltero(session, path, options = {}) {
-  const alteroApi = (session.alteroApi || process.env.ALTERO_API || 'http://localhost:8000').replace(/\/$/, '');
-  const url = `${alteroApi}${path}`;
-  const headers = {
-    'Accept': 'application/json',
-    'Zotero-API-Version': '3',
-    ...(session.accessToken ? { 'Authorization': `Bearer ${session.accessToken}` } : {})
-  };
-  return fetch(url, { headers, ...options });
-}
-
-export async function fetchAllUpstreamItems(fetchFn, session, basePath, {
-  since = undefined,
-  limitPerPage = 100,
-  maxSafetyPages = 500,
-  onPage = null
-} = {}) {
-  let start = 0;
-  const allItems = onPage ? null : [];
-  let lastModifiedVersion = 0;
-  const seenItemKeys = new Set();
-  let completed = false;
-
-  for (let page = 0; page < maxSafetyPages; page++) {
-    const separator = basePath.includes('?') ? '&' : '?';
-    let path = `${basePath}${separator}limit=${limitPerPage}&start=${start}`;
-    if (since !== undefined && Number.isFinite(since) && since > 0) {
-      path += `&since=${since}`;
-    }
-
-    const res = await fetchFn(session, path);
-    if (!res.ok) {
-      if (res.status === 304) {
-        if (start === 0) {
-          return { items: [], lastModifiedVersion: since || 0, totalScanned: 0 };
-        }
-        throw new Error(`Unexpected 304 Not Modified received on page offset ${start}`);
-      }
-      throw new Error(`Upstream fetch failed: HTTP ${res.status}`);
-    }
-
-    const headerVersion = Number(res.headers?.get ? res.headers.get('Last-Modified-Version') : 0) || 0;
-    if (headerVersion > lastModifiedVersion) lastModifiedVersion = headerVersion;
-
-    const totalResultsHeader = res.headers?.get ? res.headers.get('Total-Results') : null;
-    const totalResults = totalResultsHeader !== null && !isNaN(Number(totalResultsHeader)) ? Number(totalResultsHeader) : null;
-
-    let itemsChunk;
-    try {
-      itemsChunk = await res.json();
-    } catch (parseErr) {
-      throw new Error(`Upstream returned non-JSON body: ${parseErr.message}`);
-    }
-
-    if (!Array.isArray(itemsChunk)) {
-      throw new Error('Upstream returned non-array items chunk');
-    }
-
-    if (itemsChunk.length === 0) {
-      if (totalResults !== null && start < totalResults) {
-        throw new Error(`Premature end of upstream stream: expected ${totalResults} items, received ${start} at offset ${start}`);
-      }
-      completed = true;
-      break;
-    }
-
-    for (const item of itemsChunk) {
-      const k = item?.key || item?.data?.key;
-      if (k) {
-        if (seenItemKeys.has(k)) {
-          throw new Error(`Upstream pagination overlap/loop detected: duplicate item key ${k} received at offset ${start}`);
-        }
-        seenItemKeys.add(k);
-      }
-    }
-
-    if (onPage) {
-      await onPage(itemsChunk, { start, totalResults, headerVersion });
-    } else {
-      allItems.push(...itemsChunk);
-    }
-    start += itemsChunk.length;
-
-    if (totalResults !== null && start < totalResults && itemsChunk.length < limitPerPage) {
-      throw new Error(`Premature end of upstream stream: expected ${totalResults} items, received ${start}`);
-    }
-
-    if (itemsChunk.length < limitPerPage || (totalResults !== null && start >= totalResults)) {
-      completed = true;
-      break;
-    }
-  }
-
-  if (!completed) {
-    throw new Error(`Upstream pagination exceeded safety limit of ${maxSafetyPages} pages; sync halted to prevent incomplete scan`);
-  }
-
-  return { items: allItems || [], lastModifiedVersion, totalScanned: start };
-}
+// [M4] The Altero/Zotero upstream scan helpers (inboxEntryInput,
+// normalizeZoteroItemToInboxEntry, resolveItemAttachment, defaultFetchAltero,
+// fetchAllUpstreamItems) were removed together with the inbox and collection
+// sync. The archived implementation lives on archive/last-altero-compatible.
 
 function source(value, session) {
   if (value === undefined || value === null) return null;
@@ -1802,9 +1505,10 @@ async function executeNativeImportItem(store, actorKey, normalized, {
   };
 
   // Phase 0 (file-target imports only): the SHA-256 content rule outranks the
-  // metadata identity chain — identical content never joins the library twice,
-  // whether it is held as a managed blob or as a library-root source file.
-  if (fileTarget && attachment && tempFilePath && !normalized.forceNew) {
+  // metadata identity chain AND forceNew — identical content never joins the
+  // library twice, whether held as a managed blob or as a root source file.
+  // forceNew only ever relaxes the fuzzy metadata match, never content dedupe.
+  if (fileTarget && attachment && tempFilePath) {
     const blobHolder = store.findDocumentByBlobHash(actorKey, attachment.sha256);
     if (blobHolder) {
       cleanupTemp();
@@ -1876,6 +1580,14 @@ async function executeNativeImportItem(store, actorKey, normalized, {
         placeFileIntoRoot(fileTarget.root.absolutePath, targetRelativePath, tempFilePath);
       } catch (placeErr) {
         cleanupTemp();
+        if (placeErr instanceof NativePathError) {
+          // Path-safety rejection (e.g. symlinked parent): a client-visible 400.
+          store.failFileOperation(operation.id, placeErr.code);
+          const err = new Error(placeErr.message);
+          err.status = 400;
+          err.code = placeErr.code;
+          throw err;
+        }
         if (placeErr instanceof FileOpError) {
           store.failFileOperation(operation.id, placeErr.code);
           return { result: { outcome: placeErr.code, targetPath: targetRelativePath }, warning };
@@ -2015,7 +1727,6 @@ export function createCanvasHandler(store, {
   aiCompletion = requestAiCompletion,
   aiPublicConfig = getAiPublicConfig,
   aiEndpointValidator = validateAiEndpoint,
-  fetchAltero = defaultFetchAltero,
   downloadPdfFn = safeDownloadPdfFile,
   promoteBlobFn = defaultPromoteBlob,
   translationServerFn = null,
@@ -4384,6 +4095,7 @@ ${textSnippet.slice(0, 8000) || '无'}`;
     } catch (err) {
       if (err instanceof CanvasNotFoundError) error(res, 404, 'not_found', 'Canvas resource not found');
       else if (err instanceof CanvasConflictError) error(res, 412, 'version_conflict', 'The resource has changed; reload and retry');
+      else if (err instanceof FileOpError) error(res, err.status, err.code, err.message);
       else if (err instanceof NativePathError) {
         const status = err.code === 'library_root_unavailable' ? 503
           : err.code === 'file_not_found' || err.code === 'directory_not_found' ? 404

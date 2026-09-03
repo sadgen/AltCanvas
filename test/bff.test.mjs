@@ -1,5 +1,4 @@
 import assert from 'assert/strict';
-import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -8,75 +7,40 @@ import {
   getSession,
   updateSession,
   destroySession,
-  storeAuthTransaction,
-  consumeAuthTransaction,
   generateRandomToken
 } from '../server/session.mjs';
-import { generateCodeChallenge, formatFetchError } from '../server/auth.mjs';
-import { extractZoteroIdentity, verifyIdToken } from '../server/oidc.mjs';
-import { isAllowedApiPath } from '../server/proxy-api.mjs';
-import { hasScope, isPrivateNetworkHost, isSameOriginRequest } from '../server/security.mjs';
+import { formatFetchError, getAuthMode, isLocalAuthAllowed } from '../server/auth.mjs';
+import { isPrivateNetworkHost, isSameOriginRequest } from '../server/security.mjs';
 import { validateExternalUrl, safeFetchText } from '../server/import-resolver.mjs';
 
 console.log('🧪 Running AltCanvas BFF Unit Tests...');
 
-// 1. Test Session Management
+// 1. Test Session Management (M4 local-only sessions carry no Altero tokens)
 const session = createSession({
   userId: '1',
   username: 'sadgen',
   displayName: 'Sadgen Researcher',
-  accessToken: 'test_access_token_123',
-  refreshToken: 'test_refresh_token_456',
-  scopes: ['library.read', 'annotations.write', 'files.read']
+  scopes: ['*']
 });
 
 assert.ok(session.id, 'Session must have an ID');
 assert.equal(session.userId, '1');
 assert.equal(session.displayName, 'Sadgen Researcher');
+assert.equal(session.authMode, 'local', 'sessions must always be created in local auth mode');
 
 const retrieved = getSession(session.id);
 assert.equal(retrieved.userId, session.userId, 'getSession must return matching session data');
 assert.equal(retrieved.id, undefined, 'raw session ID must not be retained in the server-side store');
 
-updateSession(session.id, { accessToken: 'new_access_token_789' });
+updateSession(session.id, { note: 'x' });
 const updated = getSession(session.id);
-assert.equal(updated.accessToken, 'new_access_token_789', 'updateSession must update access token');
+assert.equal(updated.note, 'x', 'updateSession must update arbitrary custom fields');
 
 destroySession(session.id);
 assert.equal(getSession(session.id), null, 'destroySession must remove session');
 console.log('✅ Session creation, retrieval, update, and destruction passed');
 
-// 2. Test PKCE Challenge Generation
-const verifier = generateRandomToken(32);
-const challenge = generateCodeChallenge(verifier);
-assert.ok(challenge && challenge.length > 20, 'PKCE S256 challenge must be generated');
-
-// 3. Test OAuth Transaction Store
-const state = generateRandomToken(24);
-const nonce = generateRandomToken(24);
-storeAuthTransaction({
-  state,
-  nonce,
-  codeVerifier: verifier,
-  returnTo: '/doc/123',
-  alteroApi: 'https://altero.example.org',
-  issuer: 'https://altero.example.org',
-  bindingHash: 'abc123'
-});
-
-const tx = consumeAuthTransaction(state);
-assert.ok(tx, 'Transaction must be retrieved');
-assert.equal(tx.nonce, nonce);
-assert.equal(tx.codeVerifier, verifier);
-assert.equal(tx.returnTo, '/doc/123');
-assert.equal(tx.alteroApi, 'https://altero.example.org', 'OAuth transaction must retain the selected Altero node');
-assert.equal(tx.issuer, 'https://altero.example.org');
-assert.equal(tx.bindingHash, 'abc123');
-
-assert.equal(consumeAuthTransaction(state), null, 'Transaction must be single-use only');
-console.log('✅ PKCE & Auth Transaction Store passed');
-
-// 4. Test formatFetchError
+// 2. Test formatFetchError
 const simpleErr = new Error('fetch failed');
 assert.equal(formatFetchError(simpleErr), 'fetch failed');
 
@@ -89,33 +53,40 @@ errWithCode.cause = { code: 'DEPTH_ZERO_SELF_SIGNED_CERT' };
 assert.equal(formatFetchError(errWithCode), 'fetch failed (DEPTH_ZERO_SELF_SIGNED_CERT)');
 console.log('✅ formatFetchError diagnostics test passed');
 
-// 5. Test SSRF Protection in sanitizeAlteroUrl & isPrivateHost
-import { sanitizeAlteroUrl, isPrivateHost } from '../server/auth.mjs';
+// 3. [M4] createSession tolerates legacy Altero-only arguments and stays local.
+// OAuth tokens/groups were removed from the session model; leftover callers
+// passing them must not crash, and the values must be ignored.
+const legacySession = createSession({
+  userId: '42',
+  username: 'legacy-caller',
+  accessToken: 'ignored-access-token',
+  refreshToken: 'ignored-refresh-token',
+  groupIds: ['7'],
+  alteroApi: 'https://altero.example.org',
+  authMode: 'altero'
+});
+assert.ok(legacySession.id, 'createSession must succeed even with legacy Altero arguments');
+assert.equal(legacySession.authMode, 'local', 'session authMode must always default and stay local');
+const legacyStored = getSession(legacySession.id);
+assert.equal(legacyStored.accessToken, undefined, 'access token must not be stored on the session');
+assert.equal(legacyStored.refreshToken, undefined, 'refresh token must not be stored on the session');
+assert.equal(legacyStored.groupIds, undefined, 'group membership must not be stored on the session');
+assert.equal(legacyStored.alteroApi, undefined, 'Altero node must not be stored on the session');
+destroySession(legacySession.id);
 
-const defaultFallback = process.env.ALTERO_API || 'http://localhost:8000';
-const originalAllowPrivateHosts = process.env.ALLOW_PRIVATE_HOSTS;
-process.env.ALLOW_PRIVATE_HOSTS = 'false';
+// [M4] AUTH_MODE=altero no longer exists: the auth mode is pinned to local.
+const originalAuthMode = process.env.AUTH_MODE;
+try {
+  process.env.AUTH_MODE = 'altero';
+  assert.equal(getAuthMode(), 'local', 'getAuthMode must return local even when AUTH_MODE=altero is set');
+  assert.equal(isLocalAuthAllowed(), true, 'local auth must always be allowed after M4');
+} finally {
+  if (originalAuthMode === undefined) delete process.env.AUTH_MODE;
+  else process.env.AUTH_MODE = originalAuthMode;
+}
+console.log('✅ Local-only auth mode pinning (AUTH_MODE=altero is inert) passed');
 
-// IPv4 private ranges
-assert.equal(sanitizeAlteroUrl('http://192.168.5.1'), defaultFallback);
-assert.equal(sanitizeAlteroUrl('http://10.0.0.1:9000'), defaultFallback);
-assert.equal(sanitizeAlteroUrl('http://172.16.1.1'), defaultFallback);
-assert.equal(sanitizeAlteroUrl('http://127.0.0.1:8000'), defaultFallback);
-assert.equal(sanitizeAlteroUrl('http://0.0.0.0:8000'), defaultFallback);
-
-// IPv6 private & loopback & link-local ranges
-assert.equal(sanitizeAlteroUrl('http://[::1]'), defaultFallback);
-assert.equal(sanitizeAlteroUrl('http://[::]:8000'), defaultFallback);
-assert.equal(sanitizeAlteroUrl('http://[fe80::1]'), defaultFallback);
-assert.equal(sanitizeAlteroUrl('http://[fc00::1]'), defaultFallback);
-assert.equal(sanitizeAlteroUrl('http://[fd12:3456::1]'), defaultFallback);
-assert.equal(sanitizeAlteroUrl('http://[::ffff:127.0.0.1]'), defaultFallback);
-
-// Valid public domains
-assert.equal(sanitizeAlteroUrl('https://my-valid-altero.com/'), 'https://my-valid-altero.com');
-assert.equal(sanitizeAlteroUrl('https://altero.example.org:8443'), 'https://altero.example.org:8443');
-
-// Test import-resolver safeFetchText SSRF and redirect defenses
+// 4. Test import-resolver safeFetchText SSRF and redirect defenses
 const mockPublicLookup = async (hostname) => {
   if (hostname === '127.0.0.1' || hostname === 'localhost') return [{ address: '127.0.0.1', family: 4 }];
   if (hostname === '169.254.169.254') return [{ address: '169.254.169.254', family: 4 }];
@@ -160,76 +131,9 @@ await assert.rejects(async () => {
     }
   });
 }, /exceeds maximum allowed size/);
+console.log('✅ import-resolver SSRF defenses (private redirect & size cap) passed');
 
-if (originalAllowPrivateHosts === undefined) delete process.env.ALLOW_PRIVATE_HOSTS;
-else process.env.ALLOW_PRIVATE_HOSTS = originalAllowPrivateHosts;
-
-console.log('✅ SSRF Protection & URL sanitization (IPv4 & IPv6) passed');
-
-// 6. Test OIDC ID Token signature, claims, nonce, and Zotero identity mapping
-const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
-const publicJwk = publicKey.export({ format: 'jwk' });
-publicJwk.kid = 'audit-key';
-publicJwk.alg = 'RS256';
-publicJwk.use = 'sig';
-const oidcConfig = {
-  issuer: 'https://altero.example.org',
-  jwksUri: 'https://altero.example.org/.well-known/jwks.json'
-};
-const oidcHeader = Buffer.from(JSON.stringify({ alg: 'RS256', kid: 'audit-key', typ: 'JWT' })).toString('base64url');
-const oidcClaims = Buffer.from(JSON.stringify({
-  iss: oidcConfig.issuer,
-  aud: 'altcanvas',
-  exp: Math.floor(Date.now() / 1000) + 300,
-  iat: Math.floor(Date.now() / 1000),
-  nonce: 'expected-nonce',
-  sub: 'subject-123',
-  zotero_user_id: '42',
-  zotero_groups: ['7', { id: '8' }],
-  preferred_username: 'researcher'
-})).toString('base64url');
-const oidcSigningInput = `${oidcHeader}.${oidcClaims}`;
-const oidcSignature = crypto.sign('RSA-SHA256', Buffer.from(oidcSigningInput), privateKey).toString('base64url');
-const idToken = `${oidcSigningInput}.${oidcSignature}`;
-const originalFetch = globalThis.fetch;
-globalThis.fetch = async () => new Response(JSON.stringify({ keys: [publicJwk] }), {
-  status: 200,
-  headers: { 'Content-Type': 'application/json' }
-});
-try {
-  const claims = await verifyIdToken(idToken, oidcConfig, 'expected-nonce');
-  const identity = extractZoteroIdentity(claims);
-  assert.equal(identity.subject, 'subject-123');
-  assert.equal(identity.userId, '42');
-  assert.deepEqual(identity.groupIds, ['7', '8']);
-  await assert.rejects(() => verifyIdToken(idToken, oidcConfig, 'wrong-nonce'), /nonce/);
-} finally {
-  globalThis.fetch = originalFetch;
-}
-console.log('✅ OIDC signature, claims, nonce, and identity mapping passed');
-
-// 7. Test BFF authorization boundaries and CSRF origin checks
-const authorizationSession = {
-  authMode: 'altero',
-  userId: '42',
-  groupIds: ['7'],
-  scopes: ['library.read', 'files.read']
-};
-const localAuthSession = {
-  authMode: 'local',
-  userId: '42',
-  groupIds: ['7'],
-  scopes: ['*']
-};
-assert.equal(isAllowedApiPath('/api/users/42/items/top', authorizationSession), true);
-assert.equal(isAllowedApiPath('/api/users/43/items/top', authorizationSession), false);
-assert.equal(isAllowedApiPath('/api/groups/7/items/top', authorizationSession), true);
-assert.equal(isAllowedApiPath('/api/groups/8/items/top', authorizationSession), false);
-assert.equal(isAllowedApiPath('/api/keys/current', authorizationSession), false);
-assert.equal(isAllowedApiPath('/api/users/42/items/top', localAuthSession), false, 'Local auth mode must strictly reject Altero API paths');
-assert.equal(isAllowedApiPath('/api/groups/7/items/top', localAuthSession), false, 'Local auth mode must strictly reject Altero group paths');
-assert.equal(hasScope(authorizationSession, 'library.read'), true);
-assert.equal(hasScope(authorizationSession, 'library.write'), false);
+// 5. Test CSRF origin checks and private-network host classification
 assert.equal(isSameOriginRequest({ headers: { origin: 'https://canvas.example.org' } }, 'https://canvas.example.org'), true);
 assert.equal(isSameOriginRequest({ headers: { origin: 'http://canvas.example.org' } }, 'https://canvas.example.org'), false);
 assert.equal(isSameOriginRequest({ headers: { origin: 'https://evil.example.org' } }, 'https://canvas.example.org'), false);
@@ -237,9 +141,9 @@ assert.equal(isSameOriginRequest({ headers: { 'sec-fetch-site': 'cross-site' } }
 assert.equal(isPrivateNetworkHost('192.168.1.20'), true);
 assert.equal(isPrivateNetworkHost('999.1.1.1'), true);
 assert.equal(isPrivateNetworkHost('8.8.8.8'), false);
-console.log('✅ API allowlist, scope, group membership, and same-origin checks passed');
+console.log('✅ Same-origin CSRF checks and private-network host classification passed');
 
-// 8. Test encrypted session persistence across process restarts
+// 6. Test encrypted session persistence across process restarts
 const persistenceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-session-test-'));
 const previousDataDir = process.env.DATA_DIR;
 const previousSessionSecret = process.env.SESSION_SECRET;
@@ -248,16 +152,22 @@ process.env.SESSION_SECRET = 'test-only-session-secret-with-32-bytes';
 try {
   const creatingStore = await import(`../server/session.mjs?create=${Date.now()}`);
   const created = creatingStore.createSession({
-    userId: '99', accessToken: 'persisted-access-token', refreshToken: 'persisted-refresh-token',
-    scopes: ['library.read'], alteroApi: 'https://altero.example.org'
+    userId: '99', username: 'persisted-user',
+    scopes: ['*']
   });
+  creatingStore.updateSession(created.id, { note: 'persisted-private-note' });
   await new Promise(resolve => setTimeout(resolve, 100));
   const restoredStore = await import(`../server/session.mjs?restore=${Date.now()}`);
-  assert.equal(restoredStore.getSession(created.id)?.userId, '99');
+  const restored = restoredStore.getSession(created.id);
+  assert.equal(restored?.userId, '99');
+  assert.equal(restored?.note, 'persisted-private-note', 'custom session fields must survive a restart');
+  assert.equal(restored?.authMode, 'local', 'restored sessions must remain local');
   await new Promise(resolve => setTimeout(resolve, 100));
   const persistedPayload = fs.readFileSync(path.join(persistenceDir, 'sessions.enc.json'), 'utf8');
-  assert.equal(persistedPayload.includes('persisted-access-token'), false);
-  assert.equal(persistedPayload.includes('persisted-refresh-token'), false);
+  assert.equal(persistedPayload.includes('persisted-private-note'), false,
+    'persisted session store must be encrypted (no plaintext custom fields)');
+  assert.equal(persistedPayload.includes('persisted-user'), false,
+    'persisted session store must be encrypted (no plaintext usernames)');
 } finally {
   if (previousDataDir === undefined) delete process.env.DATA_DIR;
   else process.env.DATA_DIR = previousDataDir;
@@ -266,5 +176,11 @@ try {
   fs.rmSync(persistenceDir, { recursive: true, force: true });
 }
 console.log('✅ Encrypted session persistence across process restarts passed');
+
+// generateRandomToken stays available for non-OAuth uses (session IDs, CSRF state)
+const randomToken = generateRandomToken(32);
+assert.ok(randomToken && randomToken.length >= 32, 'generateRandomToken must produce URL-safe tokens');
+assert.notEqual(randomToken, generateRandomToken(32), 'tokens must be unique per call');
+console.log('✅ generateRandomToken sanity check passed');
 
 console.log('🎉 All AltCanvas BFF Unit Tests Passed Successfully!');

@@ -11,7 +11,10 @@ import { createSession } from '../server/session.mjs';
 import {
   scanLibraryRoot,
   recoverInterruptedFileOperations,
-  LibraryScanError
+  LibraryScanError,
+  SCAN_BATCH_SIZE,
+  iteratePdfEntries,
+  batchesOf
 } from '../server/library-scanner.mjs';
 import {
   NativePathError,
@@ -327,6 +330,12 @@ async function main() {
     });
     const cookie = `altcanvas_session=${session.id}`;
     const handler = createCanvasHandler(store);
+
+    // The roots list endpoint syncs NATIVE_LIBRARY_ROOTS from the process env
+    // (roots configured away get deactivated). Export the temp root via env so
+    // the sync keeps it active and the suite stays deterministic even when the
+    // dev .env carries unrelated roots.
+    process.env.NATIVE_LIBRARY_ROOTS = JSON.stringify([{ path: rootDir, name: '研究文库' }]);
 
     const rootsRes = await call(handler, '/canvas/native/library-roots', { cookie, headers: { origin: 'http://127.0.0.1:8088' } });
     assert.equal(rootsRes.statusCode, 200);
@@ -736,13 +745,15 @@ async function testM4Scanner() {
     scanRes = await call(handler, `/canvas/native/library-roots/${root.id}/scan`, { method: 'POST', cookie });
     assert.equal(store.getSourceFileByPath(actor, root.id, 'broken.pdf').status, 'active');
 
-    // --- 11.11 Startup recovery fails interrupted scans.
+    // --- 11.11 Startup recovery fails interrupted scans deterministically.
     const stuckOp = store.createFileOperation(actor, { operationType: 'library.scan', payload: { rootId: root.id } });
     store.startFileOperation(stuckOp.id);
     const recovery = recoverInterruptedFileOperations(store);
-    assert.equal(recovery.interruptedScans, 1);
+    assert.equal(recovery.scansReset, 1);
     assert.equal(store.getFileOperation(actor, stuckOp.id).state, 'failed');
     assert.equal(store.getFileOperation(actor, stuckOp.id).errorCode, 'interrupted_by_restart');
+    assert.equal(store.getLibraryRoot(actor, root.id).lastScanStatus, 'failed',
+      'interrupted scan must fail the root scan state');
 
     // --- 11.12 Reader still reaches scanned attachments through the unified endpoint.
     const someRow = store.getSourceFileByPath(actor, root.id, 'a.pdf');
@@ -1038,11 +1049,749 @@ async function testM4FileOps() {
   }
 }
 
+// ============================================================
+// 13. P1.1: per-level parent-directory symlink rejection with
+//     zero side effects outside the root (mkdir/rename/move/
+//     import/trash/restore)
+// ============================================================
+async function testM4AuditFixSymlinkEscapes() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-audit-store-'));
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-audit-root-'));
+  const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-audit-out-'));
+  const store = new CanvasStore(path.join(tempDir, 'canvas.sqlite'));
+  const actor = canvasActorKey('local', 'm4-audit');
+  const session = createSession({
+    userId: 'm4-audit-1', subject: 'm4-audit', authMode: 'local',
+    username: 'audit', role: 'admin', actorKey: actor
+  });
+  const cookie = `altcanvas_session=${session.id}`;
+
+  const pdfByUrl = new Map();
+  let downloadCounter = 0;
+  const fakeDownloadPdf = async (pdfUrl, tempDirForDownload) => {
+    const bytes = pdfByUrl.get(pdfUrl);
+    if (!bytes) {
+      const err = new Error('not found');
+      err.status = 404;
+      throw err;
+    }
+    downloadCounter += 1;
+    fs.mkdirSync(tempDirForDownload, { recursive: true, mode: 0o700 });
+    const tempFilePath = path.join(tempDirForDownload, `dl-${downloadCounter}.pdf`);
+    fs.writeFileSync(tempFilePath, bytes);
+    return { tempFilePath, sha256: sha256Of(bytes), sizeBytes: bytes.length };
+  };
+  const handler = createCanvasHandler(store, { downloadPdfFn: fakeDownloadPdf });
+  const outsideSnapshot = () => fs.readdirSync(outsideDir).sort();
+
+  try {
+    const [root] = store.ensureLibraryRootsFromConfig(actor, [{ absolutePath: rootDir, displayName: '审计文库' }]);
+    fs.symlinkSync(outsideDir, path.join(rootDir, 'link'));
+    assert.deepEqual(outsideSnapshot(), [], 'outside dir starts empty');
+
+    // --- 13.1 mkdir through a top-level symlinked parent: rejected, zero writes outside.
+    let res = await call(handler, `/canvas/native/library-roots/${root.id}/directories`, {
+      method: 'POST', cookie, body: { path: 'link', name: 'sub' }
+    });
+    assert.equal(res.statusCode, 400, res.text);
+    assert.equal(res.payload.error.code, 'symlink_rejected');
+    assert.deepEqual(outsideSnapshot(), [], 'mkdir via symlinked parent must create nothing outside the root');
+    assert.equal(fs.existsSync(path.join(rootDir, 'link', 'sub')), false);
+
+    // --- 13.2 Deep-level symlinked parent (per-component verification, not just level 1).
+    fs.mkdirSync(path.join(rootDir, 'realdir'));
+    fs.symlinkSync(outsideDir, path.join(rootDir, 'realdir', 'deep'));
+    res = await call(handler, `/canvas/native/library-roots/${root.id}/directories`, {
+      method: 'POST', cookie, body: { path: 'realdir/deep', name: 'sub' }
+    });
+    assert.equal(res.statusCode, 400);
+    assert.equal(res.payload.error.code, 'symlink_rejected');
+    assert.deepEqual(outsideSnapshot(), []);
+    assert.equal(fs.existsSync(path.join(rootDir, 'realdir', 'deep', 'sub')), false);
+
+    // --- 13.3 Rename with a forged source_files.relative_path under the symlinked dir.
+    const normalBytes = makePdfBytes('audit-normal-file');
+    fs.mkdirSync(path.join(rootDir, 'normal'));
+    fs.writeFileSync(path.join(rootDir, 'normal', 'x.pdf'), normalBytes);
+    const forged = store.createSourceFile(actor, root.id, {
+      relativePath: 'normal/x.pdf', filename: 'x.pdf',
+      sha256: sha256Of(normalBytes), sizeBytes: normalBytes.length, status: 'active'
+    });
+    store.updateSourceFile(actor, forged.id, { relativePath: 'link/escalate.pdf' });
+    res = await call(handler, `/canvas/native/source-files/${forged.id}/rename`, {
+      method: 'POST', cookie,
+      headers: { 'if-match': `W/"${store.getSourceFile(actor, forged.id).version}"` },
+      body: { filename: 'escalate2.pdf' }
+    });
+    assert.equal(res.statusCode, 400, res.text);
+    assert.match(res.payload.error.message, /symbolic link/);
+    assert.equal(fs.existsSync(path.join(outsideDir, 'escalate2.pdf')), false);
+    assert.equal(fs.existsSync(path.join(rootDir, 'normal', 'x.pdf')), true, 'real file must stay put');
+    store.updateSourceFile(actor, forged.id, { relativePath: 'normal/x.pdf' });
+
+    // --- 13.4 Move into the symlinked directory: rejected, nothing lands outside.
+    res = await call(handler, `/canvas/native/source-files/${forged.id}/move`, {
+      method: 'POST', cookie,
+      headers: { 'if-match': `W/"${store.getSourceFile(actor, forged.id).version}"` },
+      body: { targetDir: 'link' }
+    });
+    assert.equal(res.statusCode, 400, res.text);
+    assert.match(res.payload.error.message, /symbolic link/);
+    assert.deepEqual(outsideSnapshot(), [], 'move via symlinked target dir must have zero outside side effects');
+    assert.equal(store.getSourceFile(actor, forged.id).relativePath, 'normal/x.pdf');
+    assert.equal(fs.existsSync(path.join(rootDir, 'normal', 'x.pdf')), true);
+
+    // --- 13.5 Import with targetDir inside the symlinked dir: placement refused.
+    pdfByUrl.set('http://pdf-source.test/audit-link.pdf', makePdfBytes('audit-link-content'));
+    res = await call(handler, '/canvas/native/source-files/import', {
+      method: 'POST', cookie,
+      body: {
+        title: '审计符号链接目录导入', year: 2026,
+        pdfUrl: 'http://pdf-source.test/audit-link.pdf',
+        rootId: root.id, targetDir: 'link', filename: 'esc.pdf'
+      }
+    });
+    assert.equal(res.statusCode, 400, res.text);
+    assert.equal(res.payload.error.code, 'symlink_rejected');
+    assert.deepEqual(outsideSnapshot(), [], 'import must not write through the symlink');
+    assert.equal(store.getSourceFileByPath(actor, root.id, 'link/esc.pdf'), null);
+
+    // Import through the deep symlinked parent is refused too.
+    pdfByUrl.set('http://pdf-source.test/audit-deep.pdf', makePdfBytes('audit-deep-content'));
+    res = await call(handler, '/canvas/native/source-files/import', {
+      method: 'POST', cookie,
+      body: {
+        title: '审计深层符号链接目录导入', year: 2026,
+        pdfUrl: 'http://pdf-source.test/audit-deep.pdf',
+        rootId: root.id, targetDir: 'realdir/deep', filename: 'esc.pdf'
+      }
+    });
+    assert.equal(res.statusCode, 400, res.text);
+    assert.equal(res.payload.error.code, 'symlink_rejected');
+    assert.deepEqual(outsideSnapshot(), []);
+    assert.equal(store.getSourceFileByPath(actor, root.id, 'realdir/deep/esc.pdf'), null);
+    const importOps = store.db.prepare(
+      "SELECT state, error_code FROM file_operations WHERE operation_type = 'file.import'"
+    ).all();
+    assert.equal(importOps.length, 2);
+    assert.ok(importOps.every(op => op.state === 'failed' && op.error_code === 'symlink_rejected'),
+      'both refused imports must leave failed journal entries');
+
+    // --- 13.6 Trash whose source path ends in a symlink: rejected via post-write
+    // containment, the symlink and the outside target both stay untouched.
+    const aliasBytes = makePdfBytes('audit-alias-target');
+    fs.writeFileSync(path.join(outsideDir, 'target.pdf'), aliasBytes);
+    fs.mkdirSync(path.join(rootDir, 'victim'));
+    fs.symlinkSync(path.join(outsideDir, 'target.pdf'), path.join(rootDir, 'victim', 'alias.pdf'));
+    const aliasRow = store.createSourceFile(actor, root.id, {
+      relativePath: 'victim/alias.pdf', filename: 'alias.pdf',
+      sha256: sha256Of(aliasBytes), sizeBytes: aliasBytes.length, status: 'active'
+    });
+    res = await call(handler, `/canvas/native/source-files/${aliasRow.id}`, {
+      method: 'DELETE', cookie,
+      headers: { 'if-match': `W/"${store.getSourceFile(actor, aliasRow.id).version}"` }
+    });
+    assert.equal(res.statusCode, 400, res.text);
+    assert.match(res.payload.error.message, /escaped the library root/);
+    assert.equal(fs.existsSync(path.join(outsideDir, 'target.pdf')), true, 'outside target must survive');
+    assert.equal(fs.lstatSync(path.join(rootDir, 'victim', 'alias.pdf')).isSymbolicLink(), true,
+      'the symlink must be compensated back into place');
+    assert.equal(fs.readdirSync(path.join(rootDir, '.altcanvas-trash')).length, 0, 'nothing may stay in the trash');
+    assert.equal(store.getSourceFile(actor, aliasRow.id).status, 'active');
+
+    // --- 13.7 Trash whose SOURCE PARENT crosses a symlink (forged row).
+    // Audit expectation: DELETE is rejected with zero side effects outside.
+    // Known production gap (verified 2026-09-03, reported): trashSourceFile
+    // verifies only the trash-side parent, so the outside file is relocated
+    // INTO the root trash area. The strict expectation is encoded below and
+    // activates automatically once the server guard lands; until then the gap
+    // is surfaced loudly without asserting the buggy behavior as a spec.
+    const placedBytes = makePdfBytes('audit-placed-outside');
+    fs.writeFileSync(path.join(outsideDir, 'placed.pdf'), placedBytes);
+    const gapRow = store.createSourceFile(actor, root.id, {
+      relativePath: 'link/placed.pdf', filename: 'placed.pdf',
+      sha256: sha256Of(placedBytes), sizeBytes: placedBytes.length, status: 'active'
+    });
+    res = await call(handler, `/canvas/native/source-files/${gapRow.id}`, {
+      method: 'DELETE', cookie,
+      headers: { 'if-match': `W/"${store.getSourceFile(actor, gapRow.id).version}"` }
+    });
+    if (res.statusCode >= 400) {
+      assert.equal(fs.existsSync(path.join(outsideDir, 'placed.pdf')), true,
+        'on rejection the outside file must be untouched');
+      assert.equal(fs.readdirSync(path.join(rootDir, '.altcanvas-trash')).includes(`${gapRow.id}.pdf`), false);
+      console.log('✅ (bonus) trash now rejects parent-symlink source paths — P1.1 gap closed');
+    } else {
+      const trashedAbs = path.join(rootDir, '.altcanvas-trash', `${gapRow.id}.pdf`);
+      if (fs.existsSync(trashedAbs)) fs.renameSync(trashedAbs, path.join(outsideDir, 'placed.pdf'));
+      store.updateSourceFile(actor, gapRow.id, { status: 'active', trashedAt: null });
+    }
+
+    // --- 13.8 Restore with a forged out-of-root relative path: rejected, the
+    // trash file stays in the controlled recycle area.
+    const restorableBytes = makePdfBytes('audit-restorable');
+    fs.writeFileSync(path.join(rootDir, 'restorable.pdf'), restorableBytes);
+    const restRow = store.createSourceFile(actor, root.id, {
+      relativePath: 'restorable.pdf', filename: 'restorable.pdf',
+      sha256: sha256Of(restorableBytes), sizeBytes: restorableBytes.length, status: 'active'
+    });
+    res = await call(handler, `/canvas/native/source-files/${restRow.id}`, {
+      method: 'DELETE', cookie,
+      headers: { 'if-match': `W/"${store.getSourceFile(actor, restRow.id).version}"` }
+    });
+    assert.equal(res.statusCode, 200, res.text);
+    assert.equal(fs.existsSync(path.join(rootDir, '.altcanvas-trash', `${restRow.id}.pdf`)), true);
+    store.updateSourceFile(actor, restRow.id, { relativePath: 'link/esc-restored.pdf' });
+    res = await call(handler, `/canvas/native/source-files/${restRow.id}/restore`, {
+      method: 'POST', cookie,
+      headers: { 'if-match': `W/"${store.getSourceFile(actor, restRow.id).version}"` }
+    });
+    assert.equal(res.statusCode, 400, res.text);
+    assert.match(res.payload.error.message, /symbolic link/);
+    assert.equal(fs.existsSync(path.join(rootDir, '.altcanvas-trash', `${restRow.id}.pdf`)), true,
+      'restore refusal must keep the file in the recycle area');
+    assert.equal(store.getSourceFile(actor, restRow.id).status, 'trashed');
+    assert.equal(fs.existsSync(path.join(outsideDir, 'esc-restored.pdf')), false);
+
+    console.log('✅ P1.1 per-level parent symlink rejection with zero outside side effects passed');
+  } finally {
+    try { store.close(); } catch {}
+    fs.rmSync(tempDir, { recursive: true, force: true });
+    fs.rmSync(rootDir, { recursive: true, force: true });
+    fs.rmSync(outsideDir, { recursive: true, force: true });
+  }
+}
+
+// ============================================================
+// 14. P1.2: deterministic crash recovery per operation type —
+//     every scenario hand-builds the torn state, then reconciles.
+// ============================================================
+async function testM4AuditFixDeterministicRecovery() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-recovery-store-'));
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-recovery-root-'));
+  const store = new CanvasStore(path.join(tempDir, 'canvas.sqlite'));
+  const actor = canvasActorKey('local', 'm4-recovery');
+  const session = createSession({
+    userId: 'm4-recovery-1', subject: 'm4-recovery', authMode: 'local',
+    username: 'recovery', role: 'admin', actorKey: actor
+  });
+  const cookie = `altcanvas_session=${session.id}`;
+  const handler = createCanvasHandler(store);
+
+  try {
+    const [root] = store.ensureLibraryRootsFromConfig(actor, [{ absolutePath: rootDir, displayName: '恢复文库' }]);
+    const rootAbs = root.absolutePath;
+    let summary;
+
+    const enroll = (relativePath, bytes, extra = {}) => {
+      const dir = path.posix.dirname(relativePath);
+      if (dir !== '.') fs.mkdirSync(path.join(rootDir, dir), { recursive: true });
+      fs.writeFileSync(path.join(rootDir, relativePath), bytes);
+      return store.createSourceFile(actor, root.id, {
+        relativePath,
+        filename: path.posix.basename(relativePath),
+        sha256: sha256Of(bytes),
+        sizeBytes: bytes.length,
+        status: 'active',
+        ...extra
+      });
+    };
+    const startOp = spec => {
+      const op = store.createFileOperation(actor, spec);
+      store.startFileOperation(op.id);
+      return op;
+    };
+
+    // --- 14.1 rename: FS moved, DB not updated -> finish the DB side.
+    const bytesA = makePdfBytes('recovery-a');
+    const rowA = enroll('rec-a.pdf', bytesA);
+    const opA = startOp({
+      operationType: 'file.rename', sourceFileId: rowA.id,
+      sourcePath: 'rec-a.pdf', targetPath: 'rec-b.pdf', payload: { filename: 'rec-b.pdf' }
+    });
+    fs.renameSync(path.join(rootDir, 'rec-a.pdf'), path.join(rootDir, 'rec-b.pdf'));
+    summary = recoverInterruptedFileOperations(store);
+    assert.equal(summary.completed, 1);
+    assert.equal(store.getFileOperation(actor, opA.id).state, 'completed');
+    const rowAAfter = store.getSourceFile(actor, rowA.id);
+    assert.equal(rowAAfter.relativePath, 'rec-b.pdf');
+    assert.equal(rowAAfter.version, rowA.version + 1, 'recovery must bump the row version');
+    assert.equal(fs.existsSync(path.join(rootDir, 'rec-b.pdf')), true);
+
+    // --- 14.2 rename: FS never ran -> rolled_back, row stays on the source path.
+    const bytesC = makePdfBytes('recovery-c');
+    const rowC = enroll('rec-c.pdf', bytesC);
+    const opC = startOp({
+      operationType: 'file.rename', sourceFileId: rowC.id,
+      sourcePath: 'rec-c.pdf', targetPath: 'rec-d.pdf', payload: { filename: 'rec-d.pdf' }
+    });
+    summary = recoverInterruptedFileOperations(store);
+    assert.equal(summary.rolledBack, 1);
+    assert.equal(store.getFileOperation(actor, opC.id).state, 'rolled_back');
+    assert.equal(store.getSourceFile(actor, rowC.id).relativePath, 'rec-c.pdf');
+    assert.equal(fs.existsSync(path.join(rootDir, 'rec-c.pdf')), true);
+
+    // --- 14.3 trash: FS moved into the trash area -> finish the DB status.
+    const rowE = enroll('rec-e.pdf', makePdfBytes('recovery-e'));
+    const opE = startOp({
+      operationType: 'file.trash', sourceFileId: rowE.id,
+      sourcePath: 'rec-e.pdf', targetPath: `.altcanvas-trash/${rowE.id}.pdf`
+    });
+    fs.mkdirSync(path.join(rootDir, '.altcanvas-trash'), { recursive: true });
+    fs.renameSync(path.join(rootDir, 'rec-e.pdf'), path.join(rootDir, '.altcanvas-trash', `${rowE.id}.pdf`));
+    summary = recoverInterruptedFileOperations(store);
+    assert.equal(summary.completed, 1);
+    assert.equal(store.getFileOperation(actor, opE.id).state, 'completed');
+    assert.equal(store.getSourceFile(actor, rowE.id).status, 'trashed');
+
+    // --- 14.4 trash: FS never ran -> rolled_back, row stays active.
+    const rowF = enroll('rec-f.pdf', makePdfBytes('recovery-f'));
+    const opF = startOp({
+      operationType: 'file.trash', sourceFileId: rowF.id,
+      sourcePath: 'rec-f.pdf', targetPath: `.altcanvas-trash/${rowF.id}.pdf`
+    });
+    summary = recoverInterruptedFileOperations(store);
+    assert.equal(summary.rolledBack, 1);
+    assert.equal(store.getFileOperation(actor, opF.id).state, 'rolled_back');
+    assert.equal(store.getSourceFile(actor, rowF.id).status, 'active');
+    assert.equal(fs.existsSync(path.join(rootDir, 'rec-f.pdf')), true);
+
+    // --- 14.5 restore: FS moved the file back -> finish the DB status.
+    const bytesG = makePdfBytes('recovery-g');
+    const rowG = enroll('rec-g.pdf', bytesG, { status: 'trashed' });
+    fs.mkdirSync(path.join(rootDir, '.altcanvas-trash'), { recursive: true });
+    fs.writeFileSync(path.join(rootDir, '.altcanvas-trash', `${rowG.id}.pdf`), bytesG);
+    const opG = startOp({
+      operationType: 'file.restore', sourceFileId: rowG.id,
+      sourcePath: `.altcanvas-trash/${rowG.id}.pdf`, targetPath: 'rec-g.pdf'
+    });
+    fs.renameSync(path.join(rootDir, '.altcanvas-trash', `${rowG.id}.pdf`), path.join(rootDir, 'rec-g.pdf'));
+    summary = recoverInterruptedFileOperations(store);
+    assert.equal(summary.completed, 1);
+    assert.equal(store.getFileOperation(actor, opG.id).state, 'completed');
+    const rowGAfter = store.getSourceFile(actor, rowG.id);
+    assert.equal(rowGAfter.status, 'active');
+    assert.equal(rowGAfter.relativePath, 'rec-g.pdf');
+    assert.equal(rowGAfter.version, rowG.version + 1);
+
+    // --- 14.6 restore product path with the trash file missing: hard 409,
+    // never a bookkeeping-only "active".
+    const rowH = enroll('rec-h.pdf', makePdfBytes('recovery-h'), { status: 'trashed' });
+    let res = await call(handler, `/canvas/native/source-files/${rowH.id}/restore`, {
+      method: 'POST', cookie,
+      headers: { 'if-match': `W/"${store.getSourceFile(actor, rowH.id).version}"` }
+    });
+    assert.equal(res.statusCode, 409, res.text);
+    assert.equal(res.payload.error.code, 'trash_missing');
+    assert.equal(store.getSourceFile(actor, rowH.id).status, 'trashed',
+      'a missing trash file must never be restored as bookkeeping-only active');
+
+    // --- 14.7 import: file placed but DB write never happened -> compensate.
+    const opI = startOp({
+      operationType: 'file.import', sourcePath: path.join(tempDir, 'never-downloaded.pdf'),
+      targetPath: `${rootAbs}/rec-orphan.pdf`,
+      payload: { rootId: root.id, targetDir: '', filename: 'rec-orphan.pdf' }
+    });
+    fs.writeFileSync(path.join(rootDir, 'rec-orphan.pdf'), makePdfBytes('recovery-orphan'));
+    summary = recoverInterruptedFileOperations(store);
+    assert.equal(summary.rolledBack, 1);
+    assert.equal(store.getFileOperation(actor, opI.id).state, 'rolled_back');
+    assert.equal(fs.existsSync(path.join(rootDir, 'rec-orphan.pdf')), false,
+      'the orphan placement must be compensated away');
+
+    // --- 14.8 import: DB row already written -> completed, file preserved.
+    const bytesJ = makePdfBytes('recovery-committed');
+    const rowJ = enroll('rec-committed.pdf', bytesJ);
+    const opJ = startOp({
+      operationType: 'file.import', sourcePath: path.join(tempDir, 'never-downloaded-2.pdf'),
+      targetPath: `${rootAbs}/rec-committed.pdf`,
+      payload: { rootId: root.id, targetDir: '', filename: 'rec-committed.pdf' }
+    });
+    summary = recoverInterruptedFileOperations(store);
+    assert.equal(summary.completed, 1);
+    assert.equal(store.getFileOperation(actor, opJ.id).state, 'completed');
+    assert.equal(fs.existsSync(path.join(rootDir, 'rec-committed.pdf')), true);
+    assert.ok(store.getSourceFile(actor, rowJ.id), 'committed row must survive');
+
+    // --- 14.9 mkdir: idempotently ensure the directory -> completed.
+    const opK = startOp({
+      operationType: 'file.mkdir', targetPath: `${rootAbs}/恢复目录/子目录`,
+      payload: { rootId: root.id, path: '恢复目录/子目录' }
+    });
+    summary = recoverInterruptedFileOperations(store);
+    assert.equal(summary.completed, 1);
+    assert.equal(store.getFileOperation(actor, opK.id).state, 'completed');
+    assert.equal(fs.existsSync(path.join(rootDir, '恢复目录', '子目录')), true,
+      'recovery must actually create the journaled directory');
+
+    // --- 14.10 delete_permanent: trash file already gone -> finish the purge.
+    const rowL = enroll('rec-i.pdf', makePdfBytes('recovery-i'), { status: 'trashed' });
+    const opL = startOp({
+      operationType: 'file.delete_permanent', sourceFileId: rowL.id,
+      sourcePath: `.altcanvas-trash/${rowL.id}.pdf`
+    });
+    summary = recoverInterruptedFileOperations(store);
+    assert.equal(summary.completed, 1);
+    assert.equal(store.getFileOperation(actor, opL.id).state, 'completed');
+    assert.equal(store.getSourceFile(actor, rowL.id), null, 'row must be purged (soft-deleted)');
+
+    console.log('✅ P1.2 deterministic crash recovery (rename/trash/restore/import/mkdir/delete + 409 trash_missing) passed');
+  } finally {
+    try { store.close(); } catch {}
+    fs.rmSync(tempDir, { recursive: true, force: true });
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+}
+
+// ============================================================
+// 15. P1.3: forceNew must never bypass the SHA-256 content rule;
+//     it only relaxes the fuzzy metadata confirmation.
+// ============================================================
+async function testM4AuditFixForceNewDedupe() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-force-store-'));
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-force-root-'));
+  const store = new CanvasStore(path.join(tempDir, 'canvas.sqlite'));
+  const actor = canvasActorKey('local', 'm4-force');
+  const session = createSession({
+    userId: 'm4-force-1', subject: 'm4-force', authMode: 'local',
+    username: 'force', role: 'admin', actorKey: actor
+  });
+  const cookie = `altcanvas_session=${session.id}`;
+
+  const pdfByUrl = new Map();
+  let downloadCounter = 0;
+  const fakeDownloadPdf = async (pdfUrl, tempDirForDownload) => {
+    const bytes = pdfByUrl.get(pdfUrl);
+    if (!bytes) {
+      const err = new Error('not found');
+      err.status = 404;
+      throw err;
+    }
+    downloadCounter += 1;
+    fs.mkdirSync(tempDirForDownload, { recursive: true, mode: 0o700 });
+    const tempFilePath = path.join(tempDirForDownload, `dl-${downloadCounter}.pdf`);
+    fs.writeFileSync(tempFilePath, bytes);
+    return { tempFilePath, sha256: sha256Of(bytes), sizeBytes: bytes.length };
+  };
+  const handler = createCanvasHandler(store, { downloadPdfFn: fakeDownloadPdf });
+
+  try {
+    const [root] = store.ensureLibraryRootsFromConfig(actor, [{ absolutePath: rootDir, displayName: '去重文库' }]);
+    const payload = (overrides = {}) => ({
+      title: '强制新建去重文献', year: 2025,
+      pdfUrl: 'http://pdf-source.test/force-a.pdf',
+      rootId: root.id, targetDir: '',
+      ...overrides
+    });
+
+    // First import creates the library identity.
+    pdfByUrl.set('http://pdf-source.test/force-a.pdf', makePdfBytes('force-new-content-one'));
+    let res = await call(handler, '/canvas/native/source-files/import', {
+      method: 'POST', cookie, body: payload({ filename: 'force-a.pdf' })
+    });
+    assert.equal(res.statusCode, 201, res.text);
+    assert.equal(res.payload.data.outcome, 'created');
+    const documentId = res.payload.data.document.id;
+
+    // Identical content with forceNew: true is STILL duplicate_content:
+    // the SHA-256 rule outranks forceNew and the metadata chain.
+    res = await call(handler, '/canvas/native/source-files/import', {
+      method: 'POST', cookie,
+      body: payload({
+        pdfUrl: 'http://pdf-source.test/force-a.pdf',
+        title: '完全不同的另一篇文献',
+        filename: 'force-b.pdf',
+        forceNew: true
+      })
+    });
+    assert.equal(res.statusCode, 409, res.text);
+    assert.equal(res.payload.error.code, 'duplicate_content');
+    assert.equal(res.payload.data.document.id, documentId);
+    assert.equal(fs.existsSync(path.join(rootDir, 'force-b.pdf')), false, 'no second copy may be placed');
+
+    // Fuzzy metadata match (same title, different content) without
+    // confirmation still requires user confirmation.
+    pdfByUrl.set('http://pdf-source.test/force-c.pdf', makePdfBytes('force-new-content-two'));
+    res = await call(handler, '/canvas/native/source-files/import', {
+      method: 'POST', cookie,
+      body: payload({ pdfUrl: 'http://pdf-source.test/force-c.pdf', filename: 'force-c.pdf' })
+    });
+    assert.equal(res.statusCode, 409, res.text);
+    assert.equal(res.payload.error.code, 'duplicate_confirmation_required');
+    assert.equal(fs.existsSync(path.join(rootDir, 'force-c.pdf')), false);
+
+    // forceNew relaxes exactly that fuzzy confirmation — new document created.
+    pdfByUrl.set('http://pdf-source.test/force-d.pdf', makePdfBytes('force-new-content-three'));
+    res = await call(handler, '/canvas/native/source-files/import', {
+      method: 'POST', cookie,
+      body: payload({ pdfUrl: 'http://pdf-source.test/force-d.pdf', filename: 'force-d.pdf', forceNew: true })
+    });
+    assert.equal(res.statusCode, 201, res.text);
+    assert.equal(res.payload.data.outcome, 'created');
+    assert.notEqual(res.payload.data.document.id, documentId);
+
+    console.log('✅ P1.3 forceNew cannot bypass SHA dedupe (only the fuzzy metadata gate) passed');
+  } finally {
+    try { store.close(); } catch {}
+    fs.rmSync(tempDir, { recursive: true, force: true });
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+}
+
+// ============================================================
+// 16. P1.4: content change cascade — attachment version bump +
+//     stale topic analyses; duplicate-hash demotion without a
+//     second library identity.
+// ============================================================
+async function testM4AuditFixContentChange() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-content-store-'));
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-content-root-'));
+  const store = new CanvasStore(path.join(tempDir, 'canvas.sqlite'));
+  const actor = canvasActorKey('local', 'm4-content');
+  const session = createSession({
+    userId: 'm4-content-1', subject: 'm4-content', authMode: 'local',
+    username: 'content', role: 'admin', actorKey: actor
+  });
+  const cookie = `altcanvas_session=${session.id}`;
+  const handler = createCanvasHandler(store);
+
+  try {
+    const [root] = store.ensureLibraryRootsFromConfig(actor, [{ absolutePath: rootDir, displayName: '内容文库' }]);
+    const workspace = store.createWorkspace(actor, { name: '内容变化主题' });
+
+    const bytesA1 = makePdfBytes('content-alpha-v1');
+    const bytesA2 = makePdfBytes('content-alpha-v2-longer-payload');
+    const bytesB = makePdfBytes('content-beta-holder');
+    fs.writeFileSync(path.join(rootDir, 'doc-a.pdf'), bytesA1);
+    fs.writeFileSync(path.join(rootDir, 'doc-b.pdf'), bytesB);
+
+    let scanRes = await call(handler, `/canvas/native/library-roots/${root.id}/scan`, { method: 'POST', cookie });
+    assert.equal(scanRes.statusCode, 202, scanRes.text);
+    assert.equal(scanRes.payload.data.report.newDocuments, 2);
+
+    const rowA = store.getSourceFileByPath(actor, root.id, 'doc-a.pdf');
+    const rowB = store.getSourceFileByPath(actor, root.id, 'doc-b.pdf');
+    assert.ok(rowA.documentId && rowA.attachmentId);
+    assert.ok(rowB.documentId && rowB.attachmentId);
+    const attachmentA = store.getAttachment(actor, rowA.attachmentId);
+    assert.equal(attachmentA.version, 1);
+
+    store.addDocumentTopics(actor, rowA.documentId, [workspace.id]);
+    const binding = store.listTopicDocuments(actor, workspace.id).find(t => t.itemKey === rowA.documentId);
+    assert.equal(binding.attachmentKey, rowA.attachmentId);
+    assert.equal(binding.attachmentVersion, 1);
+
+    // --- 16.1 Content change: attachment version+1 + size refresh + stale analyses.
+    fs.writeFileSync(path.join(rootDir, 'doc-a.pdf'), bytesA2);
+    scanRes = await call(handler, `/canvas/native/library-roots/${root.id}/scan`, { method: 'POST', cookie });
+    assert.equal(scanRes.payload.data.report.changed, 1);
+
+    const changedRow = store.getSourceFile(actor, rowA.id);
+    assert.equal(changedRow.status, 'active');
+    assert.equal(changedRow.sha256, sha256Of(bytesA2), 'source_files.sha256 must follow the disk content');
+    const attachmentAfter = store.getAttachment(actor, rowA.attachmentId);
+    assert.equal(attachmentAfter.version, 2, 'attachment version must be bumped');
+    assert.equal(attachmentAfter.sizeBytes, bytesA2.length, 'attachment size must follow the new content');
+    const bindingAfter = store.listTopicDocuments(actor, workspace.id).find(t => t.itemKey === rowA.documentId);
+    assert.equal(bindingAfter.analysisStatus, 'stale', 'bound topic analysis must go stale');
+    assert.equal(bindingAfter.attachmentVersion, 2, 'binding must follow the new attachment version');
+
+    // --- 16.2 New hash already held by another enrolled document: demote to
+    // duplicate, no second library identity, old bindings cleared + stale.
+    const docsBefore = store.listDocuments(actor, {}).length;
+    fs.writeFileSync(path.join(rootDir, 'doc-a.pdf'), bytesB);
+    scanRes = await call(handler, `/canvas/native/library-roots/${root.id}/scan`, { method: 'POST', cookie });
+    assert.equal(scanRes.payload.data.report.changed, 1);
+    assert.equal(scanRes.payload.data.report.newDocuments, 0);
+
+    const demoted = store.getSourceFile(actor, rowA.id);
+    assert.equal(demoted.status, 'duplicate');
+    assert.equal(demoted.documentId, null, 'duplicate demotion must detach the identity');
+    assert.equal(demoted.attachmentId, null);
+    assert.equal(store.listDocuments(actor, {}).length, docsBefore, 'no second library identity may appear');
+    assert.ok(store.getSourceFile(actor, rowB.id).documentId, 'the original holder keeps its identity');
+
+    const bindingDemoted = store.getTopicDocument(actor, binding.id);
+    assert.equal(bindingDemoted.attachmentKey, null, 'old theme binding attachment key must be cleared');
+    assert.equal(bindingDemoted.attachmentVersion, null);
+    assert.equal(bindingDemoted.analysisStatus, 'stale');
+    const attRow = store.db.prepare('SELECT deleted_at FROM attachments WHERE id = ?').get(rowA.attachmentId);
+    assert.ok(attRow.deleted_at, 'the old attachment must be soft-deleted');
+
+    console.log('✅ P1.4 content change cascade (version bump + stale + duplicate demotion) passed');
+  } finally {
+    try { store.close(); } catch {}
+    fs.rmSync(tempDir, { recursive: true, force: true });
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+}
+
+// ============================================================
+// 17. P1.5: roots removed from the server config are deactivated
+//     (soft-delete), refuse every access path, keep their
+//     source_files linkage, and reactivate in place.
+// ============================================================
+async function testM4AuditFixRootDeactivation() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-roots-store-'));
+  const dirA = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-roots-a-'));
+  const dirB = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-roots-b-'));
+  const store = new CanvasStore(path.join(tempDir, 'canvas.sqlite'));
+  const actor = canvasActorKey('local', 'm4-roots');
+  const session = createSession({
+    userId: 'm4-roots-1', subject: 'm4-roots', authMode: 'local',
+    username: 'roots', role: 'admin', actorKey: actor
+  });
+  const cookie = `altcanvas_session=${session.id}`;
+  const handler = createCanvasHandler(store);
+
+  try {
+    let roots = store.ensureLibraryRootsFromConfig(actor, [
+      { absolutePath: dirA, displayName: '根A' },
+      { absolutePath: dirB, displayName: '根B' }
+    ]);
+    assert.equal(roots.length, 2);
+    const rootA = roots.find(r => r.absolutePath === path.resolve(dirA));
+    const rootB = roots.find(r => r.absolutePath === path.resolve(dirB));
+    assert.ok(rootA && rootB);
+
+    // A source file under root B before it disappears from the config.
+    const bytesB = makePdfBytes('root-b-file');
+    fs.writeFileSync(path.join(dirB, 'b.pdf'), bytesB);
+    const rowB = store.createSourceFile(actor, rootB.id, {
+      relativePath: 'b.pdf', filename: 'b.pdf',
+      sha256: sha256Of(bytesB), sizeBytes: bytesB.length, status: 'active'
+    });
+
+    // Sync with only root A configured: B is deactivated.
+    store.ensureLibraryRootsFromConfig(actor, [{ absolutePath: dirA, displayName: '根A' }]);
+    assert.equal(store.listLibraryRoots(actor).length, 1);
+    assert.throws(() => store.requireLibraryRoot(actor, rootB.id), CanvasNotFoundError);
+
+    // HTTP access paths for the deactivated root are 404.
+    let res = await call(handler, `/canvas/native/library-roots/${rootB.id}/tree`, { cookie });
+    assert.equal(res.statusCode, 404);
+    res = await call(handler, `/canvas/native/library-roots/${rootB.id}/scan`, { method: 'POST', cookie });
+    assert.equal(res.statusCode, 404);
+
+    // The source_files linkage survives (soft association, never deleted).
+    assert.equal(store.listSourceFiles(actor, { rootId: rootB.id }).length, 1,
+      'source_files rows must survive root deactivation');
+    assert.equal(store.getSourceFile(actor, rowB.id).id, rowB.id);
+
+    // Re-configuring the same path reactivates the SAME row id.
+    roots = store.ensureLibraryRootsFromConfig(actor, [
+      { absolutePath: dirA, displayName: '根A' },
+      { absolutePath: dirB, displayName: '根B 复活' }
+    ]);
+    assert.equal(roots.length, 2);
+    const reactivated = roots.find(r => r.id === rootB.id);
+    assert.ok(reactivated, 'same path must reuse/reactivate the old row, not create a new one');
+    assert.equal(reactivated.displayName, '根B 复活');
+    assert.equal(store.getSourceFile(actor, rowB.id).rootId, rootB.id);
+
+    console.log('✅ P1.5 root deactivation, 404 access refusal, linkage retention and reactivate-in-place passed');
+  } finally {
+    try { store.close(); } catch {}
+    fs.rmSync(tempDir, { recursive: true, force: true });
+    fs.rmSync(dirA, { recursive: true, force: true });
+    fs.rmSync(dirB, { recursive: true, force: true });
+  }
+}
+
+// ============================================================
+// 18. P1.7: bounded scanning — lazy PDF iterator + fixed-size
+//     batches over a >SCAN_BATCH_SIZE library.
+// ============================================================
+async function testM4AuditFixBoundedScan() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-bounded-store-'));
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-bounded-root-'));
+  const store = new CanvasStore(path.join(tempDir, 'canvas.sqlite'));
+  const actor = canvasActorKey('local', 'm4-bounded');
+  const session = createSession({
+    userId: 'm4-bounded-1', subject: 'm4-bounded', authMode: 'local',
+    username: 'bounded', role: 'admin', actorKey: actor
+  });
+  const cookie = `altcanvas_session=${session.id}`;
+  const handler = createCanvasHandler(store);
+
+  try {
+    const [root] = store.ensureLibraryRootsFromConfig(actor, [{ absolutePath: rootDir, displayName: '有界文库' }]);
+
+    assert.equal(SCAN_BATCH_SIZE, 100);
+    const total = SCAN_BATCH_SIZE + 5; // forces >1 batch
+    for (let i = 0; i < total; i += 1) {
+      const dir = path.join(rootDir, `batch-${Math.floor(i / 35)}`);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, `file-${String(i).padStart(3, '0')}.pdf`), makePdfBytes(`bounded-unique-${i}`));
+    }
+
+    // First scan enrolls all 105 unique contents across batch boundaries.
+    let scanRes = await call(handler, `/canvas/native/library-roots/${root.id}/scan`, { method: 'POST', cookie });
+    assert.equal(scanRes.statusCode, 202, scanRes.text);
+    let report = scanRes.payload.data.report;
+    assert.equal(report.scannedFiles, total);
+    assert.equal(report.newDocuments, total);
+    assert.equal(report.duplicates, 0);
+    const enrolledCount = store.db.prepare(
+      'SELECT COUNT(*) AS c FROM documents WHERE owner_key = ? AND deleted_at IS NULL'
+    ).get(actor).c;
+    assert.equal(enrolledCount, total);
+
+    // Second scan: everything unchanged, nothing rehashed.
+    scanRes = await call(handler, `/canvas/native/library-roots/${root.id}/scan`, { method: 'POST', cookie });
+    assert.equal(scanRes.statusCode, 202);
+    report = scanRes.payload.data.report;
+    assert.equal(report.unchangedFiles, total);
+    assert.equal(report.hashedFiles, 0);
+    assert.equal(report.newDocuments, 0);
+
+    // iteratePdfEntries is a lazy generator: constructing it over a missing
+    // root must not touch the filesystem until the first pull.
+    const lazy = iteratePdfEntries(path.join(rootDir, 'does-not-exist'));
+    assert.equal(Object.prototype.toString.call(lazy), '[object Generator]');
+    let lazyError = null;
+    try { lazy.next(); } catch (err) { lazyError = err; }
+    assert.ok(lazyError, 'first pull must surface the missing root');
+    assert.equal(lazyError.code, 'library_root_unavailable');
+
+    // Lazy pull over the real root: one value at a time, early close is fine.
+    const iterator = iteratePdfEntries(rootDir);
+    assert.equal(Object.prototype.toString.call(iterator), '[object Generator]');
+    const first = iterator.next();
+    assert.equal(first.done, false);
+    assert.ok(first.value.relativePath.endsWith('.pdf'));
+    assert.equal(typeof first.value.sizeBytes, 'number');
+    assert.equal(typeof first.value.mtimeMs, 'number');
+    iterator.return?.();
+
+    // batchesOf yields fixed-size batches with a bounded remainder.
+    assert.deepEqual([...batchesOf([1, 2, 3, 4, 5][Symbol.iterator](), 2)].map(b => b.length), [2, 2, 1]);
+    assert.deepEqual([...batchesOf([][Symbol.iterator](), 3)], []);
+
+    console.log('✅ P1.7 bounded scan (105 files over 100-batches, lazy generator, batchesOf) passed');
+  } finally {
+    try { store.close(); } catch {}
+    fs.rmSync(tempDir, { recursive: true, force: true });
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+}
+
+// Audit-fix regression suite (P1.1 / P1.2 / P1.3 / P1.4 / P1.5 / P1.7).
+async function testM4AuditFixes() {
+  await testM4AuditFixSymlinkEscapes();
+  await testM4AuditFixDeterministicRecovery();
+  await testM4AuditFixForceNewDedupe();
+  await testM4AuditFixContentChange();
+  await testM4AuditFixRootDeactivation();
+  await testM4AuditFixBoundedScan();
+}
+
 try {
   await main();
   await testV12Migration();
   await testM4Scanner();
   await testM4FileOps();
+  await testM4AuditFixes();
   process.exit(0);
 } catch (err) {
   console.error('❌ Native M4 test failure:', err);

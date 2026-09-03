@@ -42,7 +42,7 @@ export function canvasActorKey(issuer, subject) {
   return crypto.createHash('sha256').update(`${issuer}\0${subject}`).digest('hex');
 }
 
-function nowIso() {
+export function nowIso() {
   return new Date().toISOString();
 }
 
@@ -4766,27 +4766,49 @@ export class CanvasStore {
   // ============================================================
 
   // Syncs server-configured library roots (NATIVE_LIBRARY_ROOTS) for a user.
-  // Clients have no endpoint to register arbitrary absolute paths.
+  // Clients have no endpoint to register arbitrary absolute paths. Roots that
+  // disappear from the configuration are DEACTIVATED (soft-deleted) and all
+  // access through requireLibraryRoot is refused from then on; if the same
+  // path returns later, the previous row is reactivated so source_files
+  // keep their root linkage and scan history.
   ensureLibraryRootsFromConfig(actorKey, roots) {
     const timestamp = nowIso();
     this.transaction(() => {
+      const configuredPaths = new Set();
       for (const root of roots) {
         const absolutePath = path.resolve(root.absolutePath);
         const displayName = String(root.displayName || path.basename(absolutePath)).trim().slice(0, 200) || path.basename(absolutePath);
+        configuredPaths.add(absolutePath);
         const existing = this.db.prepare(
-          'SELECT * FROM library_roots WHERE owner_key = ? AND absolute_path = ? AND deleted_at IS NULL'
+          'SELECT * FROM library_roots WHERE owner_key = ? AND absolute_path = ?'
         ).get(actorKey, absolutePath);
-        if (existing) {
+        if (existing && existing.deleted_at === null) {
           if (existing.display_name !== displayName) {
             this.db.prepare('UPDATE library_roots SET display_name = ?, updated_at = ? WHERE id = ?')
               .run(displayName, timestamp, existing.id);
           }
           continue;
         }
+        if (existing && existing.deleted_at !== null) {
+          this.db.prepare('UPDATE library_roots SET deleted_at = NULL, display_name = ?, version = version + 1, updated_at = ? WHERE id = ?')
+            .run(displayName, timestamp, existing.id);
+          continue;
+        }
         this.db.prepare(`
           INSERT INTO library_roots (id, owner_key, display_name, absolute_path, scan_enabled, created_at, updated_at)
           VALUES (?, ?, ?, ?, 1, ?, ?)
         `).run(id(), actorKey, displayName, absolutePath, timestamp, timestamp);
+      }
+      // Deactivate configured-away roots: hidden from lists and refused on
+      // every access path (requireLibraryRoot filters deleted rows).
+      const active = this.db.prepare(
+        'SELECT id, absolute_path FROM library_roots WHERE owner_key = ? AND deleted_at IS NULL'
+      ).all(actorKey);
+      for (const row of active) {
+        if (!configuredPaths.has(row.absolute_path)) {
+          this.db.prepare('UPDATE library_roots SET deleted_at = ?, version = version + 1, updated_at = ? WHERE id = ?')
+            .run(timestamp, timestamp, row.id);
+        }
       }
     });
     return this.listLibraryRoots(actorKey);
@@ -5179,10 +5201,16 @@ export class CanvasStore {
   }
 
   addDocumentTopics(actorKey, documentId, topicIds, { origin = 'manual' } = {}) {
-    this.requireDocument(actorKey, documentId);
+    const document = this.requireDocument(actorKey, documentId);
     if (!Array.isArray(topicIds) || topicIds.length === 0 || topicIds.length > 50) {
       throw new TypeError('topicIds must be an array of 1-50 workspace ids');
     }
+    // Topic bindings must point at the ACTIVE attachment id + version so
+    // analysis staleness and knowledge-unit filtering stay correct.
+    const activeAttachment = this.db.prepare(`
+      SELECT * FROM attachments WHERE document_id = ? AND deleted_at IS NULL
+      ORDER BY created_at ASC LIMIT 1
+    `).get(document.id);
     const results = [];
     return this.transaction(() => {
       for (const workspaceId of topicIds) {
@@ -5190,7 +5218,8 @@ export class CanvasStore {
           libraryType: 'native',
           libraryId: 'local',
           itemKey: documentId,
-          attachmentKey: null,
+          attachmentKey: activeAttachment?.id || null,
+          attachmentVersion: activeAttachment?.version ?? null,
           status: 'accepted',
           origin
         }));
@@ -5208,6 +5237,66 @@ export class CanvasStore {
     `).get(workspaceId, documentId, actorKey);
     if (!binding) throw new CanvasNotFoundError('topic document binding not found');
     return this.removeTopicDocument(actorKey, binding.id, binding.version);
+  }
+
+  // Scanner hook: an enrolled source file's content changed on disk.
+  //  - New content is still unique: attachment version+1 with refreshed size,
+  //    bound topic_documents follow the new attachment version and their
+  //    analyses go stale (forcing re-analysis of the new content).
+  //  - New content already belongs to another enrolled document: the row is
+  //    demoted to duplicate with NO second library identity; the previous
+  //    attachment is soft-deleted and its topic bindings are cleared with
+  //    analyses stale.
+  applySourceContentChange(actorKey, sourceFileId, { sha256, sizeBytes, modifiedAt, lastSeenAt }) {
+    const row = this.requireSourceFile(actorKey, sourceFileId);
+    const holder = this.findEnrolledSourceFileBySha(actorKey, sha256);
+    const nowDuplicate = holder && holder.id !== row.id;
+    const timestamp = nowIso();
+    return this.transaction(() => {
+      if (nowDuplicate) {
+        if (row.attachmentId) {
+          this.db.prepare(`
+            UPDATE attachments SET deleted_at = ?, updated_at = ?, version = version + 1
+            WHERE id = ? AND deleted_at IS NULL
+          `).run(timestamp, timestamp, row.attachmentId);
+          this.db.prepare(`
+            UPDATE topic_documents SET
+              attachment_key = NULL, attachment_version = NULL, analysis_status = 'stale',
+              version = version + 1, updated_at = ?
+            WHERE attachment_key = ? AND deleted_at IS NULL
+          `).run(timestamp, row.attachmentId);
+        }
+        return this.updateSourceFile(actorKey, sourceFileId, {
+          sha256, sizeBytes, modifiedAt, lastSeenAt,
+          status: 'duplicate',
+          documentId: null,
+          attachmentId: null
+        });
+      }
+      let newAttachmentVersion = null;
+      if (row.attachmentId) {
+        const att = this.db.prepare('SELECT version, size_bytes FROM attachments WHERE id = ? AND deleted_at IS NULL').get(row.attachmentId);
+        if (att) {
+          newAttachmentVersion = att.version + 1;
+          this.db.prepare(`
+            UPDATE attachments SET version = version + 1, size_bytes = ?, updated_at = ?
+            WHERE id = ?
+          `).run(sizeBytes, timestamp, row.attachmentId);
+          this.db.prepare(`
+            UPDATE topic_documents SET
+              analysis_status = 'stale', attachment_version = ?,
+              version = version + 1, updated_at = ?
+            WHERE attachment_key = ? AND deleted_at IS NULL
+          `).run(newAttachmentVersion, timestamp, row.attachmentId);
+        }
+      }
+      const updated = this.updateSourceFile(actorKey, sourceFileId, {
+        sha256, sizeBytes, modifiedAt, lastSeenAt,
+        status: 'active',
+        missingAt: null
+      });
+      return { sourceFile: updated, attachmentVersion: newAttachmentVersion, demoted: false };
+    });
   }
 
   // M4 import landing: identical identity/dedupe chain to importNativeDocument
@@ -5240,8 +5329,10 @@ export class CanvasStore {
     if (topicIds.length > 50) throw new TypeError('at most 50 topics per import');
 
     // Content identity: the same SHA-256 never joins the library twice.
+    // forceNew is deliberately NOT honored here — it only relaxes the fuzzy
+    // metadata match below, never content dedupe.
     const holder = this.findEnrolledSourceFileBySha(actorKey, sha256);
-    if (holder && !forceNew) {
+    if (holder) {
       return {
         outcome: 'duplicate_content',
         match: { strategy: 'sha256', documentId: holder.documentId },
@@ -5339,6 +5430,7 @@ export class CanvasStore {
           libraryId: 'local',
           itemKey: document.id,
           attachmentKey: attachment.id,
+          attachmentVersion: attachment.version,
           status: 'accepted',
           origin: 'canvas_import'
         }));

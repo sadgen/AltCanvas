@@ -217,12 +217,11 @@
       <div id="auth-container" class="flex items-center gap-2">
         <button id="btn-login" type="button" class="px-3 py-1 bg-blue-600 hover:bg-blue-500 text-white font-medium rounded transition flex items-center gap-1 shadow-sm">
           <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1"></path></svg>
-          <span>登录 Altero</span>
+          <span>登录</span>
         </button>
         <div id="user-badge" class="hidden flex items-center gap-2 bg-slate-900 border border-slate-800 rounded px-2.5 py-1 text-slate-300">
           <span class="w-2 h-2 rounded-full bg-emerald-500"></span>
           <span id="user-name-display" class="font-medium text-slate-200"></span>
-          <span id="user-server-tag" class="text-[10px] text-slate-500 font-mono"></span>
           <button id="btn-logout" type="button" class="text-[11px] text-slate-400 hover:text-rose-400 ml-1 transition">退出</button>
         </div>
       </div>
@@ -266,10 +265,6 @@
           <button id="btn-library-ai-classify" type="button" class="px-2.5 py-1 rounded bg-purple-950/70 text-purple-300 border border-purple-800/60 hover:bg-purple-900/70 whitespace-nowrap transition" title="AI 提炼主题体系并推荐归类（可直接采纳）">✨ AI 主题归类</button>
         </div>
 
-        <!-- Collection Filter Tabs -->
-        <div id="collections-container" class="flex gap-1 overflow-x-auto pb-1 text-[11px] custom-scrollbar">
-          <button data-col="all" class="col-tab px-2.5 py-1 rounded bg-blue-600 text-white whitespace-nowrap transition">全部条目</button>
-        </div>
         </div>
       </div>
 
@@ -289,7 +284,7 @@
 
       <!-- Items List -->
       <div id="items-container" class="flex-1 overflow-y-auto custom-scrollbar p-2 space-y-1">
-        <div class="text-center text-slate-500 py-12 text-xs">正在连接 altero...</div>
+        <div class="text-center text-slate-500 py-12 text-xs">正在加载文库...</div>
       </div>
       <div id="topic-library-items" class="hidden flex-1 overflow-y-auto custom-scrollbar p-2 space-y-1">
         <div class="text-center text-slate-500 py-12 text-xs">请选择研究主题</div>
@@ -445,20 +440,6 @@
         </div>
       </div>
 
-      <!-- Altero OAuth Section (for dynamic Altero or legacy) -->
-      <div id="altero-auth-section" class="space-y-3 text-xs hidden">
-        <p class="text-slate-400 leading-relaxed">
-          请输入您的自托管 Altero 服务端地址。AltCanvas 将跳转至该节点进行标准 OAuth 2.0 PKCE 授权，前端不存储您的明文密码。
-        </p>
-        <div>
-          <label for="input-oauth-server" class="block text-slate-300 font-medium mb-1.5">Altero 服务端地址 (URL)</label>
-          <input id="input-oauth-server" type="url" inputmode="url" autocomplete="url" placeholder="https://altero.example.com" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:outline-none focus:border-blue-500 font-mono text-xs">
-          <p class="text-[11px] text-slate-500 mt-1">例如：<code>https://altero.example.com</code> 或 <code>http://localhost:8000</code></p>
-        </div>
-      </div>
-
-      <div class="flex items-center justify-between pt-2 border-t border-slate-800">
-        <button id="btn-toggle-auth-mode" type="button" class="text-[11px] text-slate-500 hover:text-blue-400 transition hidden">切换认证源</button>
         <div class="flex items-center gap-2 ml-auto">
           <button id="btn-cancel-login" class="px-3.5 py-1.5 bg-transparent hover:bg-slate-800 text-slate-400 rounded text-xs transition">取消</button>
           <button id="btn-submit-login" class="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs font-medium transition shadow-lg shadow-blue-600/20 flex items-center gap-1.5">
@@ -476,30 +457,12 @@
       <div class="flex items-center justify-between border-b border-slate-800 pb-3">
         <h3 id="settings-title" class="text-sm font-semibold text-slate-100 flex items-center gap-2">
           <svg class="w-4 h-4 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
-          Altero 服务端连接配置
+          设置与模型配置
         </h3>
         <button id="btn-close-settings" type="button" aria-label="关闭设置" class="text-slate-500 hover:text-slate-300 text-lg leading-none">&times;</button>
       </div>
 
       <div class="space-y-3 text-xs">
-        <div id="legacy-direct-settings" class="space-y-3">
-        <div>
-          <label for="input-api" class="block text-slate-400 mb-1">Altero API 地址</label>
-          <input id="input-api" type="url" inputmode="url" autocomplete="url" placeholder="https://altero.example.com" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:outline-none focus:border-blue-500 font-mono">
-        </div>
-        <div>
-          <label for="input-user-id" class="block text-slate-400 mb-1">User ID</label>
-          <input id="input-user-id" type="text" inputmode="numeric" autocomplete="off" placeholder="1" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:outline-none focus:border-blue-500 font-mono">
-        </div>
-        <div>
-          <label for="input-key" class="block text-slate-400 mb-1">Zotero API Key（仅保存在当前标签页）</label>
-          <div class="relative">
-            <input id="input-key" type="password" autocomplete="off" spellcheck="false" placeholder="请输入您的 Altero API Key" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:outline-none focus:border-blue-500 font-mono pr-16">
-            <button id="btn-toggle-key" type="button" class="absolute right-2 top-2 text-[10px] text-slate-400 hover:text-slate-200">显示/隐藏</button>
-          </div>
-        </div>
-        </div>
-
         <!-- AI Model Configuration -->
         <div class="pt-2 border-t border-slate-800 space-y-2.5">
           <div class="font-medium text-slate-300 flex items-center gap-1.5 text-xs">
@@ -539,7 +502,6 @@
       </div>
 
       <div class="flex items-center justify-between pt-2 border-t border-slate-800">
-        <button id="btn-test-conn" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded text-xs transition border border-slate-700">测试 Altero 连接</button>
         <div class="flex gap-2">
           <button id="btn-cancel-settings" class="px-3 py-1.5 bg-transparent hover:bg-slate-800 text-slate-400 rounded text-xs transition">取消</button>
           <button id="btn-save-settings" class="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs font-medium transition shadow-lg shadow-blue-600/20">保存设置</button>
@@ -1088,7 +1050,6 @@
     };
 
     let allItems = [];
-    let currentSelectedCollection = 'all';
     let currentLibraryView = 'all';
     let topicLibraryLoadToken = 0;
     let currentItem = null;
@@ -1151,8 +1112,6 @@
     let libraryController = null;
     let documentController = null;
     let openRequestId = 0;
-    let directModeAllowed = false;
-    let dynamicAlteroAllowed = false;
     const mobileMedia = window.matchMedia('(max-width: 820px)');
     const mobilePanes = new Set(['library', 'reader', 'annotations']);
 
@@ -1283,11 +1242,11 @@
       return '1';
     }
 
-    function getApiUrl(path) {
-      if (config.mode === 'bff') {
-        return `/api${path}`;
-      }
-      return `${config.api}${path}`;
+    // [M4] Altero/Zotero 外部文库已整体移除（服务端 /api/*、/files/* 代理已下线，
+    // 现返回 410）。此占位仅为仍残留于不可达遗留分支的调用保留引用安全性；
+    // 任何真实调用都会显式抛错，保证运行期零 Altero 请求。
+    function getApiUrl() {
+      throw new Error('Altero 外部文库已于 M4 移除');
     }
 
     function normalizeLibraryContext(sourceRef = null) {
@@ -1299,13 +1258,10 @@
       return { libraryType, libraryId };
     }
 
-    function libraryApiPrefix(sourceRef = null) {
-      const library = normalizeLibraryContext(sourceRef);
-      if (library.libraryType === 'native') {
-        throw new Error('Native library does not support Zotero API endpoints');
-      }
-      const segment = library.libraryType === 'group' ? 'groups' : 'users';
-      return `/${segment}/${encodeURIComponent(library.libraryId)}`;
+    // [M4] Zotero 风格文库 API 前缀已随 Altero 外部文库一并移除；
+    // 仅旧 source_refs 数据兼容仍需要 normalizeLibraryContext。
+    function libraryApiPrefix() {
+      throw new Error('Altero 外部文库已于 M4 移除');
     }
 
     function sourceIdentity(sourceRef) {
@@ -1334,37 +1290,14 @@
     }
 
     function getHeaders(extra = {}) {
-      const headers = {
-        'Zotero-API-Version': '3',
+      return {
         'Accept': 'application/json',
         ...extra
       };
-      if (config.mode !== 'bff' && config.apiKey) {
-        headers['Zotero-API-Key'] = config.apiKey;
-      }
-      return headers;
     }
 
     function applyCapabilitiesUI() {
-      const caps = config.capabilities || {
-        nativeUpload: true,
-        collections: authMode === 'altero',
-        upstreamSync: authMode === 'altero',
-        externalLibrary: authMode === 'altero'
-      };
-      const isAltero = authMode === 'altero' || caps.externalLibrary;
-
-      // Collections container in library pane
-      const collectionsContainer = document.getElementById('collections-container');
-      if (collectionsContainer) {
-        collectionsContainer.classList.toggle('hidden', !caps.collections);
-      }
-
-      // Altero auth section toggle in login modal
-      const toggleAuthBtn = document.getElementById('btn-toggle-auth-mode');
-      if (toggleAuthBtn) {
-        toggleAuthBtn.classList.toggle('hidden', !isAltero && !dynamicAlteroAllowed);
-      }
+      const caps = config.capabilities || { nativeUpload: true };
 
       // Native PDF upload top button
       const btnUploadTop = document.getElementById('btn-upload-pdf-top');
@@ -1373,77 +1306,45 @@
       }
     }
 
-    function updateAuthUI(authenticated, user = null, alteroApi = null) {
+    function updateAuthUI(authenticated, user = null) {
       applyCapabilitiesUI();
       const btnLogin = document.getElementById('btn-login');
       const userBadge = document.getElementById('user-badge');
       const userNameDisplay = document.getElementById('user-name-display');
-      const userServerTag = document.getElementById('user-server-tag');
 
       if (authenticated && user) {
         btnLogin.classList.add('hidden');
         userBadge.classList.remove('hidden');
         userNameDisplay.textContent = user.displayName || user.username || `User ${user.id}`;
-        if (alteroApi) {
-          const displayHost = alteroApi.replace(/^https?:\/\//, '');
-          userServerTag.textContent = `[${displayHost}]`;
-          userServerTag.title = `连接到 Altero 节点: ${alteroApi}`;
-        }
       } else {
         btnLogin.classList.remove('hidden');
         userBadge.classList.add('hidden');
       }
     }
 
-    let authMode = 'local';
     let needsSetup = false;
 
     function openLoginModal() {
       const modal = document.getElementById('login-modal');
-      const localSection = document.getElementById('local-auth-section');
-      const alteroSection = document.getElementById('altero-auth-section');
-      const toggleBtn = document.getElementById('btn-toggle-auth-mode');
       const titleText = document.getElementById('login-title-text');
       const submitText = document.getElementById('btn-submit-login-text');
       const descText = document.getElementById('local-auth-desc');
       const errorBox = document.getElementById('local-auth-error');
       if (errorBox) errorBox.classList.add('hidden');
 
-      if (authMode === 'local') {
-        localSection.classList.remove('hidden');
-        alteroSection.classList.add('hidden');
-        if (needsSetup) {
-          titleText.textContent = '🎉 创建管理员账户';
-          descText.textContent = '欢迎使用 AltCanvas 原生工作台！请先创建您的初始管理员账户。';
-          submitText.textContent = '创建并登录';
-        } else {
-          titleText.textContent = '登录 AltCanvas';
-          descText.textContent = '请输入您的本地账号与密码以登录 AltCanvas 原生研究工作台。';
-          submitText.textContent = '登录';
-        }
-        const allowAlteroLogin = dynamicAlteroAllowed || config.capabilities?.externalLibrary === true;
-        if (allowAlteroLogin) {
-          toggleBtn.classList.remove('hidden');
-          toggleBtn.textContent = '切换至 Altero 授权登录';
-        } else {
-          toggleBtn.classList.add('hidden');
-        }
+      if (needsSetup) {
+        titleText.textContent = '🎉 创建管理员账户';
+        descText.textContent = '欢迎使用 AltCanvas 原生工作台！请先创建您的初始管理员账户。';
+        submitText.textContent = '创建并登录';
       } else {
-        localSection.classList.add('hidden');
-        alteroSection.classList.remove('hidden');
-        titleText.textContent = '登录并授权 Altero';
-        submitText.textContent = '前往 Altero 授权';
-        toggleBtn.classList.remove('hidden');
-        toggleBtn.textContent = '切换至本地账户登录';
+        titleText.textContent = '登录 AltCanvas';
+        descText.textContent = '请输入您的本地账号与密码以登录 AltCanvas 原生研究工作台。';
+        submitText.textContent = '登录';
       }
 
       modal.classList.remove('hidden');
       requestAnimationFrame(() => {
-        if (authMode === 'local') {
-          document.getElementById('input-local-username')?.focus();
-        } else {
-          document.getElementById('input-oauth-server')?.focus();
-        }
+        document.getElementById('input-local-username')?.focus();
       });
     }
 
@@ -1456,74 +1357,53 @@
     }
 
     async function submitLogin() {
-      if (authMode === 'local') {
-        const username = document.getElementById('input-local-username').value.trim();
-        const password = document.getElementById('input-local-password').value;
-        const errorBox = document.getElementById('local-auth-error');
-        if (!username || !password) {
+      const username = document.getElementById('input-local-username').value.trim();
+      const password = document.getElementById('input-local-password').value;
+      const errorBox = document.getElementById('local-auth-error');
+      if (!username || !password) {
+        if (errorBox) {
+          errorBox.textContent = '请输入用户名和密码';
+          errorBox.classList.remove('hidden');
+        }
+        return;
+      }
+
+      const endpoint = needsSetup ? '/auth/setup' : '/auth/login';
+      try {
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password })
+        });
+        const result = await res.json();
+        if (!res.ok) {
           if (errorBox) {
-            errorBox.textContent = '请输入用户名和密码';
+            errorBox.textContent = result.message || '登录失败';
             errorBox.classList.remove('hidden');
           }
           return;
         }
-
-        const endpoint = needsSetup ? '/auth/setup' : '/auth/login';
-        try {
-          const res = await fetch(endpoint, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ username, password })
-          });
-          const result = await res.json();
-          if (!res.ok) {
-            if (errorBox) {
-              errorBox.textContent = result.message || '登录失败';
-              errorBox.classList.remove('hidden');
-            }
-            return;
-          }
-          closeLoginModal();
-          showToast(needsSetup ? '管理员创建成功！' : '登录成功！', 'success');
-          // Confirm the session is truly established before initializing the app,
-          // then run the SAME unified initialization as page startup (AI config,
-          // topics/canvas, inbox, library, auth UI) — no refresh required.
-          const sessionOk = await checkSession();
-          if (!sessionOk) {
-            if (errorBox) {
-              errorBox.textContent = '登录会话确认失败，请重试';
-              errorBox.classList.remove('hidden');
-            }
-            openLoginModal();
-            return;
-          }
-          await initializeAuthenticatedApp();
-        } catch (err) {
+        closeLoginModal();
+        showToast(needsSetup ? '管理员创建成功！' : '登录成功！', 'success');
+        // Confirm the session is truly established before initializing the app,
+        // then run the SAME unified initialization as page startup (AI config,
+        // topics/canvas, inbox, library, auth UI) — no refresh required.
+        const sessionOk = await checkSession();
+        if (!sessionOk) {
           if (errorBox) {
-            errorBox.textContent = err.message || '网络连接异常';
+            errorBox.textContent = '登录会话确认失败，请重试';
             errorBox.classList.remove('hidden');
           }
+          openLoginModal();
+          return;
         }
-        return;
+        await initializeAuthenticatedApp();
+      } catch (err) {
+        if (errorBox) {
+          errorBox.textContent = err.message || '网络连接异常';
+          errorBox.classList.remove('hidden');
+        }
       }
-
-      const serverInput = document.getElementById('input-oauth-server');
-      const raw = serverInput.value.trim();
-      if (!raw) {
-        showToast('请输入你的 Altero 服务端地址 (如 https://altero.example.com)', 'error');
-        serverInput.focus();
-        return;
-      }
-      let serverUrl;
-      try {
-        const u = new URL(raw);
-        serverUrl = u.toString().replace(/\/$/, '');
-      } catch (e) {
-        showToast('请输入合法的 HTTP/HTTPS 地址 (如 https://altero.example.com)', 'error');
-        return;
-      }
-      localStorage.setItem('altcanvas_altero_server', serverUrl);
-      window.location.href = `/auth/login?altero_api=${encodeURIComponent(serverUrl)}`;
     }
 
     async function checkSession() {
@@ -1531,35 +1411,14 @@
         const res = await fetch('/auth/session', { cache: 'no-store' });
         if (res.ok) {
           const data = await res.json();
-          authMode = data.authMode || 'local';
           needsSetup = Boolean(data.needsSetup);
-          directModeAllowed = data.allowDirectMode === true;
-          dynamicAlteroAllowed = data.allowDynamicAltero === true;
-          config.defaultAlteroApi = data.defaultAlteroApi || '';
-          config.capabilities = data.capabilities || {
-            nativeUpload: true,
-            collections: authMode === 'altero',
-            upstreamSync: authMode === 'altero',
-            externalLibrary: authMode === 'altero'
-          };
+          config.capabilities = data.capabilities || { nativeUpload: true };
           applyCapabilitiesUI();
-          document.getElementById('btn-open-settings').classList.toggle('hidden', !directModeAllowed);
-          if (directModeAllowed) {
-            config.api = localStorage.getItem('altcanvas_api') || '';
-            config.userId = localStorage.getItem('altcanvas_user_id') || '';
-            config.apiKey = sessionStorage.getItem('altcanvas_key') || '';
-          } else {
-            localStorage.removeItem('altcanvas_api');
-            localStorage.removeItem('altcanvas_user_id');
-            sessionStorage.removeItem('altcanvas_key');
-          }
           if (data.authenticated && data.user) {
             config.mode = 'bff';
-            config.authMode = data.authMode || 'local';
             config.userId = String(data.user.id);
             config.user = data.user;
-            config.alteroApi = data.alteroApi;
-            updateAuthUI(true, data.user, data.alteroApi);
+            updateAuthUI(true, data.user);
             return true;
           }
           if (needsSetup) {
@@ -1571,17 +1430,9 @@
       }
 
       updateAuthUI(false);
-
-      // Dev fallback mode if manual credentials are in storage
-      if (directModeAllowed && config.api && config.userId && config.apiKey) {
-        config.mode = 'direct';
-        return true;
-      }
-      if (!directModeAllowed) {
-        config.api = '';
-        config.userId = '';
-        config.apiKey = '';
-      }
+      config.api = '';
+      config.userId = '';
+      config.apiKey = '';
       return false;
     }
 
@@ -1594,23 +1445,6 @@
       }
       updateAuthUI(false);
       window.location.reload();
-    }
-
-    function normalizeApi(value) {
-      const url = new URL(value);
-      if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
-        throw new Error('API 地址必须是有效的 HTTP(S) 地址，且不能包含账号密码');
-      }
-      url.search = '';
-      url.hash = '';
-      return url.toString().replace(/\/$/, '');
-    }
-
-    function validateSettings(api, userId, key) {
-      const normalizedApi = normalizeApi(api);
-      if (!/^[A-Za-z0-9_-]+$/.test(userId)) throw new Error('User ID 格式无效');
-      if (!key) throw new Error('请输入 Zotero API Key');
-      return { api: normalizedApi, userId, apiKey: key, mode: 'direct' };
     }
 
     function errorMessage(error) {
@@ -1852,11 +1686,6 @@
 
     // --- Settings Modal Handling ---
     function openSettingsModal() {
-      document.getElementById('input-api').value = config.api;
-      document.getElementById('input-user-id').value = config.userId;
-      document.getElementById('input-key').value = config.apiKey;
-      document.getElementById('legacy-direct-settings').classList.toggle('hidden', config.mode === 'bff');
-      document.getElementById('btn-test-conn').classList.toggle('hidden', config.mode === 'bff');
       document.getElementById('ai-provider-name').textContent = aiConfig.provider ? `${aiConfig.provider}${aiConfig.userConfigured ? ' (个人配置)' : ' (系统默认)'}` : '未配置';
       document.getElementById('ai-provider-model').textContent = aiConfig.model || '未配置';
       document.getElementById('input-ai-base-url').value = aiConfig.baseUrl || '';
@@ -1868,7 +1697,7 @@
       document.getElementById('btn-clear-ai-config').classList.toggle('hidden', !aiConfig.userConfigured);
       document.getElementById('test-output').classList.add('hidden');
       document.getElementById('settings-modal').classList.remove('hidden');
-      requestAnimationFrame(() => document.getElementById(config.mode === 'bff' ? 'input-ai-base-url' : (config.apiKey ? 'input-api' : 'input-key')).focus());
+      requestAnimationFrame(() => document.getElementById('input-ai-base-url').focus());
     }
 
     function closeSettingsModal() {
@@ -1956,49 +1785,14 @@
       }
     }
 
-    async function testConnection(api, userId, key) {
-      const out = document.getElementById('test-output');
-      out.classList.remove('hidden');
-      out.replaceChildren();
-      const pending = document.createElement('span');
-      pending.className = 'text-slate-400 animate-pulse';
-      pending.textContent = '正在验证密钥与权限...';
-      out.appendChild(pending);
-
-      try {
-        const candidate = validateSettings(api, userId, key);
-        const res = await fetch(`${candidate.api}/keys/current`, {
-          headers: { 'Zotero-API-Key': key, 'Zotero-API-Version': '3' }
-        });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        setTestOutput([
-          ['✓ 连接成功', 'text-emerald-400 font-medium'],
-          [`用户: ${data.username || data.userID || '未知'} (ID: ${data.userID ?? '未知'})`, 'text-slate-300'],
-          [`权限: 读写库 ${data.access?.user?.write ? '✅ 完整' : '⚠️ 只读'}，文件 ${data.access?.user?.files ? '✅ 允许' : '❌ 禁用'}`, 'text-slate-400'],
-        ], true);
-        return true;
-      } catch (err) {
-        setTestOutput([[`✕ 连接失败: ${errorMessage(err)}`, 'text-rose-400 font-medium']], false);
-        return false;
-      }
-    }
-
     document.getElementById('btn-open-settings').onclick = openSettingsModal;
     document.getElementById('btn-login').onclick = beginLogin;
     document.getElementById('btn-close-login').onclick = closeLoginModal;
     document.getElementById('btn-cancel-login').onclick = closeLoginModal;
     document.getElementById('btn-submit-login').onclick = submitLogin;
-    document.getElementById('input-oauth-server').onkeydown = (e) => {
-      if (e.key === 'Enter') submitLogin();
-    };
     document.getElementById('btn-logout').onclick = handleLogout;
     document.getElementById('btn-close-settings').onclick = closeSettingsModal;
     document.getElementById('btn-cancel-settings').onclick = closeSettingsModal;
-    document.getElementById('btn-toggle-key').onclick = () => {
-      const input = document.getElementById('input-key');
-      input.type = input.type === 'password' ? 'text' : 'password';
-    };
     document.getElementById('btn-test-ai-conn').onclick = () => saveAiConfig({ testAfterSave: true });
     document.getElementById('btn-clear-ai-config').onclick = clearAiConfig;
     document.getElementById('input-ai-auto-translate').onchange = event => {
@@ -2058,40 +1852,8 @@
     document.getElementById('btn-cancel-cross-report')?.addEventListener('click', closeCrossReportRelationsModal);
     document.getElementById('btn-expand-selected-relations')?.addEventListener('click', expandSelectedCrossReportRelations);
 
-    document.getElementById('btn-test-conn').onclick = () => {
-      const api = document.getElementById('input-api').value.trim();
-      const userId = document.getElementById('input-user-id').value.trim();
-      const key = document.getElementById('input-key').value.trim();
-      testConnection(api, userId, key);
-    };
-
     document.getElementById('btn-save-settings').onclick = async () => {
-      if (config.mode === 'bff') {
-        if (await saveAiConfig()) closeSettingsModal();
-        return;
-      }
-      const api = document.getElementById('input-api').value.trim();
-      const userId = document.getElementById('input-user-id').value.trim();
-      const key = document.getElementById('input-key').value.trim();
-
-      let candidate;
-      try {
-        candidate = validateSettings(api, userId, key);
-      } catch (error) {
-        showToast(errorMessage(error), 'error');
-        return;
-      }
-
-      config = candidate;
-
-      localStorage.setItem('altcanvas_api', config.api);
-      localStorage.setItem('altcanvas_user_id', config.userId);
-      sessionStorage.setItem('altcanvas_key', config.apiKey);
-
-      documentMetas.clear();
-      closeSettingsModal();
-      showToast('配置已保存，正在重新加载文库...', 'success');
-      loadCollectionsAndLibrary();
+      if (await saveAiConfig()) closeSettingsModal();
     };
 
     // --- Collections & Library Loading ---
@@ -2260,57 +2022,6 @@
       }
 
       allItems = nativeDocs.map(nativeDocumentToLibraryItem).filter(Boolean);
-      renderCollections([]);
-      renderItems();
-    }
-
-    async function loadExternalLibrary(signal) {
-      const container = document.getElementById('items-container');
-      const userId = encodeURIComponent(config.userId);
-      const colUrl = getApiUrl(`/users/${userId}/collections`);
-      const itemUrl = getApiUrl(`/users/${userId}/items/top?limit=100`);
-      const metaUrl = `/canvas/documents/metadata?libraryType=user&libraryId=${userId}`;
-
-      const [colRes, itemsRes, metasRes] = await Promise.all([
-        fetch(colUrl, { headers: getHeaders(), signal }),
-        fetch(itemUrl, { headers: getHeaders(), signal }),
-        fetch(metaUrl, { signal }).catch(() => null)
-      ]);
-
-      if (colRes.status === 401 || itemsRes.status === 401) {
-        updateAuthUI(false);
-        container.innerHTML = `
-          <div class="text-center text-slate-500 py-12 px-4 space-y-3">
-            <p class="text-xs text-rose-400">登录会话已过期</p>
-            <a href="/auth/login" class="inline-block px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs transition">重新登录</a>
-          </div>`;
-        return;
-      }
-      if (colRes.status === 403 || itemsRes.status === 403) {
-        container.innerHTML = '<div class="text-center text-amber-400 py-12 px-4 text-xs">当前登录缺少读取文库所需的权限，请退出后重新授权。</div>';
-        return;
-      }
-
-      if (metasRes && metasRes.ok) {
-        try {
-          const metasData = await metasRes.json();
-          if (Array.isArray(metasData?.data)) {
-            for (const meta of metasData.data) {
-              if (meta?.itemKey) {
-                documentMetas.set(docMetaKey(meta.libraryType, meta.libraryId, meta.itemKey), meta);
-              }
-            }
-          }
-        } catch {}
-      }
-
-      if (colRes.ok) {
-        const collections = await colRes.json();
-        renderCollections(collections);
-      }
-
-      if (!itemsRes.ok) throw new Error(`HTTP ${itemsRes.status}: 未能加载条目`);
-      allItems = await itemsRes.json();
       renderItems();
     }
 
@@ -2327,80 +2038,25 @@
       }
 
       const container = document.getElementById('items-container');
-      container.innerHTML = '<div class="text-center text-slate-500 py-12 text-xs animate-pulse">正在加载文库与集合...</div>';
+      container.innerHTML = '<div class="text-center text-slate-500 py-12 text-xs animate-pulse">正在加载文库...</div>';
       libraryController?.abort();
       libraryController = new AbortController();
 
-      const externalEnabled =
-        config.authMode === 'altero' &&
-        config.capabilities?.externalLibrary === true;
-
-      if (!externalEnabled) {
-        try {
-          await loadNativeLibrary(libraryController.signal);
-        } catch (err) {
-          if (err?.name === 'AbortError') return;
-          renderNativeLibraryError(err);
-        }
-        return;
-      }
-
       try {
-        await loadExternalLibrary(libraryController.signal);
+        await loadNativeLibrary(libraryController.signal);
       } catch (err) {
         if (err?.name === 'AbortError') return;
-        container.innerHTML = `
-          <div class="p-4 text-center space-y-2">
-            <div class="text-rose-400 text-xs">加载失败: ${escapeHTML(errorMessage(err))}</div>
-            <button type="button" class="open-settings-link text-xs text-blue-400 underline">检查连接设置</button>
-          </div>
-        `;
-        container.querySelector('.open-settings-link')?.addEventListener('click', openSettingsModal);
+        renderNativeLibraryError(err);
       }
-    }
-
-    function renderCollections(collections) {
-      const colContainer = document.getElementById('collections-container');
-      colContainer.innerHTML = `
-        <button data-col="all" class="col-tab px-2.5 py-1 rounded ${currentSelectedCollection === 'all' ? 'bg-blue-600 text-white' : 'bg-slate-900 text-slate-400 hover:text-slate-200'} whitespace-nowrap transition">全部条目</button>
-      `;
-
-      for (const col of collections) {
-        const btn = document.createElement('button');
-        btn.dataset.col = col.key;
-        const isActive = currentSelectedCollection === col.key;
-        btn.className = `col-tab px-2.5 py-1 rounded ${isActive ? 'bg-blue-600 text-white' : 'bg-slate-900 text-slate-400 hover:text-slate-200'} whitespace-nowrap transition flex items-center gap-1`;
-        btn.innerHTML = `<span aria-hidden="true">📁</span><span>${escapeHTML(col.data?.name || col.key)}</span>`;
-        btn.onclick = () => {
-          currentSelectedCollection = col.key;
-          document.querySelectorAll('.col-tab').forEach(b => {
-            b.className = 'col-tab px-2.5 py-1 rounded bg-slate-900 text-slate-400 hover:text-slate-200 whitespace-nowrap transition flex items-center gap-1';
-          });
-          btn.className = 'col-tab px-2.5 py-1 rounded bg-blue-600 text-white whitespace-nowrap transition flex items-center gap-1';
-          renderItems();
-        };
-        colContainer.appendChild(btn);
-      }
-
-      document.querySelector('[data-col="all"]').onclick = (e) => {
-        currentSelectedCollection = 'all';
-        document.querySelectorAll('.col-tab').forEach(b => {
-          b.className = 'col-tab px-2.5 py-1 rounded bg-slate-900 text-slate-400 hover:text-slate-200 whitespace-nowrap transition flex items-center gap-1';
-        });
-        e.currentTarget.className = 'col-tab px-2.5 py-1 rounded bg-blue-600 text-white whitespace-nowrap transition';
-        renderItems();
-      };
     }
 
     function renderItems() {
       const container = document.getElementById('items-container');
-      const filtered = currentSelectedCollection === 'all'
-        ? allItems
-        : allItems.filter(item => (item.data?.collections || []).includes(currentSelectedCollection));
+      const filtered = allItems;
 
       container.innerHTML = '';
       if (filtered.length === 0) {
-        container.innerHTML = '<div class="text-slate-500 text-center py-10 text-xs">当前集合暂无条目</div>';
+        container.innerHTML = '<div class="text-slate-500 text-center py-10 text-xs">文库暂无条目</div>';
         return;
       }
 
@@ -4299,10 +3955,7 @@
       document.getElementById('topic-tab-meta').classList.toggle('hidden', tab !== 'meta');
       document.getElementById('topic-tab-docs').classList.toggle('hidden', tab !== 'docs');
 
-      if (tab === 'bindings') {
-        loadTopicBindings();
-        loadAlteroCollectionsForBinding();
-      } else if (tab === 'docs') {
+      if (tab === 'docs') {
         loadTopicDocuments();
       }
     }
@@ -4337,7 +3990,7 @@
     async function deleteCurrentTopic() {
       if (!canvasWorkspace) return;
       if (userWorkspaces.length <= 1) return showToast('至少需保留一个研究主题', 'error');
-      if (!confirm(`确认删除研究主题「${canvasWorkspace.name}」？其下的画板与分析将被移除（Altero 原始文献不受影响）。`)) return;
+      if (!confirm(`确认删除研究主题「${canvasWorkspace.name}」？其下的画板与分析将被移除（文库文献与原始文件不受影响）。`)) return;
 
       try {
         await canvasFetch(`/workspaces/${canvasWorkspace.id}`, {
@@ -4426,7 +4079,7 @@
     }
 
     async function removeTopicDocument(docId, version) {
-      if (!confirm('确认将此文献移出当前研究主题？（Altero 原始条目与附件不会被删除）')) return;
+      if (!confirm('确认将此文献移出当前研究主题？（文库记录与原始文件不会被删除）')) return;
       try {
         await canvasFetch(`/topic-documents/${docId}`, {
           method: 'DELETE',
@@ -4803,7 +4456,7 @@
           if (config.userId) {
             await loadCollectionsAndLibrary();
           }
-          updateAuthUI(config.mode === 'bff' && Boolean(config.user), config.user, config.alteroApi);
+          updateAuthUI(Boolean(config.user), config.user);
         } catch (err) {
           // A failed initialization must NEVER be presented as a login problem:
           // the session stays intact and the specific failure surfaces instead.
@@ -4888,7 +4541,7 @@
       count.textContent = canvasNodes.size;
       empty.classList.toggle('hidden', canvasNodes.size > 0);
       if (!canvasReady && canvasNodes.size === 0) {
-        empty.querySelector('div').innerHTML = '登录后即可使用研究画板<br>本地账户或 Altero 授权均可';
+        empty.querySelector('div').innerHTML = '登录后即可使用研究画板';
       } else if (canvasNodes.size === 0) {
         empty.querySelector('div').innerHTML = '画板还是空的<br>创建手写卡片或加入当前文档标注';
       }

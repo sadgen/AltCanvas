@@ -7,6 +7,9 @@ import {
   normalizeFilename,
   resolveInsideRoot,
   resolveRootRealPath,
+  ensureParentInsideRoot,
+  ensureVerifiedDirectory,
+  assertWrittenInsideRoot,
   hashFileInsideRoot
 } from './native-fs.mjs';
 
@@ -62,7 +65,9 @@ export async function probeTargetPath(store, actorKey, root, targetRelativePath,
 export function placeFileIntoRoot(rootPath, targetRelativePath, tempFilePath) {
   const rootReal = resolveRootRealPath(rootPath);
   const target = resolveInsideRoot(rootReal, targetRelativePath);
-  fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o755 });
+  // Per-component parent verification: any symlinked ancestor aborts before
+  // a single byte is written outside the root.
+  ensureParentInsideRoot(rootReal, targetRelativePath, { create: true });
   const staged = path.join(path.dirname(target), `.${TRASH_DIR_NAME}-staging-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
   const cleanupStaged = () => { try { fs.unlinkSync(staged); } catch {} };
   try {
@@ -81,6 +86,7 @@ export function placeFileIntoRoot(rootPath, targetRelativePath, tempFilePath) {
       fs.copyFileSync(staged, target, fs.constants.COPYFILE_EXCL);
     }
     cleanupStaged();
+    assertWrittenInsideRoot(rootReal, target); // post-write containment: never keep an escape
     const dirFd = fs.openSync(path.dirname(target), 'r');
     try { fs.fsyncSync(dirFd); } finally { fs.closeSync(dirFd); }
     return target;
@@ -88,6 +94,14 @@ export function placeFileIntoRoot(rootPath, targetRelativePath, tempFilePath) {
     cleanupStaged();
     throw err;
   }
+}
+
+function sourceAbsRelative(row) {
+  return row.relativePath;
+}
+
+function rootRealFor(root) {
+  return resolveRootRealPath(root.absolutePath);
 }
 
 function journal(store, actorKey, operationType, detail, payload = {}) {
@@ -155,9 +169,17 @@ export async function renameSourceFile(store, actorKey, sourceFileId, expectedVe
   const sourceAbs = resolveInsideRoot(root.absolutePath, row.relativePath);
   const targetAbs = resolveInsideRoot(root.absolutePath, targetRel);
   try {
+    // Both parents are walked segment by segment; any symlinked ancestor
+    // aborts before the rename happens.
+    ensureParentInsideRoot(root.absolutePath, row.relativePath, { create: false });
+    ensureParentInsideRoot(root.absolutePath, targetRel, { create: false });
     fs.renameSync(sourceAbs, targetAbs);
+    assertWrittenInsideRoot(rootRealFor(root), targetAbs);
   } catch (err) {
-    store.failFileOperation(operation.id, 'filesystem_rename_failed');
+    // Containment violation after the rename must leave zero side effects.
+    try { if (fs.existsSync(targetAbs)) fs.renameSync(targetAbs, sourceAbs); } catch {}
+    store.failFileOperation(operation.id, err instanceof NativePathError ? err.code : 'filesystem_rename_failed');
+    if (err instanceof NativePathError) throw new FileOpError(err.message, err.code, 400);
     throw new FileOpError(`rename failed: ${err.message}`, 'filesystem_rename_failed', 500);
   }
 
@@ -221,7 +243,8 @@ export async function moveSourceFile(store, actorKey, sourceFileId, expectedVers
   });
 
   try {
-    fs.mkdirSync(path.dirname(targetAbs), { recursive: true, mode: 0o755 });
+    ensureParentInsideRoot(root.absolutePath, sourceAbsRelative(row), { create: false });
+    ensureParentInsideRoot(root.absolutePath, targetRel, { create: true });
     try {
       fs.renameSync(sourceAbs, targetAbs);
     } catch (err) {
@@ -235,8 +258,17 @@ export async function moveSourceFile(store, actorKey, sourceFileId, expectedVers
       }
       fs.unlinkSync(sourceAbs);
     }
+    assertWrittenInsideRoot(resolveRootRealPath(root.absolutePath), targetAbs);
   } catch (err) {
-    store.failFileOperation(operation.id, 'filesystem_move_failed');
+    // Any post-write containment failure rolls the move back: zero escapes.
+    try {
+      if (!fs.existsSync(sourceAbs) && fs.existsSync(targetAbs)) {
+        fs.mkdirSync(path.dirname(sourceAbs), { recursive: true, mode: 0o755 });
+        fs.renameSync(targetAbs, sourceAbs);
+      }
+    } catch {}
+    store.failFileOperation(operation.id, err instanceof NativePathError ? err.code : 'filesystem_move_failed');
+    if (err instanceof NativePathError) throw new FileOpError(err.message, err.code, 400);
     throw new FileOpError(`move failed: ${err.message}`, 'filesystem_move_failed', 500);
   }
 
@@ -271,21 +303,30 @@ export async function trashSourceFile(store, actorKey, sourceFileId, expectedVer
     targetPath: trashRel
   }, {});
 
-  fs.mkdirSync(path.dirname(trashAbs), { recursive: true, mode: 0o700 });
-
   const sourceAbs = resolveInsideRoot(root.absolutePath, row.relativePath);
   const fileOnDisk = fs.existsSync(sourceAbs);
   let moved = false;
   try {
+    // The source side gets the same per-component walk: a symlinked ancestor
+    // on the row's path must abort before a root-outside file is moved in.
+    ensureParentInsideRoot(root.absolutePath, row.relativePath, { create: false });
+    ensureParentInsideRoot(root.absolutePath, trashRel, { create: true });
+    fs.chmodSync(path.dirname(trashAbs), 0o700);
     if (fileOnDisk) {
       try {
         fs.unlinkSync(trashAbs); // replace stale trash copies of the same row id
       } catch {}
-      fs.renameSync(resolveInsideRoot(root.absolutePath, row.relativePath), trashAbs);
+      fs.renameSync(sourceAbs, trashAbs);
       moved = true;
+      assertWrittenInsideRoot(resolveRootRealPath(root.absolutePath), trashAbs);
     }
   } catch (err) {
-    store.failFileOperation(operation.id, 'filesystem_trash_failed');
+    if (moved) {
+      // Containment failure after the move: bring the file back.
+      try { fs.renameSync(trashAbs, sourceAbs); } catch {}
+    }
+    store.failFileOperation(operation.id, err instanceof NativePathError ? err.code : 'filesystem_trash_failed');
+    if (err instanceof NativePathError) throw new FileOpError(err.message, err.code, 400);
     throw new FileOpError(`trash failed: ${err.message}`, 'filesystem_trash_failed', 500);
   }
 
@@ -327,14 +368,13 @@ export async function restoreSourceFile(store, actorKey, sourceFileId, expectedV
   }
 
   if (!fs.existsSync(trashAbs)) {
-    // Trash file was removed externally: restore by bookkeeping only.
-    const updated = store.updateSourceFileGuarded(actorKey, row.id, expectedVersion, {
-      status: 'active',
-      trashedAt: null,
-      relativePath: targetRel,
-      filename: path.posix.basename(targetRel)
-    });
-    return { sourceFile: updated, operation: null, moved: false };
+    // The trashed file is gone from the controlled recycle area; restoring a
+    // nonexistent file as "active" would lie about disk state. Hard error.
+    throw new FileOpError(
+      '回收区中已不存在该文件，无法恢复（文件可能已被永久删除）',
+      'trash_missing',
+      409
+    );
   }
 
   if (fs.existsSync(resolveInsideRoot(root.absolutePath, targetRel))) {
@@ -354,11 +394,17 @@ export async function restoreSourceFile(store, actorKey, sourceFileId, expectedV
     targetPath: targetRel
   }, { filename: path.posix.basename(targetRel) });
 
+  const restoreTargetAbs = resolveInsideRoot(root.absolutePath, targetRel);
   try {
-    fs.mkdirSync(path.dirname(resolveInsideRoot(root.absolutePath, targetRel)), { recursive: true, mode: 0o755 });
-    fs.renameSync(trashAbs, resolveInsideRoot(root.absolutePath, targetRel));
+    ensureParentInsideRoot(root.absolutePath, targetRel, { create: true });
+    fs.renameSync(trashAbs, restoreTargetAbs);
+    assertWrittenInsideRoot(resolveRootRealPath(root.absolutePath), restoreTargetAbs);
   } catch (err) {
-    store.failFileOperation(operation.id, 'filesystem_restore_failed');
+    if (fs.existsSync(restoreTargetAbs)) {
+      try { fs.renameSync(restoreTargetAbs, trashAbs); } catch {}
+    }
+    store.failFileOperation(operation.id, err instanceof NativePathError ? err.code : 'filesystem_restore_failed');
+    if (err instanceof NativePathError) throw new FileOpError(err.message, err.code, 400);
     throw new FileOpError(`restore failed: ${err.message}`, 'filesystem_restore_failed', 500);
   }
 

@@ -85,17 +85,12 @@ const {
 installDevLogging();
 
 const {
-  getAuthMode,
   isLocalAuthAllowed,
-  handleLogin,
-  handleCallback,
   handleSession,
   handleLogout,
   handleLocalSetup,
   handleLocalLogin
 } = await import('../server/auth.mjs');
-const { handleApiProxy } = await import('../server/proxy-api.mjs');
-const { handleFilesProxy } = await import('../server/proxy-files.mjs');
 const { handleCanvasApi, getCanvasStore } = await import('../server/canvas-api.mjs');
 const { consumeRateLimit, getRequestOrigin, isSameOriginRequest } = await import('../server/security.mjs');
 
@@ -223,35 +218,24 @@ const server = http.createServer(async (req, res) => {
   }
 
   // --- BFF Router: Authentication Endpoints ---
-  const currentAuthMode = getAuthMode();
   const currentCanvasStore = getCanvasStore();
 
   if (pathname === '/auth/setup' && req.method === 'POST') {
-    if (!isLocalAuthAllowed()) {
-      send(res, 403, JSON.stringify({ error: 'local_auth_disabled', message: '当前部署模式未启用本地账户认证' }), { 'Content-Type': 'application/json' });
-      return;
-    }
     return await handleLocalSetup(req, res, currentCanvasStore);
   }
   if (pathname === '/auth/login') {
     if (req.method === 'POST') {
-      if (!isLocalAuthAllowed()) {
-        send(res, 403, JSON.stringify({ error: 'local_auth_disabled', message: '当前部署模式未启用本地账户认证' }), { 'Content-Type': 'application/json' });
-        return;
-      }
       return await handleLocalLogin(req, res, currentCanvasStore);
     }
     if (['GET', 'HEAD'].includes(req.method)) {
-      if (currentAuthMode === 'local') {
-        res.writeHead(302, { 'Location': '/', 'Cache-Control': 'no-store' });
-        res.end();
-        return;
-      }
-      return await handleLogin(req, res, url, selfOrigin);
+      res.writeHead(302, { 'Location': '/', 'Cache-Control': 'no-store' });
+      res.end();
+      return;
     }
   }
   if (pathname === '/auth/callback' && ['GET', 'HEAD'].includes(req.method)) {
-    return await handleCallback(req, res, url, selfOrigin);
+    send(res, 410, JSON.stringify({ error: 'feature_retired', message: 'Altero OAuth 已于 M4 移除，请使用本地账户登录' }), { 'Content-Type': 'application/json' });
+    return;
   }
   if (pathname === '/auth/session' && ['GET', 'HEAD'].includes(req.method)) {
     return await handleSession(req, res, currentCanvasStore);
@@ -260,30 +244,10 @@ const server = http.createServer(async (req, res) => {
     return await handleLogout(req, res);
   }
 
-  // --- BFF Router: API Proxy ---
-  if (pathname.startsWith('/api/')) {
-    if (currentAuthMode !== 'altero') {
-      res.writeHead(403, {
-        'Content-Type': 'application/json; charset=utf-8',
-        'Cache-Control': 'no-store'
-      });
-      res.end(JSON.stringify({ error: 'external_library_disabled', message: 'Altero API 代理在本地模式下已禁用' }));
-      return;
-    }
-    return await handleApiProxy(req, res, url);
-  }
-
-  // --- BFF Router: Streaming Files Proxy ---
-  if (pathname.startsWith('/files/')) {
-    if (currentAuthMode !== 'altero') {
-      res.writeHead(403, {
-        'Content-Type': 'application/json; charset=utf-8',
-        'Cache-Control': 'no-store'
-      });
-      res.end(JSON.stringify({ error: 'external_library_disabled', message: 'Altero 文件代理在本地模式下已禁用' }));
-      return;
-    }
-    return await handleFilesProxy(req, res, url);
+  // --- [M4] Altero API/files proxies were removed with the OAuth flow. ---
+  if (pathname.startsWith('/api/') || pathname.startsWith('/files/')) {
+    send(res, 410, JSON.stringify({ error: 'feature_retired', message: 'Altero 代理已于 M4 移除' }), { 'Content-Type': 'application/json' });
+    return;
   }
 
   // --- AltCanvas-owned persistent workspace API ---

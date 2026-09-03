@@ -6,7 +6,7 @@ import os from 'os';
 import path from 'path';
 import { DatabaseSync } from 'node:sqlite';
 import { CanvasConflictError, CanvasNotFoundError, CanvasStore, canvasActorKey } from '../server/canvas-store.mjs';
-import { createCanvasHandler, fetchAllUpstreamItems, recoverQueuedAndRunningJobs, defaultPromoteBlob, normalizeResolvedImportMetadata } from '../server/canvas-api.mjs';
+import { createCanvasHandler, recoverQueuedAndRunningJobs, defaultPromoteBlob, normalizeResolvedImportMetadata } from '../server/canvas-api.mjs';
 import { createSession, destroySession } from '../server/session.mjs';
 
 class MockResponse extends EventEmitter {
@@ -136,76 +136,12 @@ try {
   const aiCalls = [];
   const aiPrivateConfigs = [];
   const aiValidatedEndpoints = [];
-  const alteroCalls = [];
-  const mockAlteroItems = [
-    {
-      key: 'ALT_ITEM_1',
-      version: 10,
-      data: {
-        key: 'ALT_ITEM_1',
-        itemType: 'journalArticle',
-        title: 'DeepSeek-V3 Technical Report',
-        creators: [{ creatorType: 'author', name: 'DeepSeek-AI' }],
-        date: '2024-12-27',
-        abstractNote: 'We introduce DeepSeek-V3, a strong Mixture-of-Experts language model...',
-        tags: [{ tag: 'llm' }, { tag: 'moe' }],
-        collections: ['API_COL_1']
-      }
-    },
-    {
-      key: 'ALT_ITEM_2',
-      version: 11,
-      data: {
-        key: 'ALT_ITEM_2',
-        itemType: 'journalArticle',
-        title: 'Kimi k1.5: Scaling Reinforcement Learning with LLMs',
-        creators: [{ creatorType: 'author', name: 'Moonshot AI' }],
-        date: '2025-01-20',
-        abstractNote: 'Reinforcement learning scaling for long-context models...',
-        tags: [{ tag: 'rl' }],
-        collections: []
-      }
-    }
-  ];
 
   const handler = createCanvasHandler(store, {
     aiPublicConfig: () => ({ configured: true, provider: 'mock.example', model: 'mock-model' }),
     aiEndpointValidator: async endpoint => {
       aiValidatedEndpoints.push(endpoint);
       return `${endpoint.replace(/\/+$/, '')}/chat/completions`;
-    },
-    fetchAltero: async (session, path, options) => {
-      alteroCalls.push({ path, options });
-      if (path.includes('/children')) {
-        const itemKey = path.split('/items/')[1]?.split('/')[0] || 'ITEM';
-        return {
-          ok: true,
-          status: 200,
-          headers: new Headers(),
-          json: async () => [
-            {
-              key: `ATT_${itemKey}`,
-              version: 5,
-              data: {
-                itemType: 'attachment',
-                contentType: 'application/pdf',
-                title: `${itemKey}.pdf`,
-                key: `ATT_${itemKey}`,
-                version: 5
-              }
-            }
-          ]
-        };
-      }
-      return {
-        ok: true,
-        status: 200,
-        headers: new Headers({
-          'Last-Modified-Version': '42',
-          'Total-Results': String(mockAlteroItems.length)
-        }),
-        json: async () => mockAlteroItems
-      };
     },
     aiCompletion: async (request, privateConfig) => {
       aiCalls.push(request);
@@ -353,6 +289,8 @@ try {
   assert.equal(boardResponse.statusCode, 201);
   const apiBoard = boardResponse.payload.data;
 
+  // [M4] Altero group libraries are no longer accessible to any session:
+  // group 8 and formerly-allowed group 7 must both be rejected with 403.
   const forbiddenSource = await call(handler, `/canvas/boards/${apiBoard.id}/nodes`, {
     method: 'POST', cookie,
     body: {
@@ -362,21 +300,32 @@ try {
   });
   assert.equal(forbiddenSource.statusCode, 403);
 
-  const groupNodeResponse = await call(handler, `/canvas/boards/${apiBoard.id}/nodes`, {
+  const forbiddenGroupSevenSource = await call(handler, `/canvas/boards/${apiBoard.id}/nodes`, {
     method: 'POST', cookie,
     body: {
       type: 'annotation', x: 0, y: 0, width: 240, height: 120,
-      title: 'Group source',
       source: { libraryType: 'group', libraryId: '7', annotationKey: 'ANN00003' }
     }
   });
-  assert.equal(groupNodeResponse.statusCode, 201);
+  assert.equal(forbiddenGroupSevenSource.statusCode, 403,
+    'M4 removed group membership from sessions, so even former in-group libraries must be rejected');
 
-  const deletedGroupNodeResponse = await call(handler, `/canvas/nodes/${groupNodeResponse.payload.data.id}`, {
+  // Native-library sources remain allowed for the local session.
+  const nativeLibraryNodeResponse = await call(handler, `/canvas/boards/${apiBoard.id}/nodes`, {
+    method: 'POST', cookie,
+    body: {
+      type: 'annotation', x: 0, y: 0, width: 240, height: 120,
+      title: 'Native source',
+      source: { libraryType: 'native', libraryId: 'local', annotationKey: 'ANN00004' }
+    }
+  });
+  assert.equal(nativeLibraryNodeResponse.statusCode, 201);
+
+  const deletedGroupNodeResponse = await call(handler, `/canvas/nodes/${nativeLibraryNodeResponse.payload.data.id}`, {
     method: 'DELETE', cookie, headers: { 'if-match': 'W/"1"' }
   });
   assert.equal(deletedGroupNodeResponse.statusCode, 204);
-  const restoredGroupNodeResponse = await call(handler, `/canvas/nodes/${groupNodeResponse.payload.data.id}/restore`, {
+  const restoredGroupNodeResponse = await call(handler, `/canvas/nodes/${nativeLibraryNodeResponse.payload.data.id}/restore`, {
     method: 'PATCH', cookie, headers: { 'if-match': 'W/"2"' }
   });
   assert.equal(restoredGroupNodeResponse.statusCode, 200);
@@ -391,7 +340,7 @@ try {
   const edgeResponse = await call(handler, `/canvas/boards/${apiBoard.id}/edges`, {
     method: 'POST', cookie,
     body: {
-      sourceNodeId: groupNodeResponse.payload.data.id,
+      sourceNodeId: nativeLibraryNodeResponse.payload.data.id,
       targetNodeId: manualNodeResponse.payload.data.id,
       relation: 'related'
     }
@@ -402,7 +351,7 @@ try {
   assert.equal(apiSnapshotResponse.statusCode, 200);
   assert.equal(apiSnapshotResponse.payload.data.nodes.length, 2);
   assert.equal(apiSnapshotResponse.payload.data.edges.length, 1);
-  assert.equal(apiSnapshotResponse.payload.data.sources[0].libraryId, '7');
+  assert.equal(apiSnapshotResponse.payload.data.sources[0].libraryId, 'local');
 
   const layoutResponse = await call(handler, `/canvas/boards/${apiBoard.id}/layout`, {
     method: 'PATCH', cookie, headers: { 'if-match': 'W/"1"' },
@@ -435,12 +384,12 @@ try {
   assert.deepEqual(afterConflict.board.viewport, layoutBeforeConflict.board.viewport, 'failed layout must roll back viewport');
   assert.deepEqual(afterConflict.nodes.map(node => node.version).sort(), [2, 4], 'failed layout must roll back every node');
 
-  const groupNodeAfterLayout = afterConflict.nodes.find(node => node.id === groupNodeResponse.payload.data.id);
-  const relinkedSourceResponse = await call(handler, `/canvas/nodes/${groupNodeAfterLayout.id}/source`, {
-    method: 'PATCH', cookie, headers: { 'if-match': `W/"${groupNodeAfterLayout.version}"` },
+  const nativeNodeAfterLayout = afterConflict.nodes.find(node => node.id === nativeLibraryNodeResponse.payload.data.id);
+  const relinkedSourceResponse = await call(handler, `/canvas/nodes/${nativeNodeAfterLayout.id}/source`, {
+    method: 'PATCH', cookie, headers: { 'if-match': `W/"${nativeNodeAfterLayout.version}"` },
     body: {
       source: {
-        libraryType: 'group', libraryId: '7', itemKey: 'ITEM0001',
+        libraryType: 'native', libraryId: 'local', itemKey: 'ITEM0001',
         attachmentKey: 'ATTACH02', annotationKey: 'ANNREST1', annotationVersion: 11,
         pageLabel: '9', position: { pageIndex: 8, rects: [[8, 10, 10, 40, 20]] },
         quoteSnapshot: 'Restored quoted evidence'
@@ -448,23 +397,23 @@ try {
     }
   });
   assert.equal(relinkedSourceResponse.statusCode, 200);
-  assert.equal(relinkedSourceResponse.payload.data.node.version, groupNodeAfterLayout.version + 1);
+  assert.equal(relinkedSourceResponse.payload.data.node.version, nativeNodeAfterLayout.version + 1);
   assert.equal(relinkedSourceResponse.payload.data.source.annotationKey, 'ANNREST1');
   assert.equal(relinkedSourceResponse.payload.data.source.quoteSnapshot, 'Restored quoted evidence');
 
-  const staleRelinkResponse = await call(handler, `/canvas/nodes/${groupNodeAfterLayout.id}/source`, {
-    method: 'PATCH', cookie, headers: { 'if-match': `W/"${groupNodeAfterLayout.version}"` },
+  const staleRelinkResponse = await call(handler, `/canvas/nodes/${nativeNodeAfterLayout.id}/source`, {
+    method: 'PATCH', cookie, headers: { 'if-match': `W/"${nativeNodeAfterLayout.version}"` },
     body: {
       source: {
-        libraryType: 'group', libraryId: '7', attachmentKey: 'ATTACH02',
+        libraryType: 'native', libraryId: 'local', attachmentKey: 'ATTACH02',
         annotationKey: 'ANNDUPE1'
       }
     }
   });
   assert.equal(staleRelinkResponse.statusCode, 412, 'source relinking must reject stale card versions');
 
-  const forbiddenRelinkResponse = await call(handler, `/canvas/nodes/${groupNodeAfterLayout.id}/source`, {
-    method: 'PATCH', cookie, headers: { 'if-match': `W/"${groupNodeAfterLayout.version + 1}"` },
+  const forbiddenRelinkResponse = await call(handler, `/canvas/nodes/${nativeNodeAfterLayout.id}/source`, {
+    method: 'PATCH', cookie, headers: { 'if-match': `W/"${nativeNodeAfterLayout.version + 1}"` },
     body: {
       source: {
         libraryType: 'group', libraryId: '8', attachmentKey: 'ATTACH02',
@@ -472,7 +421,7 @@ try {
       }
     }
   });
-  assert.equal(forbiddenRelinkResponse.statusCode, 403, 'source relinking must enforce library membership');
+  assert.equal(forbiddenRelinkResponse.statusCode, 403, 'source relinking must enforce library access');
 
   const oversizedResponse = await call(handler, '/canvas/workspaces', {
     method: 'POST', cookie, body: { name: 'x'.repeat(600_000) }
@@ -501,7 +450,7 @@ try {
   assert.equal(importedSnapshot.edges.length, 1);
   assert.equal(importedSnapshot.sources.length, 1);
   // Verify that nodes received new IDs
-  assert.ok(!importedSnapshot.nodes.some(n => n.id === groupNodeResponse.payload.data.id));
+  assert.ok(!importedSnapshot.nodes.some(n => n.id === nativeLibraryNodeResponse.payload.data.id));
   assert.ok(!importedSnapshot.nodes.some(n => n.id === manualNodeResponse.payload.data.id));
   // Verify edge connects the newly generated node IDs correctly
   const importedSourceNode = importedSnapshot.nodes.find(n => n.type === 'annotation');
@@ -510,6 +459,7 @@ try {
   assert.equal(importedSnapshot.edges[0].targetNodeId, importedTargetNode.id);
 
   const forbiddenImportBundle = structuredClone(bundle);
+  forbiddenImportBundle.sources[0].libraryType = 'group';
   forbiddenImportBundle.sources[0].libraryId = '8';
   const forbiddenImport = await call(handler, `/canvas/workspaces/${apiWorkspace.id}/boards/import`, {
     method: 'POST', cookie, body: { bundle: forbiddenImportBundle }
@@ -542,7 +492,7 @@ try {
     model: 'mock-model',
     promptVersion: 'test-v1',
     prompt: '',
-    inputNodeIds: [groupNodeResponse.payload.data.id],
+    inputNodeIds: [nativeLibraryNodeResponse.payload.data.id],
     title: 'AI 忠实中译: 导言',
     body: '这是对原文献卡片的逐句忠实中文翻译内容。',
     x: 600,
@@ -943,7 +893,7 @@ try {
     body: {
       task: 'synthesize',
       prompt: '提取共同点',
-      inputNodeIds: [groupNodeResponse.payload.data.id, manualNodeResponse.payload.data.id],
+      inputNodeIds: [nativeLibraryNodeResponse.payload.data.id, manualNodeResponse.payload.data.id],
       modelConfig: { endpoint: 'http://127.0.0.1:1', apiKey: 'must-be-ignored', model: 'untrusted-model' }
     }
   });
@@ -2386,8 +2336,10 @@ try {
   assert.equal(staleUnitRecallRes.statusCode, 400, 'Stale/superseded focalUnitId from inactive analysis must be rejected with 400');
 
   // 7. Same-document pseudo cross-report relation rejection
+  // [M4] Pin the focal unit to the session-accessible user:42 DOC_A; the
+  // group:7 twin is store-seeded only and is no longer reachable over HTTP.
   const docAUnits = store.listTopicKnowledgeUnits(canvasActorKey('https://issuer.example', 'api-subject'), apiTopic.id);
-  const docAUnit1 = docAUnits.find(u => u.itemKey === 'DOC_A');
+  const docAUnit1 = docAUnits.find(u => u.itemKey === 'DOC_A' && u.libraryType === 'user' && String(u.libraryId) === '42');
   const docAUnit2 = docAUnits.filter(u => u.libraryType === docAUnit1.libraryType && String(u.libraryId) === String(docAUnit1.libraryId) && u.itemKey === docAUnit1.itemKey)[1] || docAUnit1;
   if (docAUnit1) {
     const sameDocAIHandler = createCanvasHandler(store, {
@@ -2503,7 +2455,7 @@ try {
   // premature empty stream, unexpected 304, duplicate-loop, children 500/JSON)
   // were retired together with /canvas/inbox/scan and collection sync in M4.
   // The full historical coverage lives on the archive/last-altero-compatible tag;
-  // direct fetchAllUpstreamItems unit tests below keep the exported contract alive.
+  // fetchAllUpstreamItems itself no longer exists, so no direct unit tests remain.
 
   // --- Document Metadata AI Extraction, Query & Manual Override ---
   const extractMetaRes = await call(handler, '/canvas/documents/extract-metadata', {
@@ -2571,17 +2523,24 @@ try {
   assert.equal(versionedExtractRes.statusCode, 200);
   assert.equal(versionedExtractRes.payload.cached, false, 'New attachment version must invalidate metadata cache');
 
-  // Cross-library isolation with same itemKey
-  const groupMetaRes = await call(handler, '/canvas/documents/extract-metadata', {
+  // [M4] Cross-library isolation with same itemKey: group libraries are no
+  // longer reachable over HTTP, so the group metadata is seeded at store level.
+  const groupMetaHttpRes = await call(handler, '/canvas/documents/extract-metadata', {
     method: 'POST', cookie,
     body: {
       libraryType: 'group', libraryId: '7', itemKey: 'META_ITEM_1',
       filename: 'group_report.pdf', rawTitle: '群组报告'
     }
   });
-  assert.equal(groupMetaRes.statusCode, 200);
+  assert.equal(groupMetaHttpRes.statusCode, 403,
+    'M4 removed group membership, so group-library metadata extraction must be rejected');
+  store.saveDocumentMeta(canvasActorKey('https://issuer.example', 'api-subject'), {
+    libraryType: 'group', libraryId: '7', itemKey: 'META_ITEM_1',
+    cleanTitle: '群组报告'
+  });
   const userMeta = store.getDocumentMeta(canvasActorKey('https://issuer.example', 'api-subject'), { libraryType: 'user', libraryId: '42', itemKey: 'META_ITEM_1' });
   const groupMeta = store.getDocumentMeta(canvasActorKey('https://issuer.example', 'api-subject'), { libraryType: 'group', libraryId: '7', itemKey: 'META_ITEM_1' });
+  assert.ok(userMeta && groupMeta);
   assert.notEqual(userMeta.id, groupMeta.id, 'Group and User libraries must have isolated document metadata');
 
   // --- T4 Import & SSRF Protection Tests ---

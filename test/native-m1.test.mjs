@@ -8,8 +8,6 @@ import { CanvasConflictError, CanvasNotFoundError, CanvasStore, canvasActorKey }
 import { createCanvasHandler } from '../server/canvas-api.mjs';
 import { createSession, getSessionIdFromRequest } from '../server/session.mjs';
 import { getAuthMode, isLocalAuthAllowed, handleLocalSetup, handleLocalLogin, handleSession, handleLogout } from '../server/auth.mjs';
-import { handleApiProxy } from '../server/proxy-api.mjs';
-import { handleFilesProxy } from '../server/proxy-files.mjs';
 
 class MockResponse extends EventEmitter {
   constructor() {
@@ -98,40 +96,22 @@ try {
   // 1. Verify default Auth Mode without Altero env is 'local'
   const originalAlteroApi = process.env.ALTERO_API;
   const originalAuthMode = process.env.AUTH_MODE;
-  const originalAllowLocalInAltero = process.env.ALLOW_LOCAL_AUTH_IN_ALTERO;
 
   delete process.env.ALTERO_API;
   delete process.env.AUTH_MODE;
-  delete process.env.ALLOW_LOCAL_AUTH_IN_ALTERO;
   assert.equal(getAuthMode(), 'local', 'Default auth mode must be local when no Altero config is present');
   assert.equal(isLocalAuthAllowed(), true);
 
   const store = new CanvasStore(dbPath);
   const handler = createCanvasHandler(store);
 
-  // [P0 Regression] Test AUTH_MODE=altero blocking local setup and login
+  // [P0 Regression][M4] AUTH_MODE=altero no longer exists as a mode: setting the
+  // flag must be completely inert and local setup/login must keep working.
   process.env.AUTH_MODE = 'altero';
-  assert.equal(getAuthMode(), 'altero');
-  assert.equal(isLocalAuthAllowed(), false);
+  assert.equal(getAuthMode(), 'local', 'M4 pins the auth mode to local even when AUTH_MODE=altero is set');
+  assert.equal(isLocalAuthAllowed(), true, 'local auth must never be disabled after M4');
 
-  const blockedSetupRes = await call((req, res) => handleLocalSetup(req, res, store), '/auth/setup', {
-    method: 'POST',
-    body: { username: 'admin', password: 'SecurePassword123!' }
-  });
-  assert.equal(blockedSetupRes.statusCode, 403, 'Altero mode must reject /auth/setup with 403');
-  assert.equal(blockedSetupRes.payload.error, 'local_auth_disabled');
-
-  const blockedLoginRes = await call((req, res) => handleLocalLogin(req, res, store), '/auth/login', {
-    method: 'POST',
-    body: { username: 'admin', password: 'SecurePassword123!' }
-  });
-  assert.equal(blockedLoginRes.statusCode, 403, 'Altero mode must reject POST /auth/login with 403');
-  assert.equal(blockedLoginRes.payload.error, 'local_auth_disabled');
-
-  // Reset to local mode for M1 testing
-  delete process.env.AUTH_MODE;
-
-  // 2. Authentication & Admin Setup in local mode
+  // 2. Authentication & Admin Setup (exercised under the inert AUTH_MODE=altero flag)
   assert.equal(store.hasUsers(), false, 'Fresh database must have no users');
   const sessionStatusPre = await call((req, res) => handleSession(req, res, store), '/auth/session');
   assert.equal(sessionStatusPre.statusCode, 200);
@@ -169,6 +149,10 @@ try {
   const sessionCookieMatch = /altcanvas_session=([^;]+)/.exec(setCookieHeader);
   assert.ok(sessionCookieMatch);
   const adminCookie = `altcanvas_session=${sessionCookieMatch[1]}`;
+
+  // The whole setup path worked under AUTH_MODE=altero; drop the inert flag.
+  delete process.env.AUTH_MODE;
+  assert.equal(getAuthMode(), 'local', 'Auth mode must remain local once the flag is removed');
 
   // Session check after login
   const sessionStatusPost = await call((req, res) => handleSession(req, res, store), '/auth/session', {
@@ -843,7 +827,7 @@ try {
   assert.equal(scanRes.statusCode, 410, 'inbox scan must be retired with 410');
   assert.equal(scanRes.payload.error.code, 'feature_retired');
 
-  // 13. Proxy isolation in local mode & Zero Altero fetch call guarantee
+  // 13. Zero upstream fetch guarantee across representative native canvas operations
   let upstreamFetchCount = 0;
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (...args) => {
@@ -852,34 +836,37 @@ try {
   };
 
   try {
-    const apiProxyRes = new MockResponse();
-    await handleApiProxy(
-      request({ cookie: newCookie, method: 'GET' }),
-      apiProxyRes,
-      new URL('/api/users/local-admin/items', 'http://127.0.0.1:8088')
-    );
-    assert.equal(apiProxyRes.statusCode, 403, 'handleApiProxy in local auth mode must return 403');
-    assert.equal(apiProxyRes.payload.error, 'external_library_disabled');
+    const docListProbe = await call(mockAiHandler, '/canvas/native/documents', { cookie: newCookie });
+    assert.equal(docListProbe.statusCode, 200);
 
-    const filesProxyRes = new MockResponse();
-    await handleFilesProxy(
-      request({ cookie: newCookie, method: 'GET' }),
-      filesProxyRes,
-      new URL('/files/users/local-admin/items/ATT_KEY', 'http://127.0.0.1:8088')
-    );
-    assert.equal(filesProxyRes.statusCode, 403, 'handleFilesProxy in local auth mode must return 403');
-    assert.match(filesProxyRes.text, /external_library_disabled|未启用/);
+    // [M4] The whole inbox surface is retired and must answer 410 without any
+    // upstream (Altero) request.
+    for (const [retiredPath, retiredMethod] of [
+      ['/canvas/inbox', 'GET'],
+      ['/canvas/inbox/scan', 'POST'],
+      ['/canvas/inbox/entries', 'POST'],
+      ['/canvas/inbox/batch-action', 'POST']
+    ]) {
+      const retiredRes = await call(mockAiHandler, retiredPath, {
+        method: retiredMethod,
+        cookie: newCookie,
+        body: { libraryType: 'native', libraryId: 'local' }
+      });
+      assert.equal(retiredRes.statusCode, 410, `${retiredMethod} ${retiredPath} must be retired with 410`);
+      assert.equal(retiredRes.payload.error.code, 'feature_retired');
+    }
 
-    assert.equal(upstreamFetchCount, 0, 'Local mode proxy attempts must make 0 upstream fetch calls');
+    assert.equal(upstreamFetchCount, 0, 'Native canvas operations must make 0 upstream fetch calls');
   } finally {
     globalThis.fetch = originalFetch;
   }
 
   reopenedStore.close();
 
-  if (originalAlteroApi) process.env.ALTERO_API = originalAlteroApi;
-  if (originalAuthMode) process.env.AUTH_MODE = originalAuthMode;
-  if (originalAllowLocalInAltero) process.env.ALLOW_LOCAL_AUTH_IN_ALTERO = originalAllowLocalInAltero;
+  if (originalAlteroApi === undefined) delete process.env.ALTERO_API;
+  else process.env.ALTERO_API = originalAlteroApi;
+  if (originalAuthMode === undefined) delete process.env.AUTH_MODE;
+  else process.env.AUTH_MODE = originalAuthMode;
 
   console.log('✅ All Native M1 Minimal Loop & Audit Regression Tests Passed Successfully!');
 } finally {

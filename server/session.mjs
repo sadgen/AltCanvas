@@ -2,15 +2,14 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
-// In-memory Session & Transaction Stores with auto-cleanup
+// In-memory session store with auto-cleanup. [M4] The OAuth transaction
+// store was removed together with the Altero flow.
 const sessions = new Map(); // sessionHash -> session object
-const authTransactions = new Map(); // stateHash -> transaction object
 
 const SESSION_COOKIE_NAME = 'altcanvas_session';
 const HOST_SESSION_COOKIE_NAME = '__Host-altcanvas_session';
 const SESSION_IDLE_TIMEOUT_MS = 8 * 60 * 60 * 1000; // 8 hours idle
 const SESSION_ABSOLUTE_TIMEOUT_MS = 30 * 24 * 60 * 60 * 1000; // 30 days max
-const TRANSACTION_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes for OAuth transactions
 const DATA_DIR = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : null;
 const SESSION_FILE = DATA_DIR ? path.join(DATA_DIR, 'sessions.enc.json') : null;
 const SESSION_SECRET = process.env.SESSION_SECRET || '';
@@ -53,8 +52,7 @@ function persistNow() {
   fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
   const temporaryFile = `${SESSION_FILE}.${process.pid}.tmp`;
   const payload = encryptStore({
-    sessions: [...sessions.entries()],
-    authTransactions: [...authTransactions.entries()]
+    sessions: [...sessions.entries()]
   });
   fs.writeFileSync(temporaryFile, payload, { mode: 0o600 });
   fs.renameSync(temporaryFile, SESSION_FILE);
@@ -78,7 +76,6 @@ function loadPersistedStore() {
   try {
     const payload = decryptStore(fs.readFileSync(SESSION_FILE, 'utf8'));
     for (const [key, value] of payload.sessions || []) sessions.set(key, value);
-    for (const [key, value] of payload.authTransactions || []) authTransactions.set(key, value);
   } catch (err) {
     console.error('Encrypted session store could not be loaded:', err.message);
   }
@@ -180,7 +177,7 @@ export function clearSessionCookie(res, req) {
 /**
  * Create a new user session
  */
-export function createSession({ userId, subject, username, displayName, role, authMode, actorKey, accessToken, refreshToken, expiresAt, scopes = [], alteroApi, issuer, groupIds = [] }) {
+export function createSession({ userId, subject, username, displayName, role, authMode = 'local', actorKey, expiresAt, scopes = [], issuer = 'local' }) {
   const sessionId = generateRandomToken(32);
   const sessionHash = hash(sessionId);
   const now = Date.now();
@@ -191,14 +188,10 @@ export function createSession({ userId, subject, username, displayName, role, au
     username: username || String(userId),
     displayName: displayName || username || `User ${userId}`,
     role: role || 'admin',
-    authMode: authMode || 'altero',
+    authMode: 'local',
     actorKey: actorKey || null,
-    accessToken,
-    refreshToken,
     tokenExpiresAt: expiresAt || now + 3600 * 1000,
     scopes: Array.isArray(scopes) ? scopes : (typeof scopes === 'string' ? scopes.split(' ') : []),
-    groupIds: Array.isArray(groupIds) ? groupIds.map(String) : [],
-    alteroApi: (alteroApi || process.env.ALTERO_API || 'http://localhost:8000').replace(/\/$/, ''),
     issuer: issuer || null,
     createdAt: now,
     lastSeenAt: now,
@@ -256,40 +249,6 @@ export function destroySession(sessionId) {
   return deleted;
 }
 
-/**
- * Store an in-flight OAuth transaction
- */
-export function storeAuthTransaction({ state, nonce, codeVerifier, returnTo = '/', alteroApi, issuer, bindingHash }) {
-  const stateHash = hash(state);
-  const now = Date.now();
-
-  authTransactions.set(stateHash, {
-    nonce,
-    codeVerifier,
-    returnTo,
-    alteroApi,
-    issuer,
-    bindingHash,
-    expiresAt: now + TRANSACTION_TIMEOUT_MS
-  });
-  schedulePersist();
-}
-
-/**
- * Retrieve and consume an in-flight OAuth transaction
- */
-export function consumeAuthTransaction(state) {
-  if (!state) return null;
-  const stateHash = hash(state);
-  const tx = authTransactions.get(stateHash);
-  if (!tx) return null;
-
-  authTransactions.delete(stateHash);
-  schedulePersist();
-  if (Date.now() > tx.expiresAt) return null;
-  return tx;
-}
-
 // Periodic cleanup of expired sessions and transactions every 5 minutes
 setInterval(() => {
   const now = Date.now();
@@ -297,12 +256,6 @@ setInterval(() => {
   for (const [key, session] of sessions.entries()) {
     if (now > session.idleExpiresAt || now > session.absoluteExpiresAt) {
       sessions.delete(key);
-      changed = true;
-    }
-  }
-  for (const [key, tx] of authTransactions.entries()) {
-    if (now > tx.expiresAt) {
-      authTransactions.delete(key);
       changed = true;
     }
   }
