@@ -1,6 +1,7 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { hashFileInsideRoot, resolveRootRealPath, ensureVerifiedDirectory } from './native-fs.mjs';
+import { hashFileInsideRoot, resolveRootRealPath, ensureVerifiedDirectory, safeProbeInsideRoot, safeUnlinkInsideRoot } from './native-fs.mjs';
 import { nowIso } from './canvas-store.mjs';
 
 // M4 incremental library scanner. A scan is a full directory inventory whose
@@ -200,8 +201,13 @@ function reconcileMoveLike(store, op) {
     store.failFileOperation(op.id, 'library_root_missing');
     return 'failed';
   }
-  const sourceOnDisk = op.sourcePath ? fs.existsSync(path.join(root.absolute_path, op.sourcePath)) : false;
-  const targetOnDisk = op.targetPath ? fs.existsSync(path.join(root.absolute_path, op.targetPath)) : false;
+  // Disk facts come from the recovery-safe probe: a symlinked ancestor makes
+  // the fact "not present" (never followed), so no root-outside content can
+  // influence or receive a reconciliation mutation.
+  const sourceProbe = op.sourcePath ? safeProbeInsideRoot(root.absolute_path, op.sourcePath) : { present: false, reason: 'absent' };
+  const targetProbe = op.targetPath ? safeProbeInsideRoot(root.absolute_path, op.targetPath) : { present: false, reason: 'absent' };
+  const sourceOnDisk = sourceProbe.present;
+  const targetOnDisk = targetProbe.present;
 
   if (targetOnDisk && !sourceOnDisk) {
     if (row.relative_path === op.targetPath) {
@@ -243,8 +249,10 @@ function reconcileTrash(store, op) {
     store.failFileOperation(op.id, 'library_root_missing');
     return 'failed';
   }
-  const trashOnDisk = op.targetPath ? fs.existsSync(path.join(root.absolute_path, op.targetPath)) : false;
-  const sourceOnDisk = op.sourcePath ? fs.existsSync(path.join(root.absolute_path, op.sourcePath)) : false;
+  const trashProbe = op.targetPath ? safeProbeInsideRoot(root.absolute_path, op.targetPath) : { present: false, reason: 'absent' };
+  const sourceProbe = op.sourcePath ? safeProbeInsideRoot(root.absolute_path, op.sourcePath) : { present: false, reason: 'absent' };
+  const trashOnDisk = trashProbe.present;
+  const sourceOnDisk = sourceProbe.present;
 
   if (trashOnDisk && !sourceOnDisk) {
     if (row.status !== 'trashed') {
@@ -282,8 +290,10 @@ function reconcileRestore(store, op) {
     store.failFileOperation(op.id, 'library_root_missing');
     return 'failed';
   }
-  const trashOnDisk = op.sourcePath ? fs.existsSync(path.join(root.absolute_path, op.sourcePath)) : false;
-  const targetOnDisk = op.targetPath ? fs.existsSync(path.join(root.absolute_path, op.targetPath)) : false;
+  const trashProbe = op.sourcePath ? safeProbeInsideRoot(root.absolute_path, op.sourcePath) : { present: false, reason: 'absent' };
+  const targetProbe = op.targetPath ? safeProbeInsideRoot(root.absolute_path, op.targetPath) : { present: false, reason: 'absent' };
+  const trashOnDisk = trashProbe.present;
+  const targetOnDisk = targetProbe.present;
 
   if (targetOnDisk && !trashOnDisk) {
     store.db.prepare(`
@@ -312,13 +322,25 @@ function reconcileImport(store, op) {
     return 'failed';
   }
   const relativePath = targetDir ? `${targetDir}/${filename}` : filename;
-  const targetOnDisk = fs.existsSync(path.join(root.absolute_path, relativePath));
+  const probe = safeProbeInsideRoot(root.absolute_path, relativePath);
+  if (probe.reason === 'symlink' || probe.reason === 'escape' || probe.reason === 'invalid_path') {
+    // The recorded target now resolves through a symlink or outside the root:
+    // refuse to touch anything and leave the operation failed for inspection.
+    store.failFileOperation(op.id, 'unsafe_path');
+    return 'failed';
+  }
   const dbRow = store.getSourceFileByPath(root.owner_key, root.id, relativePath);
 
-  if (targetOnDisk && !dbRow) {
-    // FS placed the file, the DB write never happened: compensate by
-    // removing the placed file so no unmanaged content leaks outside the DB.
-    try { fs.unlinkSync(path.join(root.absolute_path, relativePath)); } catch {}
+  if (probe.present && !dbRow) {
+    // FS placed the file, the DB write never happened: compensate by removing
+    // the placed file so no unmanaged content leaks. A failed removal is a
+    // failed operation — never a rolled-back one.
+    try {
+      safeUnlinkInsideRoot(root.absolute_path, relativePath);
+    } catch (unlinkErr) {
+      store.failFileOperation(op.id, 'compensation_failed');
+      return 'failed';
+    }
     store.markFileOperationRolledBack(op.id);
     return 'rolledBack';
   }
@@ -338,9 +360,19 @@ function reconcilePermanentDelete(store, op) {
   }
   const root = store.db.prepare('SELECT * FROM library_roots WHERE id = ? AND deleted_at IS NULL').get(row.root_id);
   if (root) {
-    const trashAbs = path.join(root.absolute_path, '.altcanvas-trash', `${row.id}.pdf`);
-    if (fs.existsSync(trashAbs)) {
-      try { fs.unlinkSync(trashAbs); } catch {}
+    const trashRel = `.altcanvas-trash/${row.id}.pdf`;
+    const probe = safeProbeInsideRoot(root.absolute_path, trashRel);
+    if (probe.reason === 'symlink' || probe.reason === 'escape' || probe.reason === 'invalid_path') {
+      store.failFileOperation(op.id, 'unsafe_path');
+      return 'failed';
+    }
+    if (probe.present) {
+      try {
+        safeUnlinkInsideRoot(root.absolute_path, trashRel);
+      } catch (unlinkErr) {
+        store.failFileOperation(op.id, 'compensation_failed');
+        return 'failed';
+      }
     }
   }
   if (row.status === 'trashed') {
@@ -360,7 +392,7 @@ function reconcileMkdir(store, op) {
     store.failFileOperation(op.id, 'root_or_payload_missing');
     return 'failed';
   }
-  ensureVerifiedDirectory(root.absolute_path, relativeDir, { create: true });
+  ensureVerifiedDirectory(resolveRootRealPath(root.absolute_path), relativeDir, { create: true });
   store.completeFileOperation(op.id);
   return 'completed';
 }
@@ -368,7 +400,8 @@ function reconcileMkdir(store, op) {
 export async function scanLibraryRoot(store, actorKey, rootId, {
   hashFn = hashFileInsideRoot,
   batchDelayMs = 0,
-  scanSignal = null
+  scanSignal = null,
+  entryIteratorFn = iteratePdfEntries
 } = {}) {
   const root = store.requireLibraryRoot(actorKey, rootId);
 
@@ -388,7 +421,7 @@ export async function scanLibraryRoot(store, actorKey, rootId, {
   store.setLibraryRootScanState(actorKey, rootId, { status: 'running' });
 
   try {
-    const report = await performScan(store, actorKey, root, hashFn, batchDelayMs, scanSignal);
+    const report = await performScan(store, actorKey, root, { hashFn, batchDelayMs, scanSignal, entryIteratorFn });
     store.completeFileOperation(operation.id);
     store.setLibraryRootScanState(actorKey, rootId, { status: 'ok', at: new Date().toISOString() });
     return { operationId: operation.id, state: 'completed', alreadyRunning: false, report };
@@ -399,12 +432,22 @@ export async function scanLibraryRoot(store, actorKey, rootId, {
   }
 }
 
-async function performScan(store, actorKey, root, hashFn, batchDelayMs, scanSignal) {
+// Bounded-memory incremental scan. Disk facts discovered per batch go
+// straight into the per-scan staging table; reconciliation (missing/move/
+// duplicate/enroll) runs as keyset-paginated SQL joins, so no phase ever
+// holds the full directory or the full source_files inventory in memory.
+async function performScan(store, actorKey, root, { hashFn, batchDelayMs, scanSignal, entryIteratorFn }) {
   const startedAt = new Date().toISOString();
   const rootId = root.id;
 
   // Availability gate before any DB mutation: an offline root must not touch rows.
   resolveRootRealPath(root.absolutePath);
+
+  const scanId = crypto.randomUUID();
+  store.prepareScanStaging();
+  // Drop rows left by a crashed scan of the same root (TEMP table survives
+  // with the connection even though the scan did not).
+  store.purgeScanStagingForRoot(actorKey, rootId);
 
   const report = {
     scannedFiles: 0,
@@ -419,134 +462,151 @@ async function performScan(store, actorKey, root, hashFn, batchDelayMs, scanSign
     unreadable: 0
   };
 
-  const inventoryRows = store.listRootSourceFilesForScan(actorKey, rootId);
-  const inventory = new Map(inventoryRows.map(row => [row.relativePath, row]));
+  try {
+    await scanPhaseA(store, actorKey, root, scanId, report, { hashFn, batchDelayMs, scanSignal, entryIteratorFn, startedAt });
+    await scanPhaseB(store, actorKey, root, scanId, report, { batchDelayMs, scanSignal, startedAt });
+    await scanPhaseC(store, actorKey, root, scanId, report, { batchDelayMs, scanSignal, startedAt });
 
-  // diskState: authoritative post-walk content map (path -> facts).
-  const diskState = new Map();
-  const unreadablePaths = new Set();
-  const toTouch = [];
+    const counts = store.countScanStaging(scanId);
+    report.scannedFiles = counts.total;
+    report.hashedFiles = counts.hashed;
+    report.unchangedFiles = counts.cacheHit;
+    report.unreadable = counts.unreadable;
+    return report;
+  } finally {
+    store.deleteScanStaging(scanId);
+  }
+}
 
-  // --- Phase A: classify and hash in lazy bounded batches; the directory
-  // listing itself is never aggregated (generator + batchesOf).
-  const entryBatches = batchesOf(iteratePdfEntries(root.absolutePath), SCAN_BATCH_SIZE);
-  for (const batch of entryBatches) {
+// Phase A: classify and hash in lazy bounded batches. Every batch's disk facts
+// are inserted into staging inside one transaction together with the row
+// updates they imply (content-change cascade, stat refresh, recovery).
+async function scanPhaseA(store, actorKey, root, scanId, report, { hashFn, batchDelayMs, scanSignal, entryIteratorFn, startedAt }) {
+  const rootId = root.id;
+  for (const batch of batchesOf(entryIteratorFn(root.absolutePath), SCAN_BATCH_SIZE)) {
     if (scanSignal?.aborted) throw new LibraryScanError('scan aborted', 'scan_aborted');
-    report.scannedFiles += batch.length;
-    const hashedInBatch = [];
+
+    const stagedRows = [];
     for (const entry of batch) {
-      const row = inventory.get(entry.relativePath);
+      const row = store.getSourceFileByPath(actorKey, rootId, entry.relativePath);
       if (row && row.sha256 && row.sizeBytes === entry.sizeBytes && row.modifiedAt === entry.mtimeMs) {
-        // Unchanged by size+mtime: no rehash, bulk last_seen refresh only.
-        diskState.set(entry.relativePath, {
+        // Unchanged by size+mtime: no rehash, cache-hit fact only.
+        stagedRows.push({
+          relativePath: entry.relativePath,
+          filename: entry.filename,
           sha256: row.sha256,
           sizeBytes: entry.sizeBytes,
-          mtimeMs: entry.mtimeMs
+          modifiedAt: entry.mtimeMs,
+          status: 'cache_hit'
         });
-        toTouch.push(row.id);
-        report.unchangedFiles += 1;
         continue;
       }
-      report.hashedFiles += 1;
       try {
         const hashed = await hashFn(root.absolutePath, entry.relativePath);
-        diskState.set(entry.relativePath, {
+        stagedRows.push({
+          relativePath: entry.relativePath,
+          filename: entry.filename,
           sha256: hashed.sha256,
           sizeBytes: hashed.sizeBytes,
-          mtimeMs: Math.round(hashed.mtimeMs)
+          modifiedAt: Math.round(hashed.mtimeMs),
+          status: 'hashed'
         });
-        hashedInBatch.push(entry.relativePath);
       } catch (err) {
         if (err?.code === 'file_not_found' || err?.code === 'ENOENT') continue; // vanished; phase B marks missing
-        report.unreadable += 1;
-        unreadablePaths.add(entry.relativePath); // physically present; phase B must not call it missing
-        markUnreadable(store, actorKey, rootId, inventory.get(entry.relativePath), entry, startedAt);
-        continue;
+        stagedRows.push({
+          relativePath: entry.relativePath,
+          filename: entry.filename,
+          sha256: null,
+          sizeBytes: entry.sizeBytes,
+          modifiedAt: entry.mtimeMs,
+          status: 'unreadable'
+        });
       }
     }
+
+    const toTouch = [];
     store.transaction(() => {
-      for (const relativePath of hashedInBatch) {
-        const row = inventory.get(relativePath);
-        const facts = diskState.get(relativePath);
-        if (!row) continue;
-        if (row.sha256 !== facts.sha256) {
-          // Content actually changed on disk. applySourceContentChange bumps
-          // the attachment version, refreshes attachment info, marks bound
-          // topic analyses stale, and demotes the row to duplicate when the
-          // new hash already belongs to another enrolled document (never a
-          // second library identity).
+      store.insertScanStagingRows(scanId, actorKey, rootId, stagedRows);
+      for (const st of stagedRows) {
+        const row = store.getSourceFileByPath(actorKey, rootId, st.relativePath);
+        if (st.status === 'unreadable') {
+          markUnreadable(store, actorKey, rootId, row, {
+            relativePath: st.relativePath, filename: st.filename, sizeBytes: st.sizeBytes, mtimeMs: st.modifiedAt
+          }, startedAt);
+          continue;
+        }
+        if (!row) continue; // genuinely new path: enrollment decisions live in phase C
+        if (row.sha256 && row.sha256 !== st.sha256) {
+          // Content actually changed on disk: version cascade + stale analyses
+          // + duplicate demotion when the new hash is already enrolled.
           store.applySourceContentChange(actorKey, row.id, {
-            sha256: facts.sha256,
-            sizeBytes: facts.sizeBytes,
-            modifiedAt: facts.mtimeMs,
-            lastSeenAt: startedAt
+            sha256: st.sha256, sizeBytes: st.sizeBytes, modifiedAt: st.modifiedAt, lastSeenAt: startedAt
           });
           report.changed += 1;
-        } else if (row.sizeBytes !== facts.sizeBytes || row.modifiedAt !== facts.mtimeMs) {
-          // Same content, drifted stat facts: refresh quietly. Content was just
-          // re-read successfully, so missing/unreadable rows recover here;
-          // duplicate stays duplicate (library identity, not readability).
+          continue;
+        }
+        if (row.sizeBytes !== st.sizeBytes || row.modifiedAt !== st.modifiedAt) {
+          // Same content, drifted stat facts: refresh quietly; readable content
+          // recovers missing/unreadable rows.
           const nextStatus = row.status === 'missing' || row.status === 'unreadable' ? 'active' : row.status;
           store.updateSourceFile(actorKey, row.id, {
-            sizeBytes: facts.sizeBytes,
-            modifiedAt: facts.mtimeMs,
+            sizeBytes: st.sizeBytes,
+            modifiedAt: st.modifiedAt,
             lastSeenAt: startedAt,
             status: nextStatus,
             missingAt: nextStatus === 'active' ? null : undefined
           });
           if (nextStatus === 'active' && row.status !== 'active') report.restored += 1;
-        } else if (row.status === 'missing' || row.status === 'unreadable') {
-          // Identical stat facts but readable again (content hash matches): recover.
+          continue;
+        }
+        if (row.status === 'missing' || row.status === 'unreadable') {
           store.updateSourceFile(actorKey, row.id, { status: 'active', missingAt: null, lastSeenAt: startedAt });
+          report.restored += 1;
         } else {
           toTouch.push(row.id);
         }
       }
-      // Genuinely new paths are not inserted here: enrollment decisions
-      // (unique content vs duplicate) require move-detection to finish, and
-      // inserting early could collide with a row that is about to move onto
-      // this path. Phase C owns new-row creation.
     });
-    if (toTouch.length) {
-      store.touchSourceFiles(actorKey, rootId, toTouch, startedAt);
-      toTouch.length = 0;
-    }
+    if (toTouch.length) store.touchSourceFiles(actorKey, rootId, toTouch, startedAt);
     if (batchDelayMs) await sleep(batchDelayMs);
   }
-  if (toTouch.length) store.touchSourceFiles(actorKey, rootId, toTouch, startedAt);
+}
 
-  // --- Phase B: reconcile only after a complete, error-free walk.
-  const refreshedRows = store.listRootSourceFilesForScan(actorKey, rootId);
-  const shaToDiskPaths = new Map();
-  for (const [p, facts] of diskState) {
-    if (!shaToDiskPaths.has(facts.sha256)) shaToDiskPaths.set(facts.sha256, []);
-    shaToDiskPaths.get(facts.sha256).push(p);
-  }
-
-  const claimedPaths = new Set(refreshedRows.map(row => row.relativePath));
-  for (let i = 0; i < refreshedRows.length; i += SCAN_BATCH_SIZE) {
+// Phase B: reconcile existing rows against staged facts, in keyset pages.
+// Only runs its state machine — move detection re-checks path claims in SQL
+// at update time, so sequential moves inside a page never double-claim.
+async function scanPhaseB(store, actorKey, root, scanId, report, { batchDelayMs, scanSignal, startedAt }) {
+  const rootId = root.id;
+  let afterPath = '';
+  while (true) {
     if (scanSignal?.aborted) throw new LibraryScanError('scan aborted', 'scan_aborted');
-    const batch = refreshedRows.slice(i, i + SCAN_BATCH_SIZE);
+    const rows = store.listSourceFilesForScanPage(actorKey, rootId, { afterPath, limit: SCAN_BATCH_SIZE });
+    if (!rows.length) break;
+    const touched = [];
     store.transaction(() => {
-      for (const row of batch) {
-        if (diskState.has(row.relativePath) || unreadablePaths.has(row.relativePath)) {
-          claimedPaths.add(row.relativePath);
+      for (const row of rows) {
+        const staged = store.getScanStagingByPath(scanId, row.relativePath);
+        if (staged) {
           if (row.status === 'missing') {
             store.updateSourceFile(actorKey, row.id, { status: 'active', missingAt: null, lastSeenAt: startedAt });
             report.restored += 1;
+          } else if (row.status === 'unreadable' && staged.sha256 && staged.sha256 === row.sha256) {
+            store.updateSourceFile(actorKey, row.id, { status: 'active', missingAt: null, lastSeenAt: startedAt });
+            report.restored += 1;
           }
+          touched.push(row.id);
           continue;
         }
-        // Path disappeared: same content elsewhere means move/external rename.
-        const candidates = (shaToDiskPaths.get(row.sha256) || []).filter(p => !claimedPaths.has(p));
-        if (row.sha256 && candidates.length > 0) {
-          const newPath = candidates[0];
-          claimedPaths.add(newPath);
+        // Path absent from disk: same content staged elsewhere means a move.
+        const candidate = row.sha256
+          ? store.findMoveCandidateStaging(scanId, actorKey, rootId, row.sha256)
+          : null;
+        if (candidate) {
           store.updateSourceFile(actorKey, row.id, {
-            relativePath: newPath,
-            filename: basename(newPath),
-            sizeBytes: diskState.get(newPath).sizeBytes,
-            modifiedAt: diskState.get(newPath).mtimeMs,
+            relativePath: candidate.relative_path,
+            filename: candidate.filename,
+            sizeBytes: candidate.size_bytes,
+            modifiedAt: candidate.modified_at,
             status: 'active',
             missingAt: null,
             lastSeenAt: startedAt
@@ -560,49 +620,53 @@ async function performScan(store, actorKey, root, hashFn, batchDelayMs, scanSign
         }
       }
     });
+    if (touched.length) store.touchSourceFiles(actorKey, rootId, touched, startedAt);
+    afterPath = rows[rows.length - 1].relativePath;
+    if (rows.length < SCAN_BATCH_SIZE) break;
     if (batchDelayMs) await sleep(batchDelayMs);
   }
+}
 
-  // --- Phase C: enroll genuinely new content; duplicates get rows without documents.
-  const unclaimed = [...diskState.keys()].filter(p => !claimedPaths.has(p));
-  for (let i = 0; i < unclaimed.length; i += SCAN_BATCH_SIZE) {
+// Phase C: enroll staged content no live row claims — unique content becomes a
+// document + source_file attachment; content already enrolled elsewhere stays a
+// duplicate row without a second library identity. Keyset pagination again.
+async function scanPhaseC(store, actorKey, root, scanId, report, { batchDelayMs, scanSignal, startedAt }) {
+  const rootId = root.id;
+  let afterPath = '';
+  while (true) {
     if (scanSignal?.aborted) throw new LibraryScanError('scan aborted', 'scan_aborted');
-    const batch = unclaimed.slice(i, i + SCAN_BATCH_SIZE);
+    const staged = store.listUnclaimedScanStaging(scanId, actorKey, rootId, { afterPath, limit: SCAN_BATCH_SIZE });
+    if (!staged.length) break;
     store.transaction(() => {
-      for (const relativePath of batch) {
-        const facts = diskState.get(relativePath);
-        const canonical = store.listSourceFilesBySha(actorKey, facts.sha256)
-          .find(row => row.status === 'active' && row.documentId && row.rootId !== rootId)
-          || store.listSourceFilesBySha(actorKey, facts.sha256)
-            .find(row => row.status === 'active' && row.documentId);
+      for (const st of staged) {
+        const canonical = store.findEnrolledSourceFileBySha(actorKey, st.sha256);
         if (canonical) {
           store.createSourceFile(actorKey, rootId, {
-            relativePath,
-            filename: basename(relativePath),
-            sha256: facts.sha256,
-            sizeBytes: facts.sizeBytes,
-            modifiedAt: facts.mtimeMs,
+            relativePath: st.relative_path,
+            filename: st.filename,
+            sha256: st.sha256,
+            sizeBytes: st.size_bytes,
+            modifiedAt: st.modified_at,
             lastSeenAt: startedAt,
             status: 'duplicate'
           });
           report.duplicates += 1;
           continue;
         }
-        const entry = {
-          relativePath,
-          filename: basename(relativePath),
-          sha256: facts.sha256,
-          sizeBytes: facts.sizeBytes,
-          mtimeMs: facts.mtimeMs
-        };
-        enrollScannedFile(store, actorKey, rootId, entry);
+        enrollScannedFile(store, actorKey, rootId, {
+          relativePath: st.relative_path,
+          filename: st.filename,
+          sha256: st.sha256,
+          sizeBytes: st.size_bytes,
+          mtimeMs: st.modified_at
+        });
         report.newDocuments += 1;
       }
     });
+    afterPath = staged[staged.length - 1].relative_path;
+    if (staged.length < SCAN_BATCH_SIZE) break;
     if (batchDelayMs) await sleep(batchDelayMs);
   }
-
-  return report;
 }
 
 function markUnreadable(store, actorKey, rootId, existingRow, entry, timestamp) {

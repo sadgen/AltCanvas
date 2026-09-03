@@ -1,26 +1,27 @@
 {
   "name": "altcanvas",
   "version": "0.1.0",
-  "description": "Self-hosted AI Research Workspace based on Altero and Zotero-compatible data",
+  "description": "Self-hosted AI research workspace with native library, file, and canvas management",
   "type": "module",
   "main": "scripts/dev-server.mjs",
   "scripts": {
     "start": "node scripts/dev-server.mjs",
     "dev": "node scripts/run-logged.mjs node scripts/dev-server.mjs",
     "debug:run": "node scripts/run-logged.mjs",
-    "test": "node test/bff.test.mjs && node test/bff-flow.test.mjs && node test/ai-provider.test.mjs && node test/canvas.test.mjs && node test/canvas-ui.test.mjs && node test/dev-logger.test.mjs && node test/native-m1.test.mjs && node test/translation-server.test.mjs && node test/native-m4.test.mjs",
+    "test": "node test/bff.test.mjs && node test/bff-flow.test.mjs && node test/ai-provider.test.mjs && node test/canvas.test.mjs && node test/canvas-ui.test.mjs && node test/dev-logger.test.mjs && node test/native-m1.test.mjs && node test/translation-server.test.mjs && node test/native-m4.test.mjs && node test/deploy-config.test.mjs",
     "build:reader": "node scripts/run-logged.mjs npm --prefix vendor/reader ci && node scripts/run-logged.mjs env NODE_OPTIONS=--openssl-legacy-provider npm --prefix vendor/reader run build",
     "build:web-library": "node scripts/run-logged.mjs npm --prefix vendor/web-library ci && node scripts/run-logged.mjs npm --prefix vendor/web-library run build",
     "build:vendor": "npm run build:reader && npm run build:web-library",
     "build:css": "node scripts/run-logged.mjs npx tailwindcss -i styles/input.css -o styles/altcanvas.css --minify"
   },
   "keywords": [
-    "zotero",
-    "altero",
+    "pdf",
     "research",
+    "library",
     "canvas",
     "ai-workspace",
-    "pdf-reader"
+    "pdf-reader",
+    "self-hosted"
   ],
   "author": "sadgen",
   "license": "AGPL-3.0-or-later"

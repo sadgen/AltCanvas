@@ -16,8 +16,9 @@ COPY index.html test-reader.html ./
 COPY vendor/reader/build/web/ ./vendor/reader/build/web/
 COPY vendor/web-library/build/ ./vendor/web-library/build/
 
-# Create data directory for encrypted sessions and the independent Canvas database
-RUN mkdir -p /app/data && chown -R node:node /app
+# Create data directory for encrypted sessions and the independent Canvas
+# database, plus the default mount point for the native research library.
+RUN mkdir -p /app/data /app/library && chown -R node:node /app
 
 VOLUME ["/app/data"]
 EXPOSE 8088
@@ -25,8 +26,7 @@ EXPOSE 8088
 ENV NODE_ENV=production \
     PORT=8088 \
     HOST=0.0.0.0 \
-    DATA_DIR=/app/data \
-    ALTERO_API=http://altero:8000
+    DATA_DIR=/app/data
 
 USER node
 

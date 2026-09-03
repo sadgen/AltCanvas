@@ -275,45 +275,151 @@ export function assertWrittenInsideRoot(rootReal, absolutePath) {
 
 // Lists a single directory level for the paginated tree view. Symlinks are
 // reported with isSymlink: true and never followed.
-export function listDirectoryLevel(rootPath, relativeDir = '') {
+// Hard bound on the number of directory entries a single listing will read:
+// keeps pagination memory O(MAX_DIRECTORY_LIST) even for pathological
+// directories, reporting `truncated` instead of scanning further.
+export const MAX_DIRECTORY_LIST = 20000;
+
+// Paginated directory listing used by the tree endpoint. The requested
+// directory is verified per component (any symlinked ancestor is rejected
+// before a single readdir happens) and the listing streams through opendir
+// with a bounded name buffer; stat calls are deferred to the requested page
+// only, so neither memory nor latency scales with the whole directory.
+export function listDirectoryPage(rootPath, relativeDir = '', { cursor = 0, limit = Infinity } = {}) {
   const rootReal = resolveRootRealPath(rootPath);
   const normalized = relativeDir ? normalizeRelativePath(relativeDir, { allowHidden: false }) : '';
-  const dirAbs = normalized ? resolveInsideRoot(rootReal, normalized) : rootReal;
-  let entries;
+  const verified = ensureVerifiedDirectory(rootReal, normalized, { create: false });
+  const dirAbs = verified.dirPath;
+
+  const names = [];
+  let truncated = false;
+  let dir;
   try {
-    entries = fs.readdirSync(dirAbs, { withFileTypes: true });
+    dir = fs.opendirSync(dirAbs);
   } catch (err) {
     if (err.code === 'EACCES') throw new NativePathError('directory is not readable', 'directory_unreadable');
     if (err.code === 'ENOENT') throw new NativePathError('directory not found', 'directory_not_found');
     throw err;
   }
-  const result = [];
-  for (const entry of entries) {
-    const childRelative = normalized ? `${normalized}/${entry.name}` : entry.name;
-    if (entry.name.startsWith('.')) continue; // hidden entries (trash area, temp files) are not listed
-    if (entry.isSymbolicLink()) {
-      result.push({ name: entry.name, relativePath: childRelative, type: 'symlink' });
-      continue;
-    }
-    if (entry.isDirectory()) {
-      result.push({ name: entry.name, relativePath: childRelative, type: 'directory' });
-    } else if (entry.isFile()) {
-      let stat = null;
-      try { stat = fs.statSync(path.join(dirAbs, entry.name)); } catch {}
-      result.push({
-        name: entry.name,
-        relativePath: childRelative,
-        type: entry.name.toLowerCase().endsWith('.pdf') ? 'pdf' : 'file',
-        sizeBytes: stat?.size ?? null,
-        modifiedAt: stat ? Math.round(stat.mtimeMs) : null
+  try {
+    let dirent;
+    while ((dirent = dir.readSync()) !== null) {
+      if (dirent.name.startsWith('.')) continue; // hidden entries (trash area, temp files) are not listed
+      names.push({
+        name: dirent.name,
+        isDir: dirent.isDirectory(),
+        isSymlink: dirent.isSymbolicLink()
       });
+      if (names.length >= MAX_DIRECTORY_LIST) {
+        truncated = true;
+        break;
+      }
     }
+  } catch (err) {
+    if (err.code === 'EACCES') throw new NativePathError('directory is not readable', 'directory_unreadable');
+    throw err;
+  } finally {
+    try { dir.closeSync(); } catch {}
   }
-  result.sort((a, b) => {
-    const typeOrder = a.type === 'directory' ? 0 : 1;
-    const typeOrderB = b.type === 'directory' ? 0 : 1;
-    if (typeOrder !== typeOrderB) return typeOrder - typeOrderB;
+
+  names.sort((a, b) => {
+    if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
     return a.name.localeCompare(b.name, 'zh-Hans-CN');
   });
-  return result;
+
+  const total = names.length;
+  const safeCursor = Math.max(0, Number.isFinite(cursor) ? cursor : 0);
+  const pageNames = names.slice(safeCursor, safeCursor + limit);
+  const entries = pageNames.map(e => {
+    const childRelative = normalized ? `${normalized}/${e.name}` : e.name;
+    if (e.isSymlink) return { name: e.name, relativePath: childRelative, type: 'symlink' };
+    if (e.isDir) return { name: e.name, relativePath: childRelative, type: 'directory' };
+    let stat = null;
+    try { stat = fs.statSync(path.join(dirAbs, e.name)); } catch {}
+    return {
+      name: e.name,
+      relativePath: childRelative,
+      type: e.name.toLowerCase().endsWith('.pdf') ? 'pdf' : 'file',
+      sizeBytes: stat?.size ?? null,
+      modifiedAt: stat ? Math.round(stat.mtimeMs) : null
+    };
+  });
+  const nextCursor = safeCursor + entries.length < total ? safeCursor + entries.length : null;
+  return { entries, total, cursor: safeCursor, truncated, nextCursor };
+}
+
+// Full-level listing kept for existing callers; bounded by MAX_DIRECTORY_LIST.
+export function listDirectoryLevel(rootPath, relativeDir = '') {
+  return listDirectoryPage(rootPath, relativeDir).entries;
+}
+
+// Recovery-safe existence probe: walks every component with lstat from the
+// root realpath. Never follows a symlink at ANY level (returns
+// reason 'symlink' instead), distinguishes "absent" from "unsafe", and only
+// reports present=true when the final component is a real, non-symlink entry
+// whose realpath stays inside the root. The controlled trash area is the one
+// permitted hidden location.
+export function safeProbeInsideRoot(rootPath, relativePath) {
+  let rootReal;
+  try {
+    rootReal = resolveRootRealPath(rootPath);
+  } catch (err) {
+    return { present: false, reason: 'root_unavailable' };
+  }
+  if (typeof relativePath !== 'string' || relativePath.length === 0
+    || relativePath.includes('\0') || relativePath.includes('\\')
+    || relativePath.startsWith('/') || relativePath.endsWith('/')) {
+    return { present: false, reason: 'invalid_path' };
+  }
+  const segments = relativePath.split('/');
+  let current = rootReal;
+  for (let i = 0; i < segments.length; i++) {
+    const segment = segments[i];
+    if (segment.length === 0 || segment === '.' || segment === '..') {
+      return { present: false, reason: 'invalid_path' };
+    }
+    if (segment.startsWith('.') && !(i === 0 && segment === TRASH_DIR_NAME)) {
+      return { present: false, reason: 'invalid_path' };
+    }
+    const candidate = current + path.sep + segment;
+    let stat;
+    try {
+      stat = fs.lstatSync(candidate);
+    } catch (err) {
+      if (err.code === 'ENOENT') return { present: false, reason: 'absent' };
+      return { present: false, reason: 'invalid_path' };
+    }
+    if (stat.isSymbolicLink()) return { present: false, reason: 'symlink' };
+    const isLast = i === segments.length - 1;
+    if (!isLast && !stat.isDirectory()) return { present: false, reason: 'invalid_path' };
+    current = candidate;
+  }
+  const real = fs.realpathSync(current);
+  if (real !== rootReal && !real.startsWith(rootReal + path.sep)) {
+    return { present: false, reason: 'escape' };
+  }
+  return { present: true, absPath: current, realpath: real };
+}
+
+// Recovery-safe removal: the target must be a real non-symlink file whose
+// verified parent chain stays inside the root. Errors propagate so callers
+// can mark the operation failed instead of silently claiming a rollback.
+export function safeUnlinkInsideRoot(rootPath, relativePath) {
+  const probe = safeProbeInsideRoot(rootPath, relativePath);
+  if (!probe.present) {
+    const err = new NativePathError(
+      probe.reason === 'absent' ? 'path does not exist inside the root' : `path is not safely addressable (${probe.reason})`,
+      probe.reason === 'absent' ? 'file_not_found' : probe.reason
+    );
+    err.probeReason = probe.reason;
+    throw err;
+  }
+  const stat = fs.lstatSync(probe.absPath);
+  if (!stat.isFile()) {
+    const err = new NativePathError('only regular files can be removed', 'invalid_path');
+    err.probeReason = 'not_a_file';
+    throw err;
+  }
+  fs.unlinkSync(probe.absPath);
+  return true;
 }

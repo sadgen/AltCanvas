@@ -1409,3 +1409,84 @@
 - `npm test` 9 套全部通过（exit 0）；`git diff --check` 通过。
 - 服务已重启：/auth/session 仅 local；/api/*、/auth/callback 实测 410。
 - M4 人工实机验收仍未执行——等下一轮审计通过后再进行。
+
+---
+
+## 2026-09-03 会话（M4 二轮审计 P1/P2 整改：CONDITIONAL PASS → 待复审）
+
+上一轮初审后复审又提出 4 个 P1 + 2 个 P2，本轮全部闭环：
+
+### P1-A 目录树符号链接读取（修复）
+
+- `listDirectoryLevel` 原先只做词法拼接后直接 readdir，`?path=escape`（escape
+  为指向根外目录的符号链接）会列出根外内容。重写为 `listDirectoryPage`：
+  先对请求目录逐组件 lstat（任意一级符号链接 → `symlink_rejected` 400），
+  再从验证后的真实路径 opendir 流式读取。`listDirectoryLevel` 保留为兼容
+  包装。HTTP tree 端点拒绝测试（顶层 + 深层符号链接）已补。
+
+### P2-A 目录树分页下推（修复）
+
+- `listDirectoryPage` 用 opendir 流式枚举，名称缓冲上限
+  `MAX_DIRECTORY_LIST=20000`（超出置 `meta.truncated=true`），stat 仅对
+  请求页执行；tree 端点 limit/cursor 下推到列举层，超大目录不再全量
+  materialize 条目对象与 stat。
+
+### P1-B 恢复器绕过安全原语（修复）
+
+- 新增 `safeProbeInsideRoot`（逐组件 lstat、任何一级符号链接即视为不可
+  安全寻址、realpath 边界校验、区分 absent/symlink/escape/invalid）与
+  `safeUnlinkInsideRoot`（最终项必须为非符号链接常规文件，失败上抛）。
+- reconcile 全家族（rename/move/trash/restore/import/delete_permanent）的
+  磁盘事实检查改用 safeProbe；import 补偿删除与永久删除的 unlink 改用
+  safeUnlink——删除失败标 `compensation_failed` failed（绝不 rolled_back），
+  目标父级被换成符号链接时标 `unsafe_path` failed 且根外零副作用。
+- reconcileMkdir 改用 realpath 后的根做逐组件校验。
+- 测试组 20：崩溃后父目录替换为符号链接（import/trash/restore 三场景，
+  外部放置同名诱饵文件断言逐字节不变）+ unlink 失败（父目录 chmod 0500）。
+
+### P1-C 有界扫描（真正实现）
+
+- 三阶段重构 `performScan`，磁盘事实经 TEMP 表 `scan_staging`（按
+  scan_id 作用域、参数绑定写入、扫描结束/失败即删、同根重扫先清理陈旧行）：
+  - Phase A：惰性批次（生成器 + batchesOf）逐批哈希并写入 staging，行内
+    联动（内容变化级联/统计漂移恢复/未读标记）同事务提交；
+  - Phase B：`listSourceFilesForScanPage` 复合游标分页读存量行，missing/
+    移动识别经 `findMoveCandidateStaging` 的 SQL NOT EXISTS（顺序更新时
+    即时复核路径占用，不会双重认领）；
+  - Phase C：`listUnclaimedScanStaging` 分页取未认领条目入册/判重。
+  全程不再有全量 inventory/diskState/shaToDiskPaths/claimedPaths/unclaimed
+  聚合。`scanLibraryRoot` 新增 `entryIteratorFn` 注入口供测试。
+- 测试组 21：30,000 条模拟目录项（50 个内容身份 → 50 入册 + 29,950 副本），
+  关键断言为"拉取-已入库不变量"——生成器每次吐出条目时校验
+  pulled − staged ≤ SCAN_BATCH_SIZE（聚合式实现会在首个断言即失败，最大
+  拉取差记录在违规数组）；成功与失败扫描后 staging 表均清空；报告计数
+  与 105 文件真实磁盘回归全部一致。
+
+### P1-D 部署层 Altero 移除（修复）
+
+- Dockerfile：删除 `ALTERO_API` ENV，创建 `/app/library` 挂载点。
+- docker-compose.yml：删除全部退役变量（含无读取者的 MAX_API_BODY_BYTES/
+  UPSTREAM_TIMEOUT_MS），新增 `NATIVE_LIBRARY_ROOTS` 与
+  `${ALTCANVAS_LIBRARY_DIR:-./library}:/app/library` 读写挂载；
+  `docker compose config` 校验通过。
+- docker-compose.all-in-one.yml 删除（git 历史保留）；
+  config/altero.web-library.example.json 与 .gitignore 对应条目一并清理。
+- 新增 `test/deploy-config.test.mjs`（第 10 套，接入 npm test）：静态断言
+  退役变量/服务/依赖零出现、all-in-one 不存在、文库挂载与
+  NATIVE_LIBRARY_ROOTS 存在、README/package 元数据合规。
+
+### P2-B 文档对齐（修复）
+
+- README 全面改写为 Native 架构（本地账号 + SQLite + blobs + 文库目录
+  挂载），零 OIDC/Zotero/OAuth/probe-altero 引用，历史仅一句归档说明。
+- package.json description/keywords 去 Altero/Zotero。
+- .env.example 清除全部残留并补 ALTCANVAS_LIBRARY_DIR 与
+  NATIVE_LIBRARY_ROOTS 容器路径说明；四个历史设计文档（altero-auth-bff、
+  topic-research-workspace、m0、m1）标题下加"已归档（superseded）"标记。
+
+### 验证与状态
+
+- `npm test` 10 套全部通过（exit 0），`git diff --check` 干净；服务已重启，
+  /auth/session 仅 local、首页 200。
+- M4 维持 CONDITIONAL PASS：等待本轮整改复审；复审通过后才进行人工实机
+  验收（步骤见前节，验收时注意 data/library 挂载已在 compose/env 配好）。

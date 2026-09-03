@@ -1,5 +1,7 @@
 # M0: Web integration validation
 
+> **状态：已归档（superseded）。** 本文档记录的 Altero/Zotero 集成验证已于 M4 移除，仅作历史记录；当前架构见 docs/m4-native-library-manager.md 与 docs/handoff.md。归档实现见 git 标签 archive/last-altero-compatible。
+
 ## Verified
 
 - [x] Zotero Desktop A → altero → Zotero Desktop B

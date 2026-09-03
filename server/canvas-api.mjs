@@ -18,7 +18,7 @@ import {
 import { getSession, getSessionIdFromRequest } from './session.mjs';
 import { getAiPublicConfig, requestAiCompletion, validateAiEndpoint } from './ai-provider.mjs';
 import { resolveImportInput, findDuplicateCandidates, safeDownloadPdfFile } from './import-resolver.mjs';
-import { NativePathError, openFileInsideRoot, normalizeRelativePath, normalizeFilename, listDirectoryLevel, ensureDirectoryInsideRoot } from './native-fs.mjs';
+import { NativePathError, openFileInsideRoot, normalizeRelativePath, normalizeFilename, listDirectoryPage, ensureDirectoryInsideRoot } from './native-fs.mjs';
 import { scanLibraryRoot, LibraryScanError } from './library-scanner.mjs';
 import {
   FileOpError,
@@ -2023,12 +2023,14 @@ export function createCanvasHandler(store, {
         const relativePath = rawPath ? normalizeRelativePath(rawPath) : '';
         const limit = Math.max(1, Math.min(500, Number(url.searchParams.get('limit')) || 200));
         const cursor = Math.max(0, Number(url.searchParams.get('cursor')) || 0);
-        const level = listDirectoryLevel(root.absolutePath, relativePath);
-        const page = level.slice(cursor, cursor + limit);
-        const nextCursor = cursor + limit < level.length ? cursor + limit : null;
-        const pdfPaths = page.filter(e => e.type === 'pdf').map(e => e.relativePath);
+        // Pagination is pushed into the listing itself: the directory is
+        // verified per component (symlinked ancestors rejected), streamed via
+        // opendir with a bounded name buffer, and stats run only for the
+        // requested page.
+        const listing = listDirectoryPage(root.absolutePath, relativePath, { cursor, limit });
+        const pdfPaths = listing.entries.filter(e => e.type === 'pdf').map(e => e.relativePath);
         const libraryInfo = store.getSourceFileLibraryInfoByPaths(actor.actorKey, root.id, pdfPaths);
-        const data = page.map(entry => {
+        const data = listing.entries.map(entry => {
           const binding = libraryInfo.get(entry.relativePath) || null;
           return { ...entry, library: binding };
         });
@@ -2037,9 +2039,10 @@ export function createCanvasHandler(store, {
           meta: {
             rootId: root.id,
             path: relativePath,
-            total: level.length,
-            cursor,
-            nextCursor
+            total: listing.total,
+            cursor: listing.cursor,
+            nextCursor: listing.nextCursor,
+            truncated: listing.truncated
           }
         });
         return;

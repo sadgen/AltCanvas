@@ -4931,14 +4931,115 @@ export class CanvasStore {
     return info;
   }
 
-  // Full scan inventory of a root (not-deleted, non-trashed rows) used for
-  // incremental diffing; scanner compares this against the live directory.
-  listRootSourceFilesForScan(actorKey, rootId) {
+  // --- M4 scan staging (bounded-memory reconciliation) ---
+  // A TEMP table scoped per connection: no schema version is involved, rows
+  // are keyed by scan_id, purged when their root is scanned again and deleted
+  // when the owning scan finishes (success or failure).
+  prepareScanStaging() {
+    this.db.exec(`
+      CREATE TEMP TABLE IF NOT EXISTS scan_staging (
+        scan_id TEXT NOT NULL,
+        owner_key TEXT NOT NULL,
+        root_id TEXT NOT NULL,
+        relative_path TEXT NOT NULL,
+        filename TEXT NOT NULL,
+        sha256 TEXT,
+        size_bytes INTEGER NOT NULL DEFAULT 0,
+        modified_at INTEGER,
+        status TEXT NOT NULL CHECK (status IN ('hashed', 'cache_hit', 'unreadable')),
+        created_at TEXT NOT NULL
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS scan_staging_path_idx ON scan_staging(scan_id, relative_path);
+      CREATE INDEX IF NOT EXISTS scan_staging_sha_idx ON scan_staging(scan_id, sha256);
+    `);
+  }
+
+  purgeScanStagingForRoot(ownerKey, rootId) {
+    this.db.prepare('DELETE FROM scan_staging WHERE owner_key = ? AND root_id = ?').run(ownerKey, rootId);
+  }
+
+  deleteScanStaging(scanId) {
+    this.db.prepare('DELETE FROM scan_staging WHERE scan_id = ?').run(scanId);
+  }
+
+  insertScanStagingRows(scanId, ownerKey, rootId, rows) {
+    if (!Array.isArray(rows) || rows.length === 0) return;
+    const stmt = this.db.prepare(`
+      INSERT INTO scan_staging
+        (scan_id, owner_key, root_id, relative_path, filename, sha256, size_bytes, modified_at, status, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const timestamp = nowIso();
+    for (const row of rows) {
+      stmt.run(
+        scanId, ownerKey, rootId, row.relativePath, row.filename,
+        row.sha256 ?? null, row.sizeBytes ?? 0, row.modifiedAt ?? null,
+        row.status, timestamp
+      );
+    }
+  }
+
+  getScanStagingByPath(scanId, relativePath) {
+    return this.db.prepare(
+      'SELECT * FROM scan_staging WHERE scan_id = ? AND relative_path = ? LIMIT 1'
+    ).get(scanId, relativePath) || null;
+  }
+
+  // Move candidate: staged content with the wanted hash at a path no live row
+  // claims yet. NOT EXISTS re-checked at call time so sequential moves within
+  // one transaction never double-claim the same path.
+  findMoveCandidateStaging(scanId, ownerKey, rootId, sha256) {
+    if (!sha256) return null;
+    return this.db.prepare(`
+      SELECT st.relative_path, st.filename, st.size_bytes, st.modified_at
+      FROM scan_staging st
+      WHERE st.scan_id = ? AND st.sha256 = ? AND st.status = 'hashed'
+        AND NOT EXISTS (
+          SELECT 1 FROM source_files sf
+          WHERE sf.owner_key = ? AND sf.root_id = ? AND sf.relative_path = st.relative_path AND sf.deleted_at IS NULL
+        )
+      ORDER BY st.relative_path ASC LIMIT 1
+    `).get(scanId, sha256, ownerKey, rootId) || null;
+  }
+
+  // Staged entries no live row claims (keyset pagination by relative_path).
+  listUnclaimedScanStaging(scanId, ownerKey, rootId, { afterPath = '', limit = 100 } = {}) {
+    return this.db.prepare(`
+      SELECT st.* FROM scan_staging st
+      WHERE st.scan_id = ? AND st.status = 'hashed' AND st.relative_path > ?
+        AND NOT EXISTS (
+          SELECT 1 FROM source_files sf
+          WHERE sf.owner_key = ? AND sf.root_id = ? AND sf.relative_path = st.relative_path AND sf.deleted_at IS NULL
+        )
+      ORDER BY st.relative_path ASC LIMIT ?
+    `).all(scanId, afterPath, ownerKey, rootId, limit);
+  }
+
+  countScanStaging(scanId) {
+    const row = this.db.prepare(`
+      SELECT COUNT(*) AS total,
+        SUM(CASE WHEN status = 'hashed' THEN 1 ELSE 0 END) AS hashed,
+        SUM(CASE WHEN status = 'cache_hit' THEN 1 ELSE 0 END) AS cache_hit,
+        SUM(CASE WHEN status = 'unreadable' THEN 1 ELSE 0 END) AS unreadable
+      FROM scan_staging WHERE scan_id = ?
+    `).get(scanId);
+    return {
+      total: row?.total || 0,
+      hashed: row?.hashed || 0,
+      cacheHit: row?.cache_hit || 0,
+      unreadable: row?.unreadable || 0
+    };
+  }
+
+  // Keyset-paginated scan inventory: reconciliation reads existing rows in
+  // bounded pages instead of aggregating the whole root.
+  listSourceFilesForScanPage(ownerKey, rootId, { afterPath = '', limit = 100 } = {}) {
     return this.db.prepare(`
       SELECT * FROM source_files
       WHERE owner_key = ? AND root_id = ? AND deleted_at IS NULL AND status != 'trashed'
-      ORDER BY relative_path ASC
-    `).all(actorKey, rootId).map(sourceFileRow);
+        AND relative_path > ?
+      ORDER BY relative_path ASC LIMIT ?
+    `).all(ownerKey, rootId, afterPath, limit).map(sourceFileRow);
   }
 
   // Applies scanner-discovered facts to a source_files row. Version is

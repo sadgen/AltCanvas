@@ -1,5 +1,7 @@
 # M1: Zotero-compatible API adaptation
 
+> **状态：已归档（superseded）。** 本文档记录的 Altero/Zotero 集成已于 M4 移除，仅作历史记录；当前架构见 docs/m4-native-library-manager.md 与 docs/handoff.md。归档实现见 git 标签 archive/last-altero-compatible。
+
 This document records the contract that `vendor/web-library` expects from an
 Altero endpoint. It is intentionally credential-free; use a dedicated test
 library and inject the key at runtime.

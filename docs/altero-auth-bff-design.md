@@ -3,6 +3,8 @@
 状态：BFF 客户端主体已实现，等待 Altero 端联调与生产验收
 适用范围：自建 AltCanvas 前端、自建 Altero 服务、Zotero 兼容 API 与 PDF Reader
 
+> **状态：已归档（superseded）。** 本方案描述的 Altero/Zotero 集成已于 M4 移除，仅作历史记录；当前架构见 docs/m4-native-library-manager.md 与 docs/handoff.md。归档实现见 git 标签 archive/last-altero-compatible。
+
 ## 1. 结论
 
 采用 **OpenID Connect / OAuth 2.0 Authorization Code + PKCE + AltCanvas BFF**。

@@ -1786,12 +1786,299 @@ async function testM4AuditFixes() {
   await testM4AuditFixBoundedScan();
 }
 
+
+// ============================================================
+// 19. P1-A/P2-A: tree endpoint rejects symlinked directories and paginates
+//     without materializing stats for the whole directory.
+// ============================================================
+async function testTreeSymlinkAndPagination() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-tree-store-'));
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-tree-root-'));
+  const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-tree-out-'));
+  const store = new CanvasStore(path.join(tempDir, 'canvas.sqlite'));
+  const actor = canvasActorKey('local', 'm4-tree');
+  const session = createSession({
+    userId: 'm4-tree-1', subject: 'm4-tree', authMode: 'local',
+    username: 'tree', role: 'admin', actorKey: actor
+  });
+  const cookie = `altcanvas_session=${session.id}`;
+  const handler = createCanvasHandler(store);
+  try {
+    const [root] = store.ensureLibraryRootsFromConfig(actor, [{ absolutePath: rootDir, displayName: '树视图文库' }]);
+
+    // 19.1 Top-level symlinked directory must not be listable.
+    fs.symlinkSync(outsideDir, path.join(rootDir, 'escape'));
+    fs.writeFileSync(path.join(outsideDir, 'outside-secret.pdf'), makePdfBytes('secret'));
+    let res = await call(handler, `/canvas/native/library-roots/${root.id}/tree?path=escape`, { cookie });
+    assert.equal(res.statusCode, 400, res.text);
+    assert.equal(res.payload.error.code, 'symlink_rejected');
+    assert.equal(fs.existsSync(path.join(outsideDir, 'outside-secret.pdf')), true, 'outside file untouched');
+
+    // 19.2 Deep symlinked component rejected too.
+    fs.mkdirSync(path.join(rootDir, 'realdir'));
+    fs.symlinkSync(outsideDir, path.join(rootDir, 'realdir', 'sub'));
+    res = await call(handler, `/canvas/native/library-roots/${root.id}/tree?path=realdir%2Fsub`, { cookie });
+    assert.equal(res.statusCode, 400);
+    assert.equal(res.payload.error.code, 'symlink_rejected');
+
+    // 19.3 A real directory still lists; the symlink itself is visible but inert.
+    fs.writeFileSync(path.join(rootDir, 'realdir', 'doc.pdf'), makePdfBytes('doc'));
+    res = await call(handler, `/canvas/native/library-roots/${root.id}/tree?path=realdir`, { cookie });
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(res.payload.data.map(e => e.name), ['doc.pdf', 'sub']);
+    assert.equal(res.payload.data.find(e => e.name === 'sub').type, 'symlink');
+
+    // 19.4 Pagination: limit/cursor slicing with nextCursor and no truncation.
+    fs.mkdirSync(path.join(rootDir, 'bigdir'));
+    for (let i = 0; i < 7; i++) {
+      fs.writeFileSync(path.join(rootDir, 'bigdir', `f${i}.pdf`), makePdfBytes(`f${i}`));
+    }
+    res = await call(handler, `/canvas/native/library-roots/${root.id}/tree?path=bigdir&limit=3`, { cookie });
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.payload.data.length, 3);
+    assert.equal(res.payload.meta.total, 7);
+    assert.equal(res.payload.meta.nextCursor, 3);
+    assert.equal(res.payload.meta.truncated, false);
+    res = await call(handler, `/canvas/native/library-roots/${root.id}/tree?path=bigdir&limit=5&cursor=5`, { cookie });
+    assert.equal(res.payload.data.length, 2);
+    assert.equal(res.payload.meta.nextCursor, null);
+    // Only the requested page carries stat facts.
+    assert.ok(res.payload.data.every(e => typeof e.sizeBytes === 'number' && typeof e.modifiedAt === 'number'));
+
+    console.log('✅ P1-A/P2-A tree symlink rejection and page-bounded listing passed');
+  } finally {
+    try { store.close(); } catch {}
+    fs.rmSync(tempDir, { recursive: true, force: true });
+    fs.rmSync(rootDir, { recursive: true, force: true });
+    fs.rmSync(outsideDir, { recursive: true, force: true });
+  }
+}
+
+// ============================================================
+// 20. P1-B: recovery reconcilers refuse symlinked parents, keep failed
+//     (not rolled_back) on unlink failure, and never touch root-outside data.
+// ============================================================
+async function testRecoverySafePaths() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-rec-store-'));
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-rec-root-'));
+  const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-rec-out-'));
+  const store = new CanvasStore(path.join(tempDir, 'canvas.sqlite'));
+  const actor = canvasActorKey('local', 'm4-rec');
+  try {
+    const [root] = store.ensureLibraryRootsFromConfig(actor, [{ absolutePath: rootDir, displayName: '恢复文库' }]);
+
+    // 20.1 import recorded, file placed, then parent replaced by a symlink to
+    // an outside directory containing a decoy with the same name: recovery
+    // must fail the operation and leave the outside decoy untouched.
+    fs.mkdirSync(path.join(rootDir, 'd1'));
+    fs.writeFileSync(path.join(rootDir, 'd1', 'orphan.pdf'), makePdfBytes('placed'));
+    const op1 = store.createFileOperation(actor, {
+      operationType: 'file.import',
+      sourcePath: 'tmp-irrelevant',
+      targetPath: `${rootDir}/d1/orphan.pdf`,
+      payload: { rootId: root.id, targetDir: 'd1', filename: 'orphan.pdf' }
+    });
+    store.startFileOperation(op1.id);
+    const decoyBytes = makePdfBytes('decoy-must-survive');
+    fs.rmSync(path.join(rootDir, 'd1'), { recursive: true, force: true });
+    fs.symlinkSync(outsideDir, path.join(rootDir, 'd1'));
+    fs.writeFileSync(path.join(outsideDir, 'orphan.pdf'), decoyBytes);
+
+    let summary = recoverInterruptedFileOperations(store);
+    assert.equal(summary.failed >= 1, true);
+    assert.equal(store.getFileOperation(actor, op1.id).state, 'failed');
+    assert.equal(store.getFileOperation(actor, op1.id).errorCode, 'unsafe_path');
+    assert.equal(fs.readFileSync(path.join(outsideDir, 'orphan.pdf')).equals(decoyBytes), true,
+      'the outside decoy must never be deleted through the symlinked parent');
+
+    // Remove the symlink for the next scenario.
+    fs.rmSync(path.join(rootDir, 'd1'));
+
+    // 20.2 import compensation unlink fails (parent dir read-only): operation
+    // must end failed, never rolled_back, and the file must still exist.
+    fs.mkdirSync(path.join(rootDir, 'd2'));
+    fs.writeFileSync(path.join(rootDir, 'd2', 'stuck.pdf'), makePdfBytes('stuck'));
+    const op2 = store.createFileOperation(actor, {
+      operationType: 'file.import',
+      targetPath: `${rootDir}/d2/stuck.pdf`,
+      payload: { rootId: root.id, targetDir: 'd2', filename: 'stuck.pdf' }
+    });
+    store.startFileOperation(op2.id);
+    fs.chmodSync(path.join(rootDir, 'd2'), 0o500);
+    try {
+      summary = recoverInterruptedFileOperations(store);
+      assert.equal(store.getFileOperation(actor, op2.id).state, 'failed');
+      assert.equal(store.getFileOperation(actor, op2.id).errorCode, 'compensation_failed');
+      assert.equal(fs.existsSync(path.join(rootDir, 'd2', 'stuck.pdf')), true, 'file survives a failed unlink');
+    } finally {
+      fs.chmodSync(path.join(rootDir, 'd2'), 0o755);
+    }
+
+    // 20.3 trash recorded but the source parent became a symlink with an
+    // outside decoy: nothing is safely present, operation fails, decoy intact.
+    const decoy2 = makePdfBytes('trash-decoy');
+    fs.mkdirSync(path.join(rootDir, 'd3'));
+    fs.writeFileSync(path.join(rootDir, 'd3', 'x.pdf'), makePdfBytes('original'));
+    const sf = store.createSourceFile(actor, root.id, {
+      relativePath: 'd3/x.pdf', filename: 'x.pdf', sha256: sha256Of(makePdfBytes('original')), sizeBytes: 10
+    });
+    const op3 = store.createFileOperation(actor, {
+      operationType: 'file.trash',
+      sourceFileId: sf.id,
+      sourcePath: 'd3/x.pdf',
+      targetPath: `.altcanvas-trash/${sf.id}.pdf`
+    });
+    store.startFileOperation(op3.id);
+    fs.rmSync(path.join(rootDir, 'd3'), { recursive: true, force: true });
+    fs.symlinkSync(outsideDir, path.join(rootDir, 'd3'));
+    fs.writeFileSync(path.join(outsideDir, 'x.pdf'), decoy2);
+    summary = recoverInterruptedFileOperations(store);
+    assert.equal(store.getFileOperation(actor, op3.id).state, 'failed');
+    assert.equal(fs.readFileSync(path.join(outsideDir, 'x.pdf')).equals(decoy2), true,
+      'recovery must not see or move files through a symlinked parent');
+    assert.equal(store.getSourceFile(actor, sf.id).status, 'active', 'row stays as-is when facts are unsafe');
+    fs.unlinkSync(path.join(rootDir, 'd3'));
+
+    // 20.4 restore recorded with a symlinked target parent: trash file still
+    // present -> rolled_back, nothing written through the symlink.
+    fs.mkdirSync(path.join(rootDir, 'd4'));
+    fs.mkdirSync(path.join(rootDir, '.altcanvas-trash'), { recursive: true });
+    const sf2 = store.createSourceFile(actor, root.id, {
+      relativePath: 'd4/y.pdf', filename: 'y.pdf', sha256: sha256Of(makePdfBytes('y')), sizeBytes: 10,
+      status: 'trashed'
+    });
+    fs.writeFileSync(path.join(rootDir, '.altcanvas-trash', `${sf2.id}.pdf`), makePdfBytes('trash-payload'));
+    const op4 = store.createFileOperation(actor, {
+      operationType: 'file.restore',
+      sourceFileId: sf2.id,
+      sourcePath: `.altcanvas-trash/${sf2.id}.pdf`,
+      targetPath: 'd4/y.pdf'
+    });
+    store.startFileOperation(op4.id);
+    fs.rmSync(path.join(rootDir, 'd4'), { recursive: true, force: true });
+    fs.symlinkSync(outsideDir, path.join(rootDir, 'd4'));
+    summary = recoverInterruptedFileOperations(store);
+    assert.equal(store.getFileOperation(actor, op4.id).state, 'rolled_back');
+    assert.equal(fs.existsSync(path.join(rootDir, '.altcanvas-trash', `${sf2.id}.pdf`)), true,
+      'trash payload stays in the controlled area');
+    assert.equal(fs.readdirSync(outsideDir).includes('y.pdf'), false, 'nothing restored through the symlink');
+    fs.unlinkSync(path.join(rootDir, 'd4'));
+
+    console.log('✅ P1-B recovery safe probes: symlinked parents refused, unlink failure stays failed, zero outside side effects passed');
+  } finally {
+    try { store.close(); } catch {}
+    fs.rmSync(tempDir, { recursive: true, force: true });
+    fs.rmSync(rootDir, { recursive: true, force: true });
+    fs.rmSync(outsideDir, { recursive: true, force: true });
+  }
+}
+
+// ============================================================
+// 21. P1-C: bounded-memory scan — tens of thousands of entries with a
+//     pull-ahead invariant proving the batch processor never aggregates.
+// ============================================================
+async function testBoundedScanStaging() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-bound-store-'));
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-bound-root-'));
+  const store = new CanvasStore(path.join(tempDir, 'canvas.sqlite'));
+  const actor = canvasActorKey('local', 'm4-bound');
+  const TOTAL = 30000;
+  const DISTINCT = 50;
+  try {
+    const [root] = store.ensureLibraryRootsFromConfig(actor, [{ absolutePath: rootDir, displayName: '有界文库' }]);
+
+    // Instrument the staging writer to track how many disk facts have been
+    // durably staged; the entry generator asserts, on every pull, that the
+    // scanner never pulls more than one batch ahead of staged facts.
+    let processed = 0;
+    const originalInsert = store.insertScanStagingRows.bind(store);
+    store.insertScanStagingRows = (...args) => {
+      const result = originalInsert(...args);
+      processed += args[3].length;
+      return result;
+    };
+    const violations = [];
+    function* syntheticEntries() {
+      for (let i = 0; i < TOTAL; i++) {
+        const pulled = i + 1;
+        if (pulled - processed > SCAN_BATCH_SIZE) {
+          violations.push({ pulled, processed });
+        }
+        yield {
+          relativePath: `dir${Math.floor(i / 25)}/file${i}.pdf`,
+          filename: `file${i}.pdf`,
+          sizeBytes: 100 + (i % 7),
+          mtimeMs: 1_700_000_000_000 + i
+        };
+      }
+    }
+    const syntheticSha = async (_rootPath, relativePath) => {
+      const idx = Number(/file(\d+)\.pdf$/.exec(relativePath)[1]);
+      return {
+        sha256: crypto.createHash('sha256').update(`content-${idx % DISTINCT}`).digest('hex'),
+        sizeBytes: 100 + (idx % 7),
+        mtimeMs: 1_700_000_000_000 + idx
+      };
+    };
+
+    const result = await scanLibraryRoot(store, actor, root.id, {
+      hashFn: syntheticSha,
+      entryIteratorFn: syntheticEntries
+    });
+    assert.equal(result.state, 'completed');
+    const report = result.report;
+    assert.equal(report.scannedFiles, TOTAL);
+    assert.equal(report.hashedFiles, TOTAL);
+    assert.equal(report.newDocuments, DISTINCT, 'one library identity per distinct content');
+    assert.equal(report.duplicates, TOTAL - DISTINCT);
+    assert.equal(report.moved, 0);
+    assert.equal(report.missing, 0);
+    assert.equal(violations.length, 0,
+      `the scanner aggregated ahead of staging (max pull-ahead exceeded; first violation: ${JSON.stringify(violations[0])})`);
+    assert.equal(store.countScanStaging('never-matches').total, 0);
+
+    // Staging is fully cleaned after success.
+    assert.equal(store.db.prepare('SELECT COUNT(*) AS c FROM scan_staging').get().c, 0,
+      'scan staging must be empty after a completed scan');
+
+    // A failing scan cleans its staging too. (Per-file hash errors are
+    // classified as unreadable by design, so the failure is injected at the
+    // enumeration layer — the same path an unreadable directory takes.)
+    function* failingEntries() {
+      for (let i = 0; i < 300; i++) {
+        if (i === 150) throw new Error('simulated scan failure');
+        yield { relativePath: `f${i}.pdf`, filename: `f${i}.pdf`, sizeBytes: 10, mtimeMs: i };
+      }
+    }
+    await assert.rejects(
+      () => scanLibraryRoot(store, actor, root.id, { hashFn: syntheticSha, entryIteratorFn: failingEntries }),
+      /simulated scan failure/
+    );
+    assert.equal(store.db.prepare('SELECT COUNT(*) AS c FROM scan_staging').get().c, 0,
+      'scan staging must be empty after a failed scan');
+    assert.equal(store.getLibraryRoot(actor, root.id).lastScanStatus, 'failed');
+
+    console.log(`✅ P1-C bounded scan: ${TOTAL} entries with staging-table reconciliation, pull-ahead invariant held, staging cleaned on success and failure passed`);
+  } finally {
+    try { store.close(); } catch {}
+    fs.rmSync(tempDir, { recursive: true, force: true });
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+}
+
+async function testM4Audit2Fixes() {
+  await testTreeSymlinkAndPagination();
+  await testRecoverySafePaths();
+  await testBoundedScanStaging();
+}
+
 try {
   await main();
   await testV12Migration();
   await testM4Scanner();
   await testM4FileOps();
   await testM4AuditFixes();
+  await testM4Audit2Fixes();
   process.exit(0);
 } catch (err) {
   console.error('❌ Native M4 test failure:', err);

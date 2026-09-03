@@ -3,6 +3,8 @@
 状态：已形成实施基线，等待按阶段开发
 日期：2026-08-31
 
+> **状态：已归档（superseded）。** 本方案描述的 Altero/Zotero 集成已于 M4 移除，仅作历史记录；当前架构见 docs/m4-native-library-manager.md 与 docs/handoff.md。归档实现见 git 标签 archive/last-altero-compatible。
+
 ## 1. 产品结论
 
 AltCanvas 采用“Altero 文献底座 + Canvas 研究工作台”的边界：
