@@ -1546,7 +1546,7 @@ export function createCanvasHandler(store, {
   return async function handleCanvasApi(req, res, url) {
     const actor = actorFromRequest(req);
     if (!actor) {
-      error(res, 401, 'authentication_required', 'Canvas requires an OIDC-authenticated session');
+      error(res, 401, 'authentication_required', 'Canvas requires an authenticated AltCanvas session');
       return;
     }
 

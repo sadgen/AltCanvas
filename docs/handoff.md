@@ -909,6 +909,35 @@
 - 审计登记的非阻断 P2 技术债同日收紧：`resolved.arXivId` 大小写旁路封堵（两种拼写均纳入长度契约）；`externalRefs` 全字段规范化（`externalAttachmentId` ≤256 字符串、`externalVersion` 非负整数、`sourceUrl` ≤2000 且必须 http(s)，未知键丢弃并输出规范化对象）；新增 5 类非法载荷 400 测试与全字段正向前置持久化断言；
 - **M2 统一 Native 导入管线：PASS（关闭）**。下一阶段：M3 Translation Server 集成。
 
+## 2026-09-03 会话（M3.0 登录后应用初始化修复——P1 首要前置项）
+
+### 根因
+本地登录成功后 `submitLogin()` 仅执行 `checkSession + loadCollectionsAndLibrary + loadInboxEntries`，未重新调用 `initCanvasWorkspace()`；页面首次打开未登录时画板已被置为"需 OIDC 登录"占位，导致登录后不刷新就看不到主题/画板。
+
+### 修复成果
+1. **唯一统一初始化入口 `initializeAuthenticatedApp()`** ([`index.html`](file:///home/sadgen/Projects/AltCanvas/index.html))：
+   - 时序：AI 配置 → 主题/画板初始化（内含收件箱加载）→ Native 文库 → 认证/能力 UI；
+   - `appInitInFlight` Promise 锁：双击登录、页面恢复、重复调用只会产生一次 `initCanvasWorkspace`，顺序完成后可再次运行（支持重新登录）；
+   - 初始化失败保留登录态并以"应用初始化失败"具体提示，绝不呈现为登录/OIDC 问题。
+2. **页面启动与本地登录共用该入口**：启动 IIFE 精简为 `checkSession → loadKnownDeletedAnnotations → initializeAuthenticatedApp`；`submitLogin` 本地分支改为 `登录 POST → 会话确认（必须返回 true）→ initializeAuthenticatedApp`，会话确认失败显示"登录会话确认失败"并重开登录框；删除了原先重复的 `loadInboxEntries` 直调。
+3. **OIDC 专用文案统一**：`需 OIDC 登录`→`请登录 AltCanvas`；`Canvas 需要 OIDC 登录`→`登录后即可使用研究画板`；`请先使用 OIDC 登录…`→`请先登录 AltCanvas…`；服务端 `OIDC-authenticated session`→`authenticated AltCanvas session`。
+4. **Altero OAuth 回跳不受影响**：OAuth 分支仍走完整页面重定向，由启动 IIFE 统一初始化。
+
+### 行为测试（生产行为执行，非仅结构断言）
+- 初始化顺序精确断言 `ai-config → canvas-init → library → auth-ui`；并发双调用 `initCanvasWorkspace` 恰好一次；顺序完成后的再次调用完整重跑；
+- 初始化失败：`config.mode/user` 保持、toast 含"应用初始化失败"且不含"请登录/重新登录/OIDC"、`app.initialize` 上报；
+- 本地登录顺序：`POST /auth/login → close-modal → toast → checkSession → init-app`，零 Altero `/api/*` 请求；会话确认失败不初始化并重开登录框；
+- Altero 分支仍重定向 `/auth/login?altero_api=`；
+- 启动 IIFE 区域内不得出现绕过统一入口的直调。
+- `npm test` 7 套全过；`git diff --check` 通过。
+
+### 待人工实机验收（M3.0 关闭闸门）
+1. 退出登录并刷新页面；
+2. 使用本地账号密码登录；
+3. **不刷新页面**；
+4. 确认主题选择器、画板、文库和收件箱直接出现；
+5. 回复"完成"，Agent 复查 `.debug/browser.log`：无 Canvas 401、无重复初始化、无 OIDC 提示错误。
+
 ---
 
 ## 2026-09-02 会话（P1 Native Library Routing & Capability Isolation 修复）

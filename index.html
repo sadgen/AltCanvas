@@ -1549,9 +1549,19 @@
           }
           closeLoginModal();
           showToast(needsSetup ? '管理员创建成功！' : '登录成功！', 'success');
-          await checkSession();
-          if (typeof loadCollectionsAndLibrary === 'function') loadCollectionsAndLibrary();
-          if (typeof loadInboxEntries === 'function') loadInboxEntries();
+          // Confirm the session is truly established before initializing the app,
+          // then run the SAME unified initialization as page startup (AI config,
+          // topics/canvas, inbox, library, auth UI) — no refresh required.
+          const sessionOk = await checkSession();
+          if (!sessionOk) {
+            if (errorBox) {
+              errorBox.textContent = '登录会话确认失败，请重试';
+              errorBox.classList.remove('hidden');
+            }
+            openLoginModal();
+            return;
+          }
+          await initializeAuthenticatedApp();
         } catch (err) {
           if (errorBox) {
             errorBox.textContent = err.message || '网络连接异常';
@@ -4995,10 +5005,41 @@
       void checkSourcesFreshness();
     }
 
+    // --- Unified authenticated-app initialization (M3.0) ---
+    // Single entry shared by page startup and post-login re-initialization.
+    // Sequence: AI config -> topics/canvas (initCanvasWorkspace also loads the inbox)
+    //           -> library -> auth/capability UI. Guarded by a promise lock so
+    //           double-click logins, page restore, and retries cannot run concurrent
+    //           initializations or duplicate initCanvasWorkspace calls.
+    let appInitInFlight = null;
+
+    async function initializeAuthenticatedApp() {
+      if (appInitInFlight) return appInitInFlight;
+      appInitInFlight = (async () => {
+        try {
+          localStorage.removeItem('altcanvas.aiConfig');
+          await loadAiConfig();
+          await initCanvasWorkspace();
+          if (config.userId) {
+            await loadCollectionsAndLibrary();
+          }
+          updateAuthUI(config.mode === 'bff' && Boolean(config.user), config.user, config.alteroApi);
+        } catch (err) {
+          // A failed initialization must NEVER be presented as a login problem:
+          // the session stays intact and the specific failure surfaces instead.
+          reportApplicationError('app.initialize', err);
+          showToast(`应用初始化失败: ${errorMessage(err)}`, 'error');
+        } finally {
+          appInitInFlight = null;
+        }
+      })();
+      return appInitInFlight;
+    }
+
     async function initCanvasWorkspace() {
       if (config.mode !== 'bff' || !config.user) {
         canvasReady = false;
-        setCanvasSaveState('需 OIDC 登录', 'error');
+        setCanvasSaveState('请登录 AltCanvas', 'error');
         renderCanvas();
         return;
       }
@@ -5067,7 +5108,7 @@
       count.textContent = canvasNodes.size;
       empty.classList.toggle('hidden', canvasNodes.size > 0);
       if (!canvasReady && canvasNodes.size === 0) {
-        empty.querySelector('div').innerHTML = 'Canvas 需要 OIDC 登录<br>开发用 API key 模式不会访问画板数据';
+        empty.querySelector('div').innerHTML = '登录后即可使用研究画板<br>本地账户或 Altero 授权均可';
       } else if (canvasNodes.size === 0) {
         empty.querySelector('div').innerHTML = '画板还是空的<br>创建手写卡片或加入当前文档标注';
       }
@@ -5433,7 +5474,7 @@
     }
 
     async function addCanvasNote() {
-      if (!canvasReady) return showToast('请先使用 OIDC 登录以启用持久化画板', 'error');
+      if (!canvasReady) return showToast('请先登录 AltCanvas 以启用持久化画板', 'error');
       const position = canvasCenterPosition(canvasNodes.size % 5 * 24);
       try {
         setCanvasSaveState('保存中…');
@@ -7285,12 +7326,7 @@
       setupNativePdfUpload();
       await checkSession();
       loadKnownDeletedAnnotations();
-      localStorage.removeItem('altcanvas.aiConfig');
-      await loadAiConfig();
-      await initCanvasWorkspace();
-      if (config.userId) {
-        loadCollectionsAndLibrary();
-      }
+      await initializeAuthenticatedApp();
     })();
   </script>
 </body>

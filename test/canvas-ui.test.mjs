@@ -625,6 +625,266 @@ assert.match(html, /async function resolveQuickImport\(\)/);
   assert.ok(classes['altero-auth-section'].has('hidden'), 'altero-auth-section must be hidden');
 }
 
+// =========================================================================
+// --- M3.0: Unified authenticated-app initialization behavioral tests ---
+// =========================================================================
+{
+  const initAppMatch = /async function initializeAuthenticatedApp\(\) \{([\s\S]*?)\n    \}/.exec(scripts[0]);
+  const submitLoginMatch = /async function submitLogin\(\) \{([\s\S]*?)\n    \}/.exec(scripts[0]);
+  assert.ok(initAppMatch, 'initializeAuthenticatedApp must be extractable');
+  assert.ok(submitLoginMatch, 'submitLogin must be extractable');
+
+  // Structural: the ONLY init sequence is checkSession -> initializeAuthenticatedApp,
+  // on both startup and post-login paths; no parallel ad-hoc init remains.
+  assert.match(html, /await checkSession\(\);\s*\n\s*loadKnownDeletedAnnotations\(\);\s*\n\s*await initializeAuthenticatedApp\(\);/,
+    'startup IIFE must route through the unified initializeAuthenticatedApp entry');
+  const startupIife = scripts[0].slice(scripts[0].lastIndexOf('--- Init App on Load ---'));
+  assert.ok(startupIife.includes('initializeAuthenticatedApp'), 'startup IIFE region must be extracted correctly');
+  assert.doesNotMatch(startupIife, /loadAiConfig\(\)|initCanvasWorkspace\(\)|loadCollectionsAndLibrary\(\)/,
+    'startup IIFE must not run any direct init calls outside the unified initializer');
+  const submitLoginSrc = submitLoginMatch[0];
+  assert.match(submitLoginSrc, /await initializeAuthenticatedApp\(\);/,
+    'submitLogin must call the unified initializer after login');
+  assert.doesNotMatch(submitLoginSrc, /loadCollectionsAndLibrary|loadInboxEntries/,
+    'submitLogin must NOT duplicate library/inbox loading outside the unified initializer');
+  assert.match(submitLoginSrc, /const sessionOk = await checkSession\(\);/,
+    'submitLogin must confirm the session before initializing');
+  assert.match(html, /let appInitInFlight = null;/,
+    'concurrency lock variable must exist for the unified initializer');
+
+  // --- Case 1: initializeAuthenticatedApp call order + concurrency lock ---
+  {
+    const calls = [];
+    let releaseCanvas;
+    const canvasGate = new Promise(resolve => { releaseCanvas = resolve; });
+
+    const runner = new Function(
+      'config', 'localStorage',
+      'loadAiConfig', 'initCanvasWorkspace', 'loadCollectionsAndLibrary', 'updateAuthUI',
+      'reportApplicationError', 'showToast', 'errorMessage',
+      `
+      let appInitInFlight = null;
+      ${initAppMatch[0]}
+      return initializeAuthenticatedApp;
+      `
+    );
+
+    let canvasInitCount = 0;
+    const initApp = runner(
+      { mode: 'bff', user: { id: 'u1' }, userId: 'u1' },
+      { removeItem: () => calls.push('localstorage-clear') },
+      async () => { calls.push('ai-config'); },
+      async () => { canvasInitCount++; calls.push('canvas-init'); await canvasGate; },
+      async () => { calls.push('library'); },
+      () => { calls.push('auth-ui'); },
+      () => {},
+      () => {},
+      e => e.message
+    );
+
+    // Two CONCURRENT invocations (double-click login race): the lock must deduplicate.
+    const p1 = initApp();
+    const p2 = initApp();
+    releaseCanvas();
+    await Promise.all([p1, p2]);
+
+    assert.equal(canvasInitCount, 1, 'Concurrent initializeAuthenticatedApp calls must run initCanvasWorkspace exactly ONCE');
+    assert.deepEqual(calls.filter(c => c !== 'localstorage-clear'),
+      ['ai-config', 'canvas-init', 'library', 'auth-ui'],
+      'Initialization order must be: AI config -> canvas(incl. inbox) -> library -> auth UI');
+
+    // Sequential re-run after completion must work again (e.g. re-login).
+    releaseCanvas = () => {};
+    const calls2 = [];
+    const initApp2 = runner(
+      { mode: 'bff', user: { id: 'u1' }, userId: 'u1' },
+      { removeItem: () => {} },
+      async () => { calls2.push('ai-config'); },
+      async () => { calls2.push('canvas-init'); },
+      async () => { calls2.push('library'); },
+      () => { calls2.push('auth-ui'); },
+      () => {}, () => {}, e => e.message
+    );
+    await initApp2();
+    assert.deepEqual(calls2, ['ai-config', 'canvas-init', 'library', 'auth-ui'],
+      'A later sequential initialization must run the full sequence again');
+  }
+
+  // --- Case 2: initialization failure keeps login state, shows init error (NOT a login prompt) ---
+  {
+    const toasts = [];
+    const reported = [];
+    const config = { mode: 'bff', user: { id: 'u1' }, userId: 'u1' };
+    const runner = new Function(
+      'config', 'localStorage',
+      'loadAiConfig', 'initCanvasWorkspace', 'loadCollectionsAndLibrary', 'updateAuthUI',
+      'reportApplicationError', 'showToast', 'errorMessage',
+      `
+      let appInitInFlight = null;
+      ${initAppMatch[0]}
+      return initializeAuthenticatedApp;
+      `
+    );
+    const initApp = runner(
+      config,
+      { removeItem: () => {} },
+      async () => { throw new Error('AI 配置接口 500'); },
+      async () => {},
+      async () => {},
+      () => {},
+      (src, err) => { reported.push(src); },
+      (msg) => { toasts.push(msg); },
+      e => e.message
+    );
+    await initApp();
+    assert.equal(config.mode, 'bff', 'Failed initialization must NOT clear the login state');
+    assert.ok(config.user, 'Failed initialization must NOT clear the user object');
+    assert.ok(toasts.some(t => t.includes('应用初始化失败')), 'Failure must surface a specific init-failure toast');
+    assert.ok(!toasts.some(t => /请登录|重新登录|OIDC/.test(t)), 'Failure must NOT be presented as a login/OIDC problem');
+    assert.ok(reported.includes('app.initialize'), 'Failure must be reported under the app.initialize source');
+  }
+
+  // --- Case 3: submitLogin local branch — full call order and no refresh needed ---
+  {
+    const calls = [];
+    const texts = {};
+    const classes = { 'login-modal': new Set([]), 'local-auth-error': new Set(['hidden']) };
+    const inputs = { 'input-local-username': { value: ' researcher ' }, 'input-local-password': { value: 'Passw0rd!' } };
+    const mockDoc = {
+      getElementById: (id) => ({
+        get value() { return inputs[id]?.value ?? ''; },
+        classList: {
+          add: c => classes[id]?.add(c),
+          remove: c => classes[id]?.delete(c),
+          contains: c => classes[id]?.has(c) ?? false
+        },
+        set textContent(v) { texts[id] = v; },
+        get textContent() { return texts[id] || ''; },
+        focus: () => {}
+      })
+    };
+    const requestedUrls = [];
+
+    const runner = new Function(
+      'authMode', 'needsSetup', 'document', 'fetch', 'localStorage',
+      'closeLoginModal', 'showToast', 'checkSession', 'initializeAuthenticatedApp', 'openLoginModal',
+      'window',
+      `return async function submitLogin() { ${submitLoginMatch[1]} };`
+    );
+
+    let loginModalClosed = false;
+    const submit = runner(
+      'local',
+      false,
+      mockDoc,
+      async (url) => {
+        requestedUrls.push(url);
+        calls.push(`fetch:${url}`);
+        return { ok: true, json: async () => ({ data: { user: { id: 'u1' } } }) };
+      },
+      { },
+      () => { loginModalClosed = true; calls.push('close-modal'); },
+      (msg) => { calls.push(`toast:${msg}`); },
+      async () => { calls.push('checkSession'); return true; },
+      async () => { calls.push('init-app'); },
+      () => { calls.push('open-login-modal'); },
+      { location: { href: '' } }
+    );
+    await submit();
+
+    assert.deepEqual(calls, ['fetch:/auth/login', 'close-modal', 'toast:登录成功！', 'checkSession', 'init-app'],
+      'Local login order must be: login POST -> modal close -> session confirm -> unified init');
+    assert.ok(loginModalClosed, 'Login modal must close before initialization');
+    assert.ok(!calls.includes('open-login-modal'), 'Successful login must not re-open the login modal');
+    assert.ok(!requestedUrls.some(u => u.includes('/api/users/') || u.includes('/api/groups/')),
+      'Login + init must not issue Altero API requests');
+  }
+
+  // --- Case 4: submitLogin — session confirmation failure aborts initialization ---
+  {
+    const calls = [];
+    const texts = {};
+    const classes = { 'login-modal': new Set(['hidden']), 'local-auth-error': new Set(['hidden']) };
+    const inputs = { 'input-local-username': { value: 'researcher' }, 'input-local-password': { value: 'Passw0rd!' } };
+    const mockDoc = {
+      getElementById: (id) => ({
+        get value() { return inputs[id]?.value ?? ''; },
+        classList: {
+          add: c => classes[id]?.add(c),
+          remove: c => classes[id]?.delete(c)
+        },
+        set textContent(v) { texts[id] = v; },
+        get textContent() { return texts[id] || ''; },
+        focus: () => {}
+      })
+    };
+    const runner = new Function(
+      'authMode', 'needsSetup', 'document', 'fetch', 'localStorage',
+      'closeLoginModal', 'showToast', 'checkSession', 'initializeAuthenticatedApp', 'openLoginModal',
+      'window',
+      `return async function submitLogin() { ${submitLoginMatch[1]} };`
+    );
+    const submit = runner(
+      'local', false, mockDoc,
+      async () => ({ ok: true, json: async () => ({ data: {} }) }),
+      {},
+      () => {},
+      () => {},
+      async () => false, // session confirmation FAILED
+      async () => { calls.push('init-app'); },
+      () => { calls.push('open-login-modal'); },
+      { location: { href: '' } }
+    );
+    await submit();
+    assert.equal(calls.filter(c => c === 'init-app').length, 0,
+      'Failed session confirmation must NOT trigger app initialization');
+    assert.ok(calls.includes('open-login-modal'),
+      'Failed session confirmation must re-open the login modal for retry');
+    assert.match(texts['local-auth-error'], /登录会话确认失败/,
+      'Session confirmation failure must show a specific error message');
+  }
+
+  // --- Case 5: Altero OAuth branch still redirects (callback init stays intact) ---
+  {
+    const inputs = { 'input-oauth-server': { value: 'https://altero.example.com' } };
+    const mockDoc = {
+      getElementById: (id) => ({
+        get value() { return inputs[id]?.value ?? ''; },
+        set value(v) { inputs[id].value = v; },
+        classList: { add() {}, remove() {}, contains: () => false },
+        textContent: '',
+        focus: () => {}
+      })
+    };
+    let redirectHref = '';
+    const runner = new Function(
+      'authMode', 'needsSetup', 'document', 'fetch', 'localStorage',
+      'closeLoginModal', 'showToast', 'checkSession', 'initializeAuthenticatedApp', 'openLoginModal',
+      'window',
+      `return async function submitLogin() { ${submitLoginMatch[1]} };`
+    );
+    const submit = runner(
+      'altero', false, mockDoc,
+      async () => { throw new Error('must not fetch'); },
+      { setItem: (k, v) => { if (k === 'altcanvas_altero_server') redirectHref = `stored:${v}`; } },
+      () => {},
+      () => {},
+      async () => {},
+      async () => {},
+      () => {},
+      {
+        location: {
+          set href(v) { redirectHref = v; },
+          get href() { return redirectHref; }
+        }
+      }
+    );
+    await submit();
+    assert.match(redirectHref, /^\/auth\/login\?altero_api=/,
+      'Altero OAuth branch must still redirect to the OAuth login flow');
+  }
+}
+
 // --- Behavioral test: native library multi-page pagination and safety cap ---
 {
   const loadNativeFn = html.match(/async function loadNativeLibrary\(signal\) \{([\s\S]*?)\n    \}/);
