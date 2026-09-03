@@ -56,7 +56,10 @@ export function getTranslationServerConfig(env = process.env) {
 }
 
 export function isLoopbackHost(hostname) {
-  return LOOPBACK_HOSTS.has(String(hostname || '').toLowerCase());
+  const host = String(hostname || '').toLowerCase();
+  if (LOOPBACK_HOSTS.has(host)) return true;
+  const clean = host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
+  return isLoopbackAddress(clean);
 }
 
 // Any address inside 127.0.0.0/8 or the IPv6 loopback ::1.
@@ -114,10 +117,16 @@ export async function resolveTranslationTarget(config, { lookupFn } = {}) {
 
   const hostname = parsed.hostname.toLowerCase();
 
-  // IP-literal loopback: pin the literal itself, no DNS involved.
-  if (hostname === '127.0.0.1' || hostname === '::1' || hostname === '[::1]') {
-    const address = hostname.startsWith('[') ? hostname.slice(1, -1) : hostname;
-    return { kind: 'loopback', parsed, pinnedAddresses: [{ address, family: address.includes(':') ? 6 : 4 }] };
+  // IP-literal loopback: any 127.0.0.0/8 address or IPv6 ::1 literal.
+  const cleanHost = (hostname.startsWith('[') && hostname.endsWith(']'))
+    ? hostname.slice(1, -1)
+    : hostname;
+  if (isLoopbackAddress(cleanHost)) {
+    return {
+      kind: 'loopback',
+      parsed,
+      pinnedAddresses: [{ address: cleanHost, family: cleanHost.includes(':') ? 6 : 4 }]
+    };
   }
 
   // The 'localhost' name must resolve and every result must be loopback.
@@ -279,8 +288,13 @@ async function httpJsonRequest(target, { payload, bodyBuffer }, config, { transp
       }, config.responseTimeoutMs);
     };
 
-    req = requester(options, (res) => {
+    const connected = () => {
       clearTimeout(connectTimer);
+      armResponseTimer();
+    };
+
+    req = requester(options, (res) => {
+      connected(); // Idempotent fallback: if headers arrived, socket is definitely connected
       const chunks = [];
       let received = 0;
       res.on('data', (chunk) => {
@@ -306,16 +320,13 @@ async function httpJsonRequest(target, { payload, bodyBuffer }, config, { transp
 
     req.on('socket', (sock) => {
       activeSocket = sock;
-      sock.once('connect', () => {
-        clearTimeout(connectTimer);
-        armResponseTimer();
-      });
-      // HTTPS: TLS handshake completes after TCP connect; both clear the
-      // connect timer, and the response timer is armed on the first event.
-      sock.once('secureConnect', () => {
-        clearTimeout(connectTimer);
-        armResponseTimer();
-      });
+      if (!sock.connecting) {
+        // Reused Keep-Alive socket: already connected, switch immediately to response timer
+        connected();
+      } else {
+        sock.once('connect', connected);
+        sock.once('secureConnect', connected);
+      }
     });
 
     req.on('error', (err) => {
@@ -434,14 +445,20 @@ export async function callTranslationServer({ input, format = null }, {
 } = {}) {
   const deadline = Date.now() + config.totalTimeoutMs;
 
-  const target = await Promise.race([
-    resolveTranslationTarget(config, lookupFn ? { lookupFn } : {}),
-    new Promise((_, reject) => {
-      setTimeout(() => reject(
-        new TranslationError('total_timeout', `translation task exceeded total timeout of ${config.totalTimeoutMs}ms`)
-      ), Math.max(0, deadline - Date.now()));
-    })
-  ]);
+  let targetTimer = null;
+  let target;
+  try {
+    target = await Promise.race([
+      resolveTranslationTarget(config, lookupFn ? { lookupFn } : {}),
+      new Promise((_, reject) => {
+        targetTimer = setTimeout(() => reject(
+          new TranslationError('total_timeout', `translation task exceeded total timeout of ${config.totalTimeoutMs}ms`)
+        ), Math.max(0, deadline - Date.now()));
+      })
+    ]);
+  } finally {
+    clearTimeout(targetTimer);
+  }
   if (target.kind === 'disabled') {
     return { available: false, reason: 'translation_server_not_configured' };
   }

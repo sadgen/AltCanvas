@@ -1,5 +1,7 @@
 import assert from 'assert/strict';
 import http from 'node:http';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import {
   getTranslationServerConfig,
   resolveTranslationTarget,
@@ -10,6 +12,8 @@ import {
   TranslationError
 } from '../server/translation-server.mjs';
 import { normalizeNativeImportItem } from '../server/canvas-api.mjs';
+
+const execFileAsync = promisify(execFile);
 
 console.log('🧪 Running M3.1 Translation Server adapter tests...');
 
@@ -616,6 +620,107 @@ console.log('✅ DNS resolution + pinning (allowPrivate, zero-address, localhost
   );
 }
 console.log('✅ Collection caps and serialized request-size gate passed');
+
+// --- 17. Keep-Alive socket reuse test (P1 fix) ---
+// When consecutive requests reuse an already-connected Keep-Alive socket,
+// the socket is NOT connecting. It must clear connectTimer immediately,
+// switch to the response timer, and succeed when the server delays for 250ms
+// (even though connectTimeout=80ms < server delay=250ms < responseTimeout=600ms).
+{
+  let requestCount = 0;
+  let socketCount = 0;
+  const { server, port } = await startServer((req, res) => {
+    requestCount++;
+    const isSecond = requestCount > 1;
+    req.resume();
+    req.on('end', async () => {
+      // Second request on the reused socket: 250ms delayed reply
+      if (isSecond) {
+        await sleep(250);
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(validPayload));
+    });
+  });
+  server.on('connection', () => { socketCount++; });
+
+  try {
+    const config = {
+      ...getTranslationServerConfig({}),
+      url: `http://127.0.0.1:${port}/parse`,
+      connectTimeoutMs: 80,
+      responseTimeoutMs: 600,
+      totalTimeoutMs: 5000
+    };
+
+    // Request 1: creates connection
+    const call1 = await callTranslationServer({ input: 'TY - JOUR' }, { config });
+    assert.equal(call1.ok, true, 'First request must succeed');
+
+    // Request 2: reuses existing Keep-Alive socket
+    const start2 = Date.now();
+    const call2 = await callTranslationServer({ input: 'TY - JOUR' }, { config });
+    const elapsed2 = Date.now() - start2;
+
+    assert.equal(call2.ok, true, 'Second request on reused Keep-Alive socket must succeed');
+    assert.equal(call2.item.title, validPayload.title);
+    assert.equal(socketCount, 1, 'Both requests must share the single Keep-Alive socket');
+    assert.ok(elapsed2 >= 200, `Elapsed time must reflect server delay (~250ms), got ${elapsed2}ms`);
+  } finally {
+    await closeServer(server);
+  }
+}
+console.log('✅ Keep-Alive socket reuse with connectTimeout < serverDelay < responseTimeout passed');
+
+// --- 18. DNS / target resolution total deadline timer cleanup (P2 fix) ---
+// The targetTimer in callTranslationServer must be cleared in finally;
+// a quick call with a large totalTimeoutMs must NOT leave a dangling timer
+// that prevents the process from exiting immediately.
+{
+  const childScript = `
+    import { callTranslationServer, getTranslationServerConfig } from './server/translation-server.mjs';
+    const start = Date.now();
+    await callTranslationServer(
+      { input: 'TY - JOUR' },
+      {
+        config: { ...getTranslationServerConfig({}), url: 'http://127.0.0.1:1969/parse', totalTimeoutMs: 4000 },
+        transportFn: async () => ({
+          status: 200,
+          headers: {},
+          body: JSON.stringify({ ok: true, sourceType: 'ris', title: 'Quick Exit' })
+        })
+      }
+    );
+    // When targetTimer is properly cleared in finally, this process exits immediately
+    // rather than waiting 4000ms for totalTimeoutMs to elapse.
+  `;
+  const t0 = Date.now();
+  await execFileAsync(process.execPath, ['--input-type=module', '-e', childScript], {
+    timeout: 3000
+  });
+  const elapsed = Date.now() - t0;
+  assert.ok(elapsed < 1500, `Child process must exit immediately (<1500ms), took ${elapsed}ms (targetTimer was not cleared)`);
+}
+console.log('✅ Target resolution timer cleanup on immediate success passed');
+
+// --- 19. 127.0.0.0/8 literal loopback detection (P2 fix) ---
+// Any 127.0.0.0/8 IP literal is recognized as loopback without needing ALLOW_REMOTE_TRANSLATION_SERVER
+{
+  assert.equal(isLoopbackHost('127.0.0.2'), true);
+  assert.equal(isLoopbackHost('127.100.200.1'), true);
+  assert.equal(isLoopbackHost('127.255.255.254'), true);
+  assert.equal(isLoopbackHost('10.0.0.1'), false);
+  assert.equal(isLoopbackHost('192.168.1.1'), false);
+
+  const t127_2 = await resolveTranslationTarget({ url: 'http://127.0.0.2:1969/parse', allowRemote: false });
+  assert.equal(t127_2.kind, 'loopback');
+  assert.equal(t127_2.pinnedAddresses[0].address, '127.0.0.2');
+
+  const t127_custom = await resolveTranslationTarget({ url: 'http://127.250.1.2:1969/parse', allowRemote: false });
+  assert.equal(t127_custom.kind, 'loopback');
+  assert.equal(t127_custom.pinnedAddresses[0].address, '127.250.1.2');
+}
+console.log('✅ 127.0.0.0/8 literal loopback recognition passed');
 
 restoreEnv();
 console.log('🎉 All M3.1 Translation Server adapter tests passed');

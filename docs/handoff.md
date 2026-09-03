@@ -808,7 +808,9 @@
 | M1 原生 PDF 基础单文献闭环 | **PASS (完成)** | 独立 local 认证、原生流式上传、去重、Range 文件流服务、Reader 批注持久化、全文理解与证据转批注 |
 | M1.5 Native Core Integration | **PASS (关闭)** | 主线与 Native 核心全量合流，Schema v12 双谱系幂等迁移，Native 确立为默认核心，Altero 降级为可选 Provider |
 | M2 统一导入管线 | **PASS (完成)** | 规范化多源导入（DOI/arXiv/URL/PDF/RIS/BibTeX/批量）、优先级去重链、模糊防静默合并、import_jobs 逐项报告与 Native 写入 |
-| M3 Translation Server 集成 | `就绪 (待启动)` | 下一阶段目标：内部解析组件集成与 SSRF 安全隔离 |
+| M3.0 登录后应用初始化修复 | **PASS (关闭)** | 消除页面刷新依赖，统一 initializeAuthenticatedApp 入口与并发锁，全面清除遗留 OIDC 文案 |
+| M3.1 Translation Server 安全适配层 | **PASS (关闭)** | 仅服务端配置、loopback/unix/SSRF 远程门控、无重定向、全链路三层超时生命周期、Keep-Alive 连接复用、双向 DNS 固定、集合上限与纯解析 DTO |
+| M3.2 统一解析与导入工作流 | `就绪 (待启动)` | 下一阶段目标：前端与 API 对接 Translation Server 解析，复用 M2 导入执行器与去重链 |
 | M4 Altero/Zotero 外部迁移器 | `PENDING` | 幂等一次性迁移 |
 | M5 AltCanvas Capture 浏览器扩展 | `PENDING` | 独立扩展仓库 |
 | M6 默认解除 Altero 依赖 | `PENDING` | 默认部署全面切换为 Native |
@@ -908,6 +910,28 @@
 - 运行守护：`systemctl --user` 单元 `altcanvas.service` 独占管理（`Restart=always, RestartSec=3`），重复拉起源已根治；
 - 审计登记的非阻断 P2 技术债同日收紧：`resolved.arXivId` 大小写旁路封堵（两种拼写均纳入长度契约）；`externalRefs` 全字段规范化（`externalAttachmentId` ≤256 字符串、`externalVersion` 非负整数、`sourceUrl` ≤2000 且必须 http(s)，未知键丢弃并输出规范化对象）；新增 5 类非法载荷 400 测试与全字段正向前置持久化断言；
 - **M2 统一 Native 导入管线：PASS（关闭）**。下一阶段：M3 Translation Server 集成。
+
+## 2026-09-03 会话（M3.1 终审整改：Keep-Alive 连接复用、目标解析计时器清理与回环字面量统一）
+
+### 修复清单
+
+1. **[P1] Keep-Alive 跨请求连接复用超时修复** ([`server/translation-server.mjs`](file:///home/sadgen/Projects/AltCanvas/server/translation-server.mjs))：
+   - 根因：`req.on('socket', sock)` 在复用已有 Keep-Alive socket 时，`sock.connecting === false`，不会再次触发 `connect`/`secureConnect` 事件，导致 `connectTimer` 持续存活而在服务端延迟大于 `connectTimeoutMs` 时错误触发 `connect_timeout`；
+   - 修复：在 `req.on('socket')` 中检测 `!sock.connecting`，已连接 socket 立即触发 `connected()`（清除连接计时器并武装响应计时器）；并在响应头回调中幂等调用 `connected()` 兜底；
+   - 真实测试：连续发送两个请求至同一服务器，验证第二个请求复用同一 socket，在 `connectTimeout=80ms` < `server delay=250ms` < `responseTimeout=600ms` 下成功完成（耗时 ~250ms）。
+
+2. **[P2] 目标解析 Promise.race 遗留计时器清理**：
+   - 根因：`resolveTranslationTarget` 的超时 Promise 创建了 `setTimeout` 但未在成功后清除，导致即时成功的进程仍被挂起等待默认 60s/自定义超时期满；
+   - 修复：在 `try...finally` 中显式 `clearTimeout(targetTimer)`；
+   - 行为测试：子进程以 `totalTimeoutMs=4000` 执行即时成功的调用，断言子进程在 <1500ms 内立即退出，证明无悬挂定时器。
+
+3. **[P2] 127.0.0.0/8 回环字面量判定统一**：
+   - 字面量快速路径支持全部 127.0.0.0/8（如 `127.0.0.2`, `127.250.1.2`）与 `::1`，与 `isLoopbackAddress` 语义完全对齐；
+   - 增加 `127.0.0.2` 等字面量无需 `ALLOW_REMOTE_TRANSLATION_SERVER` 的直接 loopback 测试。
+
+4. **里程碑状态更新**：**M3.1 Translation Server 安全适配层：PASS（关闭）**。
+
+---
 
 ## 2026-09-03 会话（M3.1 审计整改：真实超时语义与 DNS 固定修复）
 
