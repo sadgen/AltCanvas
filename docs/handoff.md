@@ -898,6 +898,16 @@
 2. 点击卡片上的 **[🔍 核验]** 打开证据浮层，确认标题/页码/摘录正常、无 console 报错；
 3. 回复"完成"后由 Agent 复查 `.debug/browser.log` 确认无 `getCachedDocumentMeta` 新错误。
 
+**验收结果（2026-09-03 00:14 UTC 用户完成操作）**：`.debug/browser.log` 该会话仅产生 diagnostics 连接记录、零新增错误；全部 `getCachedDocumentMeta` 报错停留在修复前（2026-09-02T09:25）。证据浮层实机验收 **PASS**。
+
+---
+
+## 2026-09-03 会话（M2 最终关闭）
+
+- 证据浮层人工验收 PASS（见上），M2 全部审计轮次的 P1/P2 均已闭环并附测试；
+- 运行守护：`systemctl --user` 单元 `altcanvas.service` 独占管理（`Restart=always, RestartSec=3`），重复拉起源已根治；
+- **M2 统一 Native 导入管线：PASS（关闭）**。下一阶段：M3 Translation Server 集成。
+
 ---
 
 ## 2026-09-02 会话（P1 Native Library Routing & Capability Isolation 修复）
