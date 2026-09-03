@@ -4950,6 +4950,373 @@ export class CanvasStore {
     return this.getAttachment(actorKey, attachmentId);
   }
 
+  // Library identity holder for a content hash: the single active source file
+  // row that is enrolled with a document. Used by imports for duplicate rules.
+  findEnrolledSourceFileBySha(actorKey, sha256) {
+    if (!sha256) return null;
+    const row = this.db.prepare(`
+      SELECT sf.* FROM source_files sf
+      JOIN documents d ON d.id = sf.document_id AND d.deleted_at IS NULL
+      WHERE sf.owner_key = ? AND sf.sha256 = ? AND sf.status = 'active'
+        AND sf.document_id IS NOT NULL AND sf.deleted_at IS NULL
+      ORDER BY sf.created_at ASC LIMIT 1
+    `).get(actorKey, sha256);
+    return sourceFileRow(row);
+  }
+
+  // Version-guarded mutation used by file operations after a filesystem
+  // mutation: a lost race (412) lets the caller trigger compensation.
+  updateSourceFileGuarded(actorKey, sourceFileId, expectedVersion, changes = {}) {
+    const current = this.requireSourceFile(actorKey, sourceFileId);
+    if (current.version !== expectedVersion) {
+      throw new CanvasConflictError('source file version conflict');
+    }
+    return this.updateSourceFile(actorKey, sourceFileId, changes);
+  }
+
+  // Frees a target path when the occupying row is stale (its file is absent
+  // from disk). The stale row is soft-deleted with bookkeeping; this never
+  // touches a live file. Called inside import/move transactions.
+  releaseSourceFilePath(actorKey, rootId, relativePath, reason) {
+    const row = this.getSourceFileByPath(actorKey, rootId, relativePath);
+    if (!row) return false;
+    if (row.status === 'active' || row.status === 'duplicate') {
+      const onDisk = fs.existsSync(resolveInsideRoot(
+        this.getLibraryRoot(actorKey, row.rootId)?.absolutePath || '', relativePath
+      ));
+      if (onDisk) {
+        throw new CanvasConflictError('target path is occupied by a live source file');
+      }
+    }
+    const timestamp = nowIso();
+    this.db.prepare(`
+      UPDATE source_files SET deleted_at = ?, updated_at = ?, version = version + 1
+      WHERE id = ? AND owner_key = ? AND deleted_at IS NULL
+    `).run(timestamp, timestamp, row.id, actorKey);
+    return true;
+  }
+
+  // 加入文库: creates a library identity (document + source_file attachment)
+  // for an unenrolled on-disk file. Content must not already be enrolled.
+  enrollExistingSourceFile(actorKey, sourceFileId) {
+    const row = this.requireSourceFile(actorKey, sourceFileId);
+    if (row.status === 'trashed') {
+      throw new CanvasConflictError('trashed files must be restored before enrolling');
+    }
+    if (row.sha256) {
+      const holder = this.findEnrolledSourceFileBySha(actorKey, row.sha256);
+      if (holder && holder.id !== row.id) {
+        return { duplicate: true, document: this.getDocument(actorKey, holder.documentId), sourceFile: holder };
+      }
+    }
+    if (row.documentId) {
+      return { duplicate: false, document: this.getDocument(actorKey, row.documentId), sourceFile: row };
+    }
+    const title = row.filename.replace(/\.pdf$/i, '').trim() || '未命名文献';
+    return this.transaction(() => {
+      const document = this.createDocument(actorKey, { title });
+      const attachment = this.createSourceFileAttachment(actorKey, document.id, {
+        sourceFileId: row.id,
+        originalFilename: row.filename,
+        title,
+        sizeBytes: row.sizeBytes
+      });
+      const updated = this.updateSourceFile(actorKey, row.id, {
+        documentId: document.id,
+        attachmentId: attachment.id,
+        status: 'active'
+      });
+      return { duplicate: false, document: this.getDocument(actorKey, document.id), sourceFile: updated, attachment };
+    });
+  }
+
+  // 从文库移除: unbinds the library identity while leaving the original file
+  // untouched on disk. The document (and its annotations through the
+  // attachment) is soft-deleted; the source file row is detached so future
+  // scans never re-enroll it automatically.
+  unbindDocumentFromLibrary(actorKey, documentId, expectedVersion) {
+    const document = this.requireDocument(actorKey, documentId);
+    if (document.version !== expectedVersion) {
+      throw new CanvasConflictError('document version conflict');
+    }
+    return this.transaction(() => {
+      this.deleteDocument(actorKey, documentId, expectedVersion);
+      const timestamp = nowIso();
+      this.db.prepare(`
+        UPDATE source_files SET document_id = NULL, attachment_id = NULL, updated_at = ?, version = version + 1
+        WHERE owner_key = ? AND document_id = ? AND deleted_at IS NULL
+      `).run(timestamp, actorKey, documentId);
+      return true;
+    });
+  }
+
+  // 永久删除 (trash stage 2): remove the trashed file plus every binding.
+  purgeTrashedSourceFile(actorKey, sourceFileId) {
+    const row = this.requireSourceFile(actorKey, sourceFileId);
+    if (row.status !== 'trashed') {
+      throw new CanvasConflictError('only trashed source files can be permanently deleted');
+    }
+    return this.transaction(() => {
+      if (row.attachmentId) {
+        const timestamp = nowIso();
+        this.db.prepare(`
+          UPDATE attachments SET deleted_at = ?, updated_at = ?, version = version + 1
+          WHERE id = ? AND deleted_at IS NULL
+        `).run(timestamp, timestamp, row.attachmentId);
+      }
+      if (row.documentId) {
+        this.db.prepare('DELETE FROM topic_documents WHERE library_type = ? AND item_key = ?')
+          .run('native', row.documentId);
+        this.db.prepare('UPDATE documents SET deleted_at = ?, updated_at = ?, version = version + 1 WHERE id = ? AND deleted_at IS NULL')
+          .run(nowIso(), nowIso(), row.documentId);
+      }
+      const timestamp = nowIso();
+      this.db.prepare('UPDATE source_files SET deleted_at = ?, updated_at = ?, version = version + 1 WHERE id = ?')
+        .run(timestamp, timestamp, row.id);
+      return true;
+    });
+  }
+
+  // M4 library document list: search/topic/unclassified/fileStatus filters
+  // with enriched topic and source-file information per document.
+  listNativeLibraryDocuments(actorKey, {
+    search = '', topicId = null, unclassified = false, fileStatus = null,
+    limit = 50, offset = 0
+  } = {}) {
+    const params = [actorKey];
+    let havingTopic = '';
+    if (unclassified) {
+      havingTopic = `AND NOT EXISTS (
+        SELECT 1 FROM topic_documents td
+        WHERE td.library_type = 'native' AND td.item_key = d.id AND td.deleted_at IS NULL
+      )`;
+    } else if (topicId) {
+      havingTopic = `AND EXISTS (
+        SELECT 1 FROM topic_documents td
+        WHERE td.library_type = 'native' AND td.item_key = d.id AND td.deleted_at IS NULL AND td.workspace_id = ?
+      )`;
+      params.push(topicId);
+    }
+    let fileFilter = '';
+    if (fileStatus) {
+      fileFilter = `AND EXISTS (
+        SELECT 1 FROM source_files sf
+        WHERE sf.document_id = d.id AND sf.deleted_at IS NULL AND sf.status = ?
+      )`;
+      params.push(fileStatus);
+    }
+    const like = `%${String(search).trim()}%`;
+    const searchClause = String(search).trim()
+      ? 'AND (d.title LIKE ? OR d.abstract LIKE ? OR d.doi LIKE ?)'
+      : '';
+    if (searchClause) params.push(like, like, like);
+
+    const total = this.db.prepare(`
+      SELECT COUNT(*) AS c FROM documents d
+      WHERE d.owner_key = ? AND d.deleted_at IS NULL ${havingTopic} ${fileFilter} ${searchClause}
+    `).get(...params).c;
+
+    params.push(Math.max(0, Math.min(200, limit)), Math.max(0, offset));
+    const rows = this.db.prepare(`
+      SELECT d.* FROM documents d
+      WHERE d.owner_key = ? AND d.deleted_at IS NULL ${havingTopic} ${fileFilter} ${searchClause}
+      ORDER BY d.updated_at DESC LIMIT ? OFFSET ?
+    `).all(...params);
+
+    return { total, documents: rows.map(row => {
+      const doc = documentRow(row);
+      doc.topics = this.db.prepare(`
+        SELECT td.id AS topic_document_id, td.version AS topic_version, w.id AS workspace_id, w.name AS workspace_name
+        FROM topic_documents td JOIN workspaces w ON w.id = td.workspace_id
+        WHERE td.library_type = 'native' AND td.item_key = ? AND td.deleted_at IS NULL AND w.deleted_at IS NULL
+        ORDER BY w.name ASC
+      `).all(row.id);
+      doc.sourceFile = sourceFileRow(this.db.prepare(`
+        SELECT sf.* FROM source_files sf
+        WHERE sf.document_id = ? AND sf.deleted_at IS NULL
+        ORDER BY sf.status = 'active' DESC, sf.created_at ASC LIMIT 1
+      `).get(row.id) || null);
+      return doc;
+    }) };
+  }
+
+  addDocumentTopics(actorKey, documentId, topicIds, { origin = 'manual' } = {}) {
+    this.requireDocument(actorKey, documentId);
+    if (!Array.isArray(topicIds) || topicIds.length === 0 || topicIds.length > 50) {
+      throw new TypeError('topicIds must be an array of 1-50 workspace ids');
+    }
+    const results = [];
+    return this.transaction(() => {
+      for (const workspaceId of topicIds) {
+        results.push(this.addTopicDocument(actorKey, workspaceId, {
+          libraryType: 'native',
+          libraryId: 'local',
+          itemKey: documentId,
+          attachmentKey: null,
+          status: 'accepted',
+          origin
+        }));
+      }
+      return results;
+    });
+  }
+
+  removeDocumentTopic(actorKey, documentId, workspaceId) {
+    const binding = this.db.prepare(`
+      SELECT td.* FROM topic_documents td
+      JOIN documents d ON d.id = td.item_key
+      WHERE td.workspace_id = ? AND td.library_type = 'native' AND td.item_key = ?
+        AND td.deleted_at IS NULL AND d.owner_key = ?
+    `).get(workspaceId, documentId, actorKey);
+    if (!binding) throw new CanvasNotFoundError('topic document binding not found');
+    return this.removeTopicDocument(actorKey, binding.id, binding.version);
+  }
+
+  // M4 import landing: identical identity/dedupe chain to importNativeDocument
+  // (with source-file SHA checked first), but the PDF lives in a library root
+  // directory instead of the managed blob store.
+  importNativeDocumentToSourceFile(actorKey, {
+    sourceType,
+    title,
+    abstract = '',
+    creators = [],
+    year = null,
+    doi = null,
+    url = null,
+    isbn = null,
+    arxivId = null,
+    externalRefs = [],
+    rootId,
+    relativePath,
+    filename,
+    sha256,
+    sizeBytes,
+    modifiedAt = null,
+    topicIds = [],
+    forceNew = false,
+    confirmFuzzy = false
+  }) {
+    if (!title || typeof title !== 'string' || !title.trim()) {
+      throw new TypeError('title is required');
+    }
+    if (topicIds.length > 50) throw new TypeError('at most 50 topics per import');
+
+    // Content identity: the same SHA-256 never joins the library twice.
+    const holder = this.findEnrolledSourceFileBySha(actorKey, sha256);
+    if (holder && !forceNew) {
+      return {
+        outcome: 'duplicate_content',
+        match: { strategy: 'sha256', documentId: holder.documentId },
+        document: this.getDocument(actorKey, holder.documentId),
+        sourceFile: holder
+      };
+    }
+
+    const decision = this._decideNativeImportMatch(actorKey, {
+      title, year, doi, isbn, arxivId, attachment: null, externalRefs, forceNew, confirmFuzzy
+    });
+    if (decision.outcome !== 'writable') {
+      return decision;
+    }
+    const { matched } = decision;
+    const { normalizedDoi, normalizedIsbn, normalizedArxivId } = decision.normalized;
+
+    const refsToWrite = [];
+    if (normalizedDoi) refsToWrite.push({ provider: 'doi', externalItemId: normalizedDoi, sourceUrl: url || null });
+    if (normalizedArxivId) refsToWrite.push({ provider: 'arxiv', externalItemId: normalizedArxivId, sourceUrl: url || null });
+    for (const ref of externalRefs) {
+      if (ref?.provider && ref?.externalItemId) {
+        refsToWrite.push({
+          provider: String(ref.provider),
+          externalItemId: String(ref.externalItemId),
+          externalLibraryId: ref.externalLibraryId || null,
+          externalAttachmentId: ref.externalAttachmentId || null,
+          externalVersion: ref.externalVersion || null,
+          sourceUrl: ref.sourceUrl || null
+        });
+      }
+    }
+    const creatorsInput = (Array.isArray(creators) ? creators : []).map(c => ({
+      creatorType: c.creatorType || 'author',
+      firstName: c.firstName || '',
+      lastName: c.lastName || '',
+      name: c.name || ''
+    }));
+
+    return this.transaction(() => {
+      let document;
+      if (matched) {
+        document = matched.document;
+        const updates = {};
+        if (normalizedDoi && !document.doi) updates.doi = normalizedDoi;
+        if (normalizedIsbn && !document.isbn) updates.isbn = normalizedIsbn;
+        if (url && !document.url) updates.url = url;
+        if (abstract && !document.abstract) updates.abstract = abstract;
+        if (year && !document.year) updates.year = Number(year);
+        if (creatorsInput.length && !document.creators.length) updates.creators = creatorsInput;
+        if (Object.keys(updates).length) {
+          document = this.updateDocument(actorKey, document.id, undefined, updates);
+        }
+      } else {
+        document = this.createDocument(actorKey, {
+          title: title.trim(),
+          abstract: abstract || '',
+          year: year ? Number(year) : null,
+          doi: normalizedDoi,
+          isbn: normalizedIsbn,
+          url: url || null,
+          creators: creatorsInput
+        });
+      }
+      for (const ref of refsToWrite) {
+        const existingRef = this.getExternalRef(actorKey, ref.provider, ref.externalItemId, ref.externalLibraryId || null);
+        if (!existingRef) this.createExternalRef(actorKey, document.id, ref);
+      }
+
+      // Take over a stale DB row at the target path (its file is absent).
+      this.releaseSourceFilePath(actorKey, rootId, relativePath, 'import_takeover');
+
+      const sourceFile = this.createSourceFile(actorKey, rootId, {
+        relativePath,
+        filename,
+        sha256,
+        sizeBytes,
+        modifiedAt,
+        status: 'active',
+        documentId: document.id,
+        lastSeenAt: nowIso()
+      });
+      const attachment = this.createSourceFileAttachment(actorKey, document.id, {
+        sourceFileId: sourceFile.id,
+        originalFilename: filename,
+        title: title.trim(),
+        sizeBytes
+      });
+      this.updateSourceFile(actorKey, sourceFile.id, { attachmentId: attachment.id });
+
+      const topicDocuments = [];
+      for (const workspaceId of topicIds) {
+        topicDocuments.push(this.addTopicDocument(actorKey, workspaceId, {
+          libraryType: 'native',
+          libraryId: 'local',
+          itemKey: document.id,
+          attachmentKey: attachment.id,
+          status: 'accepted',
+          origin: 'canvas_import'
+        }));
+      }
+
+      return {
+        outcome: matched ? 'reused' : 'created',
+        match: matched ? { strategy: matched.strategy, documentId: matched.document.id } : null,
+        document: this.getDocument(actorKey, document.id),
+        sourceFile: this.getSourceFile(actorKey, sourceFile.id),
+        attachment,
+        topicDocuments
+      };
+    });
+  }
+
   // --- File operations (persistent operation log with crash compensation) ---
 
   createFileOperation(actorKey, { operationType, sourceFileId = null, sourcePath = null, targetPath = null, payload = {} }) {

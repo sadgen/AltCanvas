@@ -758,10 +758,291 @@ async function testM4Scanner() {
   }
 }
 
+// ============================================================
+// 12. M4 file operations: import landing, rename, move, trash
+// ============================================================
+async function testM4FileOps() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-ops-store-'));
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-ops-root-'));
+  const store = new CanvasStore(path.join(tempDir, 'canvas.sqlite'));
+  const actor = canvasActorKey('local', 'm4-ops');
+  const session = createSession({
+    userId: 'm4-ops-1', subject: 'm4-ops', authMode: 'local',
+    username: 'ops', role: 'admin', actorKey: actor
+  });
+  const cookie = `altcanvas_session=${session.id}`;
+
+  const pdfByUrl = new Map();
+  let downloadCounter = 0;
+  const fakeDownloadPdf = async (pdfUrl, tempDir) => {
+    const bytes = pdfByUrl.get(pdfUrl);
+    if (!bytes) {
+      const err = new Error('not found');
+      err.status = 404;
+      throw err;
+    }
+    downloadCounter += 1;
+    fs.mkdirSync(tempDir, { recursive: true, mode: 0o700 });
+    const tempFilePath = path.join(tempDir, `dl-${downloadCounter}-${Math.random().toString(36).slice(2, 8)}.pdf`);
+    fs.writeFileSync(tempFilePath, bytes);
+    return { tempFilePath, sha256: sha256Of(bytes), sizeBytes: bytes.length };
+  };
+
+  const handler = createCanvasHandler(store, { downloadPdfFn: fakeDownloadPdf });
+
+  try {
+    const [root] = store.ensureLibraryRootsFromConfig(actor, [{ absolutePath: rootDir, displayName: '操作文库' }]);
+    const workspace = store.createWorkspace(actor, { name: '操作主题' });
+
+    const importPayload = (overrides = {}) => ({
+      title: '观测宇宙学综述',
+      year: 2024,
+      pdfUrl: 'http://pdf-source.test/cosmo.pdf',
+      rootId: root.id,
+      targetDir: '',
+      topicIds: [workspace.id],
+      ...overrides
+    });
+
+    // --- 12.1 Import places the PDF into the real directory and binds topics.
+    pdfByUrl.set('http://pdf-source.test/cosmo.pdf', makePdfBytes('cosmology-survey'));
+    let res = await call(handler, '/canvas/native/source-files/import', {
+      method: 'POST', cookie, body: importPayload({ targetDir: '观察', filename: 'cosmo.pdf' })
+    });
+    assert.equal(res.statusCode, 201, res.text + ' | payload=' + JSON.stringify(res.payload));
+    let data = res.payload.data;
+    assert.equal(data.outcome, 'created');
+    const sourceFileId = data.sourceFile.id;
+    const documentId = data.document.id;
+    assert.equal(fs.existsSync(path.join(rootDir, '观察', 'cosmo.pdf')), true);
+    assert.equal(data.sourceFile.relativePath, '观察/cosmo.pdf');
+    assert.equal(data.topicDocuments.length, 1);
+    assert.equal(data.attachment.storageKind, 'source_file');
+
+    // Reader can read the imported file through the unified endpoint.
+    const fileRes = await call(handler, `/canvas/native/attachments/${data.attachment.id}/file`, { cookie });
+    assert.equal(fileRes.statusCode, 200);
+    assert.equal(fileRes.buffer.equals(makePdfBytes('cosmology-survey')), true);
+
+    // The import operation is journaled as completed.
+    const ops = store.db.prepare("SELECT * FROM file_operations WHERE operation_type = 'file.import'").all();
+    assert.equal(ops.length, 1);
+    assert.equal(ops[0].state, 'completed');
+
+    // --- 12.2 Same content import: duplicate_content, no second file/document.
+    res = await call(handler, '/canvas/native/source-files/import', {
+      method: 'POST', cookie, body: importPayload({ targetDir: '其他', filename: 'again.pdf' })
+    });
+    assert.equal(res.statusCode, 409);
+    assert.equal(res.payload.error.code, 'duplicate_content');
+    assert.equal(res.payload.data.document.id, documentId);
+    assert.equal(fs.existsSync(path.join(rootDir, '其他')), false, 'no copy must be created');
+
+    // --- 12.3 Target occupied by a different file: filename_conflict, no overwrite.
+    pdfByUrl.set('http://pdf-source.test/other.pdf', makePdfBytes('different-treatise'));
+    fs.mkdirSync(path.join(rootDir, '冲突'));
+    fs.writeFileSync(path.join(rootDir, '冲突', 'cosmo.pdf'), makePdfBytes('something-else'));
+    res = await call(handler, '/canvas/native/source-files/import', {
+      method: 'POST', cookie, body: importPayload({
+        title: '另一篇完全不同的文献', pdfUrl: 'http://pdf-source.test/other.pdf',
+        targetDir: '冲突', filename: 'cosmo.pdf'
+      })
+    });
+    assert.equal(res.statusCode, 409);
+    assert.equal(res.payload.error.code, 'filename_conflict');
+    assert.equal(fs.readFileSync(path.join(rootDir, '冲突', 'cosmo.pdf')).toString().includes('something-else'), true,
+      'existing file must never be overwritten');
+
+    // Retrying with a fresh original filename succeeds.
+    res = await call(handler, '/canvas/native/source-files/import', {
+      method: 'POST', cookie, body: importPayload({
+        title: '另一篇完全不同的文献', pdfUrl: 'http://pdf-source.test/other.pdf',
+        targetDir: '冲突', filename: 'cosmo-renamed.pdf'
+      })
+    });
+    assert.equal(res.statusCode, 201, res.text);
+
+    // --- 12.4 Rename: works, keeps the library filename, never auto-appends (2).
+    const rowBefore = store.getSourceFile(actor, sourceFileId);
+    const docTitleBefore = store.getDocument(actor, documentId).title;
+    res = await call(handler, `/canvas/native/source-files/${sourceFileId}/rename`, {
+      method: 'POST', cookie, headers: { 'if-match': `W/"${rowBefore.version}"` },
+      body: { filename: '宇宙学观测.pdf' }
+    });
+    assert.equal(res.statusCode, 200, res.text);
+    assert.equal(res.payload.data.relativePath, '观察/宇宙学观测.pdf');
+    assert.equal(fs.existsSync(path.join(rootDir, '观察', '宇宙学观测.pdf')), true);
+    assert.equal(fs.existsSync(path.join(rootDir, '观察', 'cosmo.pdf')), false);
+    assert.equal(store.getDocument(actor, documentId).title, docTitleBefore,
+      'renaming the original file must not touch the library filename');
+
+    // If-Match enforcement: missing -> 428, stale -> 412 with no disk change.
+    res = await call(handler, `/canvas/native/source-files/${sourceFileId}/rename`, {
+      method: 'POST', cookie, body: { filename: 'x.pdf' }
+    });
+    assert.equal(res.statusCode, 428);
+    res = await call(handler, `/canvas/native/source-files/${sourceFileId}/rename`, {
+      method: 'POST', cookie, headers: { 'if-match': 'W/"1"' }, body: { filename: 'x.pdf' }
+    });
+    assert.equal(res.statusCode, 412);
+    assert.equal(fs.existsSync(path.join(rootDir, '观察', '宇宙学观测.pdf')), true);
+
+    // Rename onto a different-content file: filename_conflict, disk untouched.
+    fs.writeFileSync(path.join(rootDir, '观察', '占位.pdf'), makePdfBytes('placeholder'));
+    const currentRow = store.getSourceFile(actor, sourceFileId);
+    res = await call(handler, `/canvas/native/source-files/${sourceFileId}/rename`, {
+      method: 'POST', cookie, headers: { 'if-match': `W/"${currentRow.version}"` },
+      body: { filename: '占位.pdf' }
+    });
+    assert.equal(res.statusCode, 409);
+    assert.equal(res.payload.error.code, 'filename_conflict');
+    assert.equal(fs.existsSync(path.join(rootDir, '观察', '宇宙学观测.pdf')), true, 'source must stay put on conflict');
+
+    // Path traversal and non-pdf names are rejected.
+    res = await call(handler, `/canvas/native/source-files/${sourceFileId}/rename`, {
+      method: 'POST', cookie, headers: { 'if-match': `W/"${store.getSourceFile(actor, sourceFileId).version}"` },
+      body: { filename: '../escape.pdf' }
+    });
+    assert.equal(res.statusCode, 400);
+    res = await call(handler, `/canvas/native/source-files/${sourceFileId}/rename`, {
+      method: 'POST', cookie, headers: { 'if-match': `W/"${store.getSourceFile(actor, sourceFileId).version}"` },
+      body: { filename: 'notes.txt' }
+    });
+    assert.equal(res.statusCode, 400);
+
+    // --- 12.5 Move: default keeps the filename; document/topic/annotations follow.
+    const ann = store.createAnnotation(actor, data.attachment.id, {
+      pageLabel: '1', position: { x: 1, y: 2 }, quote: '关键证据', comment: '', color: '#ffd400', sortIndex: 0
+    });
+    res = await call(handler, `/canvas/native/source-files/${sourceFileId}/move`, {
+      method: 'POST', cookie, headers: { 'if-match': `W/"${store.getSourceFile(actor, sourceFileId).version}"` },
+      body: { targetDir: '归档/2024' }
+    });
+    assert.equal(res.statusCode, 200, res.text + ' | ' + JSON.stringify(res.payload));
+    assert.equal(res.payload.data.relativePath, '归档/2024/宇宙学观测.pdf');
+    assert.equal(fs.existsSync(path.join(rootDir, '归档', '2024', '宇宙学观测.pdf')), true);
+    assert.equal(fs.existsSync(path.join(rootDir, '观察', '宇宙学观测.pdf')), false);
+    assert.equal(store.listAnnotations(actor, data.attachment.id).some(a => a.id === ann.id), true,
+      'annotations must survive the move');
+
+    // Move onto occupied target: conflict, no mutation.
+    fs.mkdirSync(path.join(rootDir, 'occupied'), { recursive: true });
+    fs.writeFileSync(path.join(rootDir, 'occupied', '宇宙学观测.pdf'), makePdfBytes('other-content'));
+    res = await call(handler, `/canvas/native/source-files/${sourceFileId}/move`, {
+      method: 'POST', cookie, headers: { 'if-match': `W/"${store.getSourceFile(actor, sourceFileId).version}"` },
+      body: { targetDir: 'occupied' }
+    });
+    assert.equal(res.statusCode, 409);
+    assert.equal(res.payload.error.code, 'filename_conflict');
+
+    // --- 12.6 Library filename (title) edit does not touch the disk file.
+    const doc = store.getDocument(actor, documentId);
+    res = await call(handler, `/canvas/native/documents/${documentId}`, {
+      method: 'PATCH', cookie, headers: { 'if-match': `W/"${doc.version}"` },
+      body: { title: '文库文件名：观测宇宙学（新）' }
+    });
+    assert.equal(res.statusCode, 200);
+    assert.equal(store.getDocument(actor, documentId).title, '文库文件名：观测宇宙学（新）');
+    assert.equal(fs.existsSync(path.join(rootDir, '归档', '2024', '宇宙学观测.pdf')), true,
+      'library rename must never touch the disk file');
+
+    // --- 12.7 Documents list: topics, unclassified, search.
+    res = await call(handler, `/canvas/native/documents?topicId=${workspace.id}`, { cookie });
+    assert.equal(res.payload.data.length, 2, 'both imports are bound to the topic');
+    const secondDocId = res.payload.data.find(d => d.id !== documentId)?.id;
+    res = await call(handler, '/canvas/native/documents?unclassified=true', { cookie });
+    assert.equal(res.payload.data.length, 0);
+
+    res = await call(handler, `/canvas/native/documents/${secondDocId}/topics/${workspace.id}`, {
+      method: 'DELETE', cookie, headers: { 'if-match': 'W/"1"' }
+    });
+    assert.equal(res.statusCode, 204);
+    res = await call(handler, '/canvas/native/documents?unclassified=true', { cookie });
+    assert.equal(res.payload.data.length, 1, 'the detached document appears under 未分类');
+
+    // batch-topics
+    res = await call(handler, '/canvas/native/documents/batch-topics', {
+      method: 'POST', cookie, body: { documentIds: [secondDocId], topicIds: [workspace.id] }
+    });
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.payload.data[0].ok, true);
+
+    // --- 12.8 Trash + restore preserves path, library name, topics, annotations.
+    const beforeTrash = store.getSourceFile(actor, sourceFileId);
+    res = await call(handler, `/canvas/native/source-files/${sourceFileId}`, {
+      method: 'DELETE', cookie, headers: { 'if-match': `W/"${beforeTrash.version}"` }
+    });
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.payload.data.status, 'trashed');
+    assert.equal(fs.existsSync(path.join(rootDir, '.altcanvas-trash', `${sourceFileId}.pdf`)), true);
+    assert.equal(fs.existsSync(path.join(rootDir, '归档', '2024', '宇宙学观测.pdf')), false);
+
+    const trashedRow = store.getSourceFile(actor, sourceFileId);
+    res = await call(handler, `/canvas/native/source-files/${sourceFileId}/restore`, {
+      method: 'POST', cookie, headers: { 'if-match': `W/"${trashedRow.version}"` }
+    });
+    assert.equal(res.statusCode, 200, res.text);
+    assert.equal(res.payload.data.status, 'active');
+    assert.equal(res.payload.data.relativePath, '归档/2024/宇宙学观测.pdf');
+    assert.equal(store.listAnnotations(actor, data.attachment.id).some(a => a.id === ann.id), true,
+      'annotations must survive trash/restore');
+    const topicsAfterRestore = store.listNativeLibraryDocuments(actor, { topicId: workspace.id }).documents
+      .find(d => d.id === documentId);
+    assert.ok(topicsAfterRestore, 'document stays bound to its topic across trash/restore');
+
+    // --- 12.9 从文库移除 keeps the file, detaches the identity; re-enroll works.
+    const docNow = store.getDocument(actor, documentId);
+    res = await call(handler, `/canvas/native/documents/${documentId}`, {
+      method: 'DELETE', cookie, headers: { 'if-match': `W/"${docNow.version}"` }
+    });
+    assert.equal(res.statusCode, 204);
+    assert.equal(fs.existsSync(path.join(rootDir, '归档', '2024', '宇宙学观测.pdf')), true,
+      'removing from the library must not delete the original file');
+    const detachedRow = store.getSourceFile(actor, sourceFileId);
+    assert.equal(detachedRow.documentId, null, 'scanner must not auto re-enroll unbound rows');
+    res = await call(handler, `/canvas/native/source-files/${sourceFileId}/enroll`, { method: 'POST', cookie });
+    assert.equal(res.statusCode, 201, res.text);
+    const newDocId = res.payload.data.document.id;
+    assert.notEqual(newDocId, documentId, 're-enrolling creates a fresh library identity');
+
+    // --- 12.10 Permanent delete purges file and bindings.
+    res = await call(handler, `/canvas/native/source-files/${sourceFileId}`, {
+      method: 'DELETE', cookie, headers: { 'if-match': `W/"${store.getSourceFile(actor, sourceFileId).version}"` }
+    });
+    assert.equal(res.statusCode, 200);
+    const trashedAgain = store.getSourceFile(actor, sourceFileId);
+    res = await call(handler, `/canvas/native/source-files/${sourceFileId}/permanent`, {
+      method: 'DELETE', cookie, headers: { 'if-match': `W/"${trashedAgain.version}"` }
+    });
+    assert.equal(res.statusCode, 200);
+    assert.equal(fs.existsSync(path.join(rootDir, '.altcanvas-trash', `${sourceFileId}.pdf`)), false);
+    assert.equal(store.getSourceFile(actor, sourceFileId), null);
+    assert.equal(store.getDocument(actor, newDocId), null, 'the document of a permanently deleted file is gone');
+
+    // --- 12.11 A scan after all operations stays idempotent.
+    const scanRes = await call(handler, `/canvas/native/library-roots/${root.id}/scan`, { method: 'POST', cookie });
+    assert.equal(scanRes.statusCode, 202);
+    const report = scanRes.payload.data.report;
+    // Three test fixtures were placed on disk but never enrolled (conflict
+    // placeholders); the permanently deleted file is gone and nothing else
+    // changes identity.
+    assert.equal(report.newDocuments, 3);
+    assert.equal(report.duplicates, 0);
+    assert.equal(report.missing, 0);
+
+    console.log('✅ M4 file operations: import landing, conflicts, rename, move, trash/restore, unbind, purge passed');
+  } finally {
+    try { store.close(); } catch {}
+    fs.rmSync(tempDir, { recursive: true, force: true });
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+}
+
 try {
   await main();
   await testV12Migration();
   await testM4Scanner();
+  await testM4FileOps();
   process.exit(0);
 } catch (err) {
   console.error('❌ Native M4 test failure:', err);

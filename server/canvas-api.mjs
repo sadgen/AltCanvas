@@ -18,8 +18,18 @@ import {
 import { getSession, getSessionIdFromRequest } from './session.mjs';
 import { getAiPublicConfig, requestAiCompletion, validateAiEndpoint } from './ai-provider.mjs';
 import { resolveImportInput, findDuplicateCandidates, safeDownloadPdfFile } from './import-resolver.mjs';
-import { NativePathError, openFileInsideRoot, normalizeRelativePath, listDirectoryLevel } from './native-fs.mjs';
+import { NativePathError, openFileInsideRoot, normalizeRelativePath, normalizeFilename, listDirectoryLevel } from './native-fs.mjs';
 import { scanLibraryRoot, LibraryScanError } from './library-scanner.mjs';
+import {
+  FileOpError,
+  probeTargetPath,
+  placeFileIntoRoot,
+  renameSourceFile,
+  moveSourceFile,
+  trashSourceFile,
+  restoreSourceFile,
+  deleteSourceFilePermanent
+} from './native-file-ops.mjs';
 
 // M4: server-configured library roots. Format: JSON array
 // [{"path": "/data/library", "name": "研究文库"}] or a semicolon separated
@@ -1537,7 +1547,8 @@ async function executeNativeImportItem(store, actorKey, normalized, {
   downloadPdfFn,
   promoteBlobFn = defaultPromoteBlob,
   fallbackTargetWorkspaceId = null,
-  translationServerFn = null
+  translationServerFn = null,
+  fileTarget = null
 }) {
   let resolved = normalized.resolved;
   if (!resolved && normalized.input) {
@@ -1623,6 +1634,37 @@ async function executeNativeImportItem(store, actorKey, normalized, {
     try { if (tempFilePath && fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath); } catch {}
   };
 
+  // Phase 0 (file-target imports only): the SHA-256 content rule outranks the
+  // metadata identity chain — identical content never joins the library twice,
+  // whether it is held as a managed blob or as a library-root source file.
+  if (fileTarget && attachment && tempFilePath && !normalized.forceNew) {
+    const blobHolder = store.findDocumentByBlobHash(actorKey, attachment.sha256);
+    if (blobHolder) {
+      cleanupTemp();
+      return {
+        result: {
+          outcome: 'duplicate_content',
+          match: { strategy: 'sha256', documentId: blobHolder.id },
+          document: blobHolder
+        },
+        warning
+      };
+    }
+    const holder = store.findEnrolledSourceFileBySha(actorKey, attachment.sha256);
+    if (holder) {
+      cleanupTemp();
+      return {
+        result: {
+          outcome: 'duplicate_content',
+          match: { strategy: 'sha256', documentId: holder.documentId },
+          document: store.getDocument(actorKey, holder.documentId),
+          sourceFile: holder
+        },
+        warning
+      };
+    }
+  }
+
   const precheckInput = {
     title, year, doi, isbn, arxivId,
     attachment,
@@ -1638,9 +1680,58 @@ async function executeNativeImportItem(store, actorKey, normalized, {
     return { result: precheck, warning };
   }
 
-  // Phase 2: promote temp file to content-addressed storage (exclusive, atomic rename).
+  // Phase 2: promote temp file to content-addressed storage (exclusive, atomic rename),
+  // or — for M4 file-target imports — place the file into the requested library root
+  // directory after the content/name conflict rules have been applied.
   let promotion = null;
-  if (attachment && tempFilePath) {
+  let filePlacement = null;
+  if (fileTarget) {
+    if (attachment && tempFilePath) {
+      const targetRelativePath = fileTarget.targetDir
+        ? `${fileTarget.targetDir}/${fileTarget.filename}`
+        : fileTarget.filename;
+      const conflict = await probeTargetPath(store, actorKey, fileTarget.root, targetRelativePath, attachment.sha256);
+      if (conflict) {
+        cleanupTemp();
+        return {
+          result: { outcome: conflict.type, existingSha256: conflict.sha256, targetPath: targetRelativePath },
+          warning
+        };
+      }
+      const operation = store.createFileOperation(actorKey, {
+        operationType: 'file.import',
+        sourcePath: tempFilePath,
+        targetPath: `${fileTarget.root.absolutePath}/${targetRelativePath}`,
+        payload: { rootId: fileTarget.root.id, targetDir: fileTarget.targetDir, filename: fileTarget.filename }
+      });
+      store.startFileOperation(operation.id);
+      try {
+        placeFileIntoRoot(fileTarget.root.absolutePath, targetRelativePath, tempFilePath);
+      } catch (placeErr) {
+        cleanupTemp();
+        if (placeErr instanceof FileOpError) {
+          store.failFileOperation(operation.id, placeErr.code);
+          return { result: { outcome: placeErr.code, targetPath: targetRelativePath }, warning };
+        }
+        store.failFileOperation(operation.id, 'file_placement_failed');
+        const err = new Error(`PDF 落盘到文库目录失败: ${placeErr.message}`);
+        err.status = 500;
+        err.code = 'file_placement_failed';
+        throw err;
+      }
+      filePlacement = {
+        operationId: operation.id,
+        rootId: fileTarget.root.id,
+        rootAbsolutePath: fileTarget.root.absolutePath,
+        relativePath: targetRelativePath,
+        filename: fileTarget.filename,
+        sha256: attachment.sha256,
+        sizeBytes: attachment.sizeBytes,
+        modifiedAt: Math.round(fs.statSync(path.join(fileTarget.root.absolutePath, targetRelativePath)).mtimeMs)
+      };
+      cleanupTemp();
+    }
+  } else if (attachment && tempFilePath) {
     try {
       promotion = promoteBlobFn(store, tempFilePath, attachment.sha256);
       attachment.relativePath = promotion.relativePath;
@@ -1654,25 +1745,71 @@ async function executeNativeImportItem(store, actorKey, normalized, {
   }
 
   // Phase 3: transactional database write.
+  if (fileTarget && !filePlacement) {
+    // A directory import without a downloadable PDF would create a library
+    // identity with no original file — refuse instead of degrading silently.
+    const err = new Error('目录导入需要取得 PDF 文件；PDF 下载失败时不会创建文档');
+    err.status = 422;
+    err.code = 'import_requires_pdf';
+    throw err;
+  }
   let result;
   try {
-    result = store.importNativeDocument(actorKey, {
-      sourceType: meta.sourceType,
-      title,
-      abstract,
-      creators,
-      year,
-      doi,
-      url,
-      isbn,
-      arxivId,
-      externalRefs,
-      attachment,
-      targetWorkspaceId,
-      forceNew: normalized.forceNew,
-      confirmFuzzy: normalized.confirmFuzzy
-    });
+    if (filePlacement) {
+      const existingRow = store.getSourceFileByPath(actorKey, filePlacement.rootId, filePlacement.relativePath);
+      if (existingRow) {
+        // Placement replaced a path whose row was stale; the stale row was not
+        // active (probe passed), so detach it before claiming the path.
+        store.releaseSourceFilePath(actorKey, filePlacement.rootId, filePlacement.relativePath, 'import_takeover');
+      }
+      result = store.importNativeDocumentToSourceFile(actorKey, {
+        sourceType: meta.sourceType,
+        title,
+        abstract,
+        creators,
+        year,
+        doi,
+        url,
+        isbn,
+        arxivId,
+        externalRefs,
+        rootId: filePlacement.rootId,
+        relativePath: filePlacement.relativePath,
+        filename: filePlacement.filename,
+        sha256: filePlacement.sha256,
+        sizeBytes: filePlacement.sizeBytes,
+        modifiedAt: filePlacement.modifiedAt,
+        topicIds: fileTarget.topicIds || [],
+        forceNew: normalized.forceNew,
+        confirmFuzzy: normalized.confirmFuzzy
+      });
+    } else {
+      result = store.importNativeDocument(actorKey, {
+        sourceType: meta.sourceType,
+        title,
+        abstract,
+        creators,
+        year,
+        doi,
+        url,
+        isbn,
+        arxivId,
+        externalRefs,
+        attachment,
+        targetWorkspaceId,
+        forceNew: normalized.forceNew,
+        confirmFuzzy: normalized.confirmFuzzy
+      });
+    }
   } catch (dbErr) {
+    if (filePlacement) {
+      // Compensation: remove the just-placed file; the op journal records it.
+      try {
+        fs.unlinkSync(path.join(filePlacement.rootAbsolutePath, filePlacement.relativePath));
+      } catch {}
+      try { store.completeFileOperation(filePlacement.operationId); } catch {}
+      store.markFileOperationRolledBack(filePlacement.operationId);
+    }
     if (promotion?.newlyCreated) {
       compensatePromotedBlob(store, attachment.sha256, promotion.targetBlobPath);
     }
@@ -1680,7 +1817,20 @@ async function executeNativeImportItem(store, actorKey, normalized, {
   }
 
   // Write-time decision diverged (concurrent import raced the precheck): compensate file.
-  if (result.outcome !== 'created' && result.outcome !== 'reused' && promotion?.newlyCreated) {
+  const diverged = result.outcome !== 'created' && result.outcome !== 'reused'
+    && result.outcome !== 'duplicate_content' && result.outcome !== 'filename_conflict';
+  if (filePlacement) {
+    if (result.outcome === 'created' || result.outcome === 'reused') {
+      store.completeFileOperation(filePlacement.operationId);
+    } else {
+      // duplicate_content / filename_conflict resolved after placement lost a race:
+      // remove the placed file and roll the operation back.
+      try {
+        fs.unlinkSync(path.join(filePlacement.rootAbsolutePath, filePlacement.relativePath));
+      } catch {}
+      store.markFileOperationRolledBack(filePlacement.operationId);
+    }
+  } else if (diverged && promotion?.newlyCreated) {
     compensatePromotedBlob(store, attachment.sha256, promotion.targetBlobPath);
   }
 
@@ -2054,14 +2204,195 @@ export function createCanvasHandler(store, {
         return;
       }
 
+      // --- M4 Source File Operations ---
+      function sourceFileConflictResponse(result, warning) {
+        if (result.outcome === 'duplicate_content') {
+          json(res, 409, {
+            error: { code: 'duplicate_content', message: '相同 SHA-256 的内容已在文库中，未重复加入' },
+            data: {
+              outcome: result.outcome,
+              document: result.document || null,
+              sourceFile: result.sourceFile || null,
+              match: result.match || null,
+              warning: warning || undefined
+            }
+          });
+          return true;
+        }
+        if (result.outcome === 'filename_conflict') {
+          json(res, 409, {
+            error: { code: 'filename_conflict', message: '目标目录已存在同名但内容不同的文件，请输入新的原始文件名后重试' },
+            data: { outcome: result.outcome, targetPath: result.targetPath || null }
+          });
+          return true;
+        }
+        return false;
+      }
+
+      if (pathname === '/canvas/native/source-files/import' && method === 'POST') {
+        const body = await readJson(req, MAX_IMPORT_BODY_BYTES);
+        if (!body || typeof body !== 'object' || Array.isArray(body)) {
+          throw new TypeError('request body must be an object');
+        }
+        let normalized;
+        try {
+          normalized = normalizeNativeImportItem(body, 'body');
+        } catch (err) {
+          error(res, 400, 'invalid_request', err.message);
+          return;
+        }
+        if (!body.rootId || typeof body.rootId !== 'string') {
+          throw new TypeError('rootId is required');
+        }
+        const root = store.requireLibraryRoot(actor.actorKey, body.rootId);
+        const targetDir = body.targetDir ? normalizeRelativePath(body.targetDir) : '';
+        let filename = body.filename ? normalizeFilename(body.filename, { requirePdf: true }) : null;
+
+        if (!filename) {
+          // Derive the original filename from the resolved title.
+          let resolved = normalized.resolved;
+          if (!resolved && normalized.input) {
+            resolved = await resolveImportInput(normalized.input, {
+              translationServerFn: translationServerFn || undefined
+            }).catch(err => {
+              if (err.status) throw err;
+              const wrapped = new Error(err.message);
+              wrapped.status = err.status || 400;
+              wrapped.code = err.code || 'resolve_error';
+              throw wrapped;
+            });
+          }
+          normalized.resolved = resolved;
+          const base = String(resolved?.title || normalized.title || normalized.input || 'document')
+            .replace(/[\\/:*?"<>|\n\r\t]/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 80) || 'document';
+          filename = normalizeFilename(`${base}.pdf`, { requirePdf: true });
+        }
+
+        let topicIds = [];
+        if (body.topicIds !== undefined) {
+          if (!Array.isArray(body.topicIds) || body.topicIds.length > 50
+            || body.topicIds.some(t => typeof t !== 'string' || t.length > 128)) {
+            throw new TypeError('topicIds must be an array of at most 50 workspace ids');
+          }
+          topicIds = body.topicIds;
+        }
+
+        let outcome;
+        try {
+          outcome = await executeNativeImportItem(store, actor.actorKey, normalized, {
+            downloadPdfFn,
+            promoteBlobFn,
+            translationServerFn,
+            fileTarget: { root, targetDir, filename, topicIds }
+          });
+        } catch (execErr) {
+          if (execErr.status) {
+            error(res, execErr.status, execErr.code || 'import_error', execErr.message);
+            return;
+          }
+          throw execErr;
+        }
+
+        const { result, warning } = outcome;
+        if (result.outcome === 'requires_confirmation') {
+          json(res, 409, {
+            error: { code: 'duplicate_confirmation_required', message: '检测到高度相似的文献，需要用户确认后才能合并' },
+            data: { candidates: result.candidates }
+          });
+          return;
+        }
+        if (result.outcome === 'conflicting_identities') {
+          json(res, 409, {
+            error: { code: 'identity_conflict', message: '多个精确标识分别指向不同文献，无法确定合并目标，请手动处理' },
+            data: { conflicts: result.conflicts }
+          });
+          return;
+        }
+        if (sourceFileConflictResponse(result, warning)) return;
+
+        json(res, 201, {
+          data: warning ? { ...result, warning } : result,
+          message: result.outcome === 'reused'
+            ? '已复用文库中的既有文献，并将 PDF 归档到目标目录'
+            : undefined
+        });
+        return;
+      }
+
+      match = /^\/canvas\/native\/source-files\/([0-9a-f-]+)\/rename$/.exec(pathname);
+      if (match && method === 'POST') {
+        const body = await readJson(req);
+        const result = await renameSourceFile(store, actor.actorKey, match[1], versionFromIfMatch(req), body?.filename);
+        json(res, 200, { data: result.sourceFile }, { ETag: etag(result.sourceFile.version) });
+        return;
+      }
+
+      match = /^\/canvas\/native\/source-files\/([0-9a-f-]+)\/move$/.exec(pathname);
+      if (match && method === 'POST') {
+        const body = await readJson(req);
+        const result = await moveSourceFile(store, actor.actorKey, match[1], versionFromIfMatch(req),
+          body?.targetDir ?? '', body?.filename ?? null);
+        json(res, 200, { data: result.sourceFile }, { ETag: etag(result.sourceFile.version) });
+        return;
+      }
+
+      match = /^\/canvas\/native\/source-files\/([0-9a-f-]+)\/restore$/.exec(pathname);
+      if (match && method === 'POST') {
+        const body = await readJson(req);
+        const result = await restoreSourceFile(store, actor.actorKey, match[1], versionFromIfMatch(req), body?.filename ?? null);
+        json(res, 200, { data: result.sourceFile }, { ETag: etag(result.sourceFile.version) });
+        return;
+      }
+
+      match = /^\/canvas\/native\/source-files\/([0-9a-f-]+)\/permanent$/.exec(pathname);
+      if (match && method === 'DELETE') {
+        const result = await deleteSourceFilePermanent(store, actor.actorKey, match[1], versionFromIfMatch(req));
+        json(res, 200, { data: { deleted: true, operationId: result.operation.id } });
+        return;
+      }
+
+      match = /^\/canvas\/native\/source-files\/([0-9a-f-]+)\/enroll$/.exec(pathname);
+      if (match && method === 'POST') {
+        const enrolled = store.enrollExistingSourceFile(actor.actorKey, match[1]);
+        if (enrolled.duplicate) {
+          json(res, 409, {
+            error: { code: 'duplicate_content', message: '相同 SHA-256 的内容已在文库中，未重复加入' },
+            data: { document: enrolled.document, sourceFile: enrolled.sourceFile }
+          });
+          return;
+        }
+        json(res, 201, { data: enrolled });
+        return;
+      }
+
+      match = /^\/canvas\/native\/source-files\/([0-9a-f-]+)$/.exec(pathname);
+      if (match && method === 'DELETE') {
+        const result = await trashSourceFile(store, actor.actorKey, match[1], versionFromIfMatch(req));
+        json(res, 200, { data: result.sourceFile }, { ETag: etag(result.sourceFile.version) });
+        return;
+      }
+
       // --- Native Documents List & CRUD ---
       if (pathname === '/canvas/native/documents' && method === 'GET') {
-        const search = url.searchParams.get('search') || undefined;
-        const year = url.searchParams.get('year') || undefined;
-        const limit = url.searchParams.get('limit') ? Number(url.searchParams.get('limit')) : 50;
-        const offset = url.searchParams.get('offset') ? Number(url.searchParams.get('offset')) : 0;
-        const docs = store.listDocuments(actor.actorKey, { search, year, limit, offset });
-        json(res, 200, { data: docs });
+        const search = url.searchParams.get('search') || '';
+        const topicId = url.searchParams.get('topicId') || null;
+        const unclassified = url.searchParams.get('unclassified') === 'true';
+        const fileStatus = url.searchParams.get('fileStatus') || null;
+        const limit = Math.max(1, Math.min(200, Number(url.searchParams.get('limit')) || 50));
+        const offset = Math.max(0, Number(url.searchParams.get('offset')) || 0);
+        if (fileStatus && !['active', 'duplicate', 'missing', 'unreadable', 'trashed'].includes(fileStatus)) {
+          throw new TypeError('fileStatus must be one of active/duplicate/missing/unreadable/trashed');
+        }
+        const { total, documents } = store.listNativeLibraryDocuments(actor.actorKey, {
+          search, topicId, unclassified, fileStatus, limit, offset
+        });
+        json(res, 200, {
+          data: documents,
+          meta: { total, limit, offset, nextCursor: offset + documents.length < total ? offset + documents.length : null }
+        });
         return;
       }
 
@@ -2089,7 +2420,8 @@ export function createCanvasHandler(store, {
           return;
         }
         if (method === 'DELETE') {
-          store.deleteDocument(actor.actorKey, match[1], version);
+          // 从文库移除: unbind the library identity; the original file stays on disk.
+          store.unbindDocumentFromLibrary(actor.actorKey, match[1], version);
           res.writeHead(204, { 'Cache-Control': 'no-store' });
           res.end();
           return;
@@ -2097,6 +2429,47 @@ export function createCanvasHandler(store, {
         const body = await readJson(req);
         const doc = store.updateDocument(actor.actorKey, match[1], version, body);
         json(res, 200, { data: doc }, { ETag: etag(doc.version) });
+        return;
+      }
+
+      // --- M4 Document Topic Binding ---
+      match = /^\/canvas\/native\/documents\/([0-9a-f-]+)\/topics$/.exec(pathname);
+      if (match && method === 'POST') {
+        const body = await readJson(req);
+        const bindings = store.addDocumentTopics(actor.actorKey, match[1], body?.topicIds);
+        json(res, 201, { data: bindings });
+        return;
+      }
+
+      match = /^\/canvas\/native\/documents\/([0-9a-f-]+)\/topics\/([0-9a-f-]+)$/.exec(pathname);
+      if (match && method === 'DELETE') {
+        const version = versionFromIfMatch(req);
+        if (version === null) {
+          error(res, 428, 'precondition_required', 'A valid If-Match header is required');
+          return;
+        }
+        store.removeDocumentTopic(actor.actorKey, match[1], match[2]);
+        res.writeHead(204, { 'Cache-Control': 'no-store' });
+        res.end();
+        return;
+      }
+
+      if (pathname === '/canvas/native/documents/batch-topics' && method === 'POST') {
+        const body = await readJson(req);
+        if (!Array.isArray(body?.documentIds) || !body.documentIds.length || body.documentIds.length > 200
+          || body.documentIds.some(id => typeof id !== 'string')) {
+          throw new TypeError('documentIds must be an array of at most 200 document ids');
+        }
+        const results = [];
+        for (const documentId of body.documentIds) {
+          try {
+            const bindings = store.addDocumentTopics(actor.actorKey, documentId, body.topicIds);
+            results.push({ documentId, ok: true, bindings });
+          } catch (err) {
+            results.push({ documentId, ok: false, errorCode: err instanceof CanvasNotFoundError ? 'not_found' : 'failed' });
+          }
+        }
+        json(res, 200, { data: results });
         return;
       }
 

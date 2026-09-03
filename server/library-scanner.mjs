@@ -104,7 +104,7 @@ export function enrollScannedFile(store, actorKey, rootId, entry) {
 // against a possibly-changed filesystem. Re-running a scan is always safe.
 export function recoverInterruptedFileOperations(store) {
   const resumable = store.listResumableFileOperations();
-  const summary = { interruptedScans: 0, otherInterrupted: 0 };
+  const summary = { interruptedScans: 0, interruptedFileOps: 0 };
   for (const op of resumable) {
     if (op.operationType === 'library.scan') {
       store.failFileOperation(op.id, 'interrupted_by_restart');
@@ -118,7 +118,11 @@ export function recoverInterruptedFileOperations(store) {
       }
       summary.interruptedScans += 1;
     } else {
-      summary.otherInterrupted += 1;
+      // File mutations are never auto-resumed: the FS-first + guarded-DB-write
+      // protocol plus the next scan's hash reconciliation repairs any torn
+      // state, so a plain failure mark is the safe recovery here.
+      store.failFileOperation(op.id, 'interrupted_by_restart');
+      summary.interruptedFileOps += 1;
     }
   }
   return summary;
