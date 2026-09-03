@@ -1174,3 +1174,149 @@
   阻断，必须由用户输入新的原始文件名后重试，不覆盖、不自动追加 `(2)`。
 - 取消独立收件箱和 Collection 绑定；无主题文档由文库“未分类”筛选承接。
 - 当前 Schema 为 v12；M4 使用独立 v13，并保持旧 managed Blob 文档可用。
+
+---
+
+## 2026-09-03 会话（M4 Native 文件与文库管理实施）
+
+### 实施概要（分支 `feat/m4-native-library`，5 个提交）
+
+| 提交 | 内容 |
+| --- | --- |
+| `01656c2` | docs: M4 方案与产品决策 |
+| `430b881` | Schema v13 + 统一附件读取抽象 + 路径安全模块（native-fs） |
+| `6cf6139` | 增量扫描器（去重/移动识别/missing 状态/离线安全）+ 目录树 API |
+| `79ed935` | 显式文件操作（导入落点/重命名/移动/回收/恢复/永久删除）+ 冲突阻断 + file_operations 补偿 |
+| `46ea21b` | 前端原始文件视图/文库过滤/双名称 + 收件箱与 Collection 退役（410）+ 文库级 AI 归类 |
+
+### Schema v13（当前版本）
+
+- 新表：`library_roots`（活跃 `(owner_key, absolute_path)` 唯一；服务端
+  `NATIVE_LIBRARY_ROOTS` 配置驱动，客户端无法注册路径）、`source_files`
+  （活跃 `(owner_key, root_id, relative_path)` 部分唯一；状态机
+  `active/duplicate/missing/unreadable/trashed`）、`file_operations`
+  （持久化操作日志：`file.import/rename/move/trash/restore/delete_permanent/mkdir`、
+  `library.scan/reconcile`，状态 `queued/running/completed/failed/rolled_back`）。
+- `attachments` 表按官方流程重建：`blob_hash` 改为可空，新增
+  `storage_kind`（`managed_blob | source_file`）与 `source_file_id`，CHECK
+  约束保证两种存储互斥且完备。迁移在构造器 `foreign_keys=OFF` 窗口内完成，
+  迁移后 `PRAGMA foreign_key_check` 断言零违规；真实 v12 夹具测试证明
+  annotations 在重建中幸存（这是最大的技术风险点，已被测试钉死）。
+- 遗留收件箱兼容迁移：v13 首次打开时对 native inbox 条目回填空缺文档字段
+  （仅 DOI），无文档的孤儿条目写入 `data/m4-inbox-migration-report.json`
+  报告，绝不静默删除。真实 DB 已迁移：2 条全部关联、0 孤儿。
+- 备份：迁移前 DB（VACUUM INTO）与 blobs 均存于 `backups/`（已 gitignore）。
+
+### 统一附件读取抽象
+
+- `store.getAttachmentContent(actorKey, attachmentId)`：返回
+  `managed_blob`（blob 存储）或 `source_file`（文库根目录文件）统一内容描述；
+  Reader、Range 服务、批注、全文分析全部经此解析，前端零感知。
+- `/canvas/native/attachments/:id/file` 双存储支持：200/206/304/416/HEAD 全保持；
+  source_file 通过 `openFileInsideRoot`（O_NOFOLLOW + realpath 越界校验）以 fd
+  为 TOCTOU 锚点流式读取。
+- `server/native-fs.mjs`：所有磁盘路径的唯一入口——拒绝绝对路径/`..`/NUL/
+  反斜杠/隐藏段；`openFileInsideRoot` 拒绝符号链接逃逸；流式 SHA-256；
+  扫描遍历不跟随符号链接。
+
+### 扫描器（server/library-scanner.mjs）
+
+- 严格递归收集 PDF（隐藏文件/回收区/符号链接排除；不可读子目录直接中止
+  扫描而不是误标 missing）。
+- 三阶段：A) 分批异步哈希（size+mtime 未变跳过重哈希，`touchSourceFiles`
+  刷新 last_seen 不摇动版本）；B) 仅在完整成功遍历后对账——哈希相同的
+  路径迁移识别为移动/外部改名、真缺失标记 missing、missing 恢复 active；
+  C) 未占用路径入册：唯一内容创建文档+source_file 附件，同哈希多路径仅
+  一个文库身份，其余 `duplicate` 未入库。
+- 检查点：扫描完整成功才置 root `last_scan_status=ok`；离线根目录
+  （`library_root_unavailable` → HTTP 503）在任何 DB 变更前拦截，零行变更；
+  中断扫描由启动恢复标记 failed（`recoverInterruptedFileOperations`）。
+- 文件操作均为"先文件系统、后版本守卫 DB 写入"，失败自动补偿回滚；
+  崩溃撕裂状态由下一次扫描的哈希对账自愈。
+
+### 导入落点与冲突规则
+
+- M2 执行器 `executeNativeImportItem` 扩展 `fileTarget`（单执行器，未复制
+  第二套）：解析→PDF 安全下载→SHA 规则（先于元数据去重链）→目标同名探测→
+  排他隐藏暂存落盘（copy+fsync+link）→事务化文档/附件/主题写入→失败补偿。
+- 冲突语义严格按方案 §2.3/§2.4：`duplicate_content`（409，不复制不建第二
+  文档）、`filename_conflict`（409，不覆盖、不自动"(2)"，UI 弹出改名对话框
+  重试）。目录导入无 PDF 时拒绝（422 import_requires_pdf），不静默降级。
+- 文库移除（DELETE /canvas/native/documents/:id）软删文档、解绑 source_file
+  （扫描器不会自动重新入库）；回收/恢复保留路径、文库名、主题、批注与分析；
+  永久删除仅对回收站文件，清除文件+绑定。
+
+### 退役（收件箱/Collection/Altero 运行时）
+
+- 服务端：`/canvas/inbox`（GET/scan/entries/batch-action/classify/
+  generate-topics）与 collection-bindings 全部路由返回
+  `410 feature_retired`；`importNativeDocument`/`importNativeUploadedDocument`
+  不再写 inbox_entries。
+- 文库级 AI 取代收件箱 AI：`POST /canvas/native/documents/classify` 与
+  `/canvas/native/classify/generate-topics`（幻觉主题过滤、同请求中文名
+  元数据等能力原样保留）；前端文库栏"✨ AI 主题归类"一键提炼+采纳≥0.7 建议。
+- `findDuplicateCandidates` 增加 native documents 匹配源（targetType=document）。
+- 前端：收件箱按钮/徽标/modal、批量主题 modal、Collection 绑定 Tab 全部删除；
+  页面不再引用任何退役端点（UI 测试断言其不存在）。
+- Altero 归档标签：`archive/last-altero-compatible`（删除运行时前已打）。
+  注意：`loadExternalLibrary`、`proxy-api/oidc` 与 `AUTH_MODE=altero` 认证
+  路径暂保留（能力门控，M6 默认解除依赖时移除）。
+
+### 前端（M4）
+
+- 文库侧栏第三 Tab"原始文件"：根目录选择、上级/新建目录、递归扫描（轮询
+  file-operations 并汇报 新增/重复/移动/缺失/恢复 计数）、分页目录树、
+  双名称展示、状态徽标、每行操作（打开/加入文库/重命名/移动/回收/恢复）。
+- 文库列表：过滤 chips（全部/未分类/无 PDF/文件缺失/回收站）+ native 条目
+  显示原始文件名与状态，内联原始文件操作。
+- 快速导入弹窗：新增"归档到文库目录"区块（根目录/子目录/原始文件名/主题
+  多选），`filename_conflict` 走改名对话框重试闭环。
+- `server/native-file-ops.mjs` 独立模块承载显式文件操作（重命名/移动/回收/
+  恢复/永久删除 + 目标探测 + 排他落盘）。
+
+### 自动化测试（9 套，npm test 全绿）
+
+- 新增 `test/native-m4.test.mjs`（接入 npm test）：路径安全/符号链接逃逸/
+  fd 哈希、NATIVE_LIBRARY_ROOTS 解析、v13 fresh + 真实 v12→v13（附件重建、
+  annotation 幸存、幂等重开）、根目录配置与隔离、统一内容抽象、文件端点
+  全矩阵（200/206/304/416/HEAD/404 双存储）、文件操作日志、扫描器 12 组
+  （入册/增量免哈希/物理副本单身份/移动识别/缺失恢复/离线零变更/不可读
+  文件与目录安全/树分页与穿越拒绝/启动恢复）、文件操作 11 组（导入落点/
+  双冲突/改名不动文库名/If-Match 428/412/移动连带批注/回收恢复/解绑重入/
+  永久删除/扫描幂等）。
+- canvas.test.mjs：退役 API 重写为 410 契约 + native classify/
+  generate-topics 覆盖；schema 断言沿 v13 谱系更新。
+- canvas-ui.test.mjs：退役元素断言为"必须不存在"；新增 M4 元素与
+  `libraryAiClassifyFlow` 生产行为测试。
+
+### 已知风险与后续工作
+
+1. `AUTH_MODE=altero` 与 Altero 代理（proxy-api/oidc/loadExternalLibrary）
+   仍保留（能力门控），M6 移除；本机 .env 未设 AUTH_MODE，实际即 local。
+2. 收件箱表保留为 deprecated（未删），下个稳定版本再清理；服务启动时
+   `loadInboxEntries` 为 no-op。
+3. 移动端/窄窗口下"原始文件"面板布局未做专项验收（C2 遗留项同样未验收）。
+4. 库级 AI 归类当前为"提炼+自动采纳≥0.7"的批量操作，无逐条确认 UI。
+5. `chmod` 后 mtime 未变时扫描不重检可读性（size+mtime 缓存语义），需
+   mtime 变化或内容变化才重新判定 unreadable/active。
+
+### 人工实机验收（M4 关闭闸门，待执行）
+
+前置：`systemctl --user restart altcanvas.service` 已完成（v13 已迁移，
+服务 healthy）。 humans 操作（每步后无需要求浏览器控制台输出，Agent 会查
+`.debug/dev.log` 与 `.debug/browser.log`）：
+
+1. 登录 → 左侧文库栏点"原始文件" Tab：确认根目录"研究文库"出现、列表为
+   空（空目录）→ 回复"完成"。
+2. 向 `~/Projects/AltCanvas/data/library/` 放入 1-2 个 PDF（可建子目录）→
+   点"🔄 递归扫描" → 确认 Toast 报告"新增 N"且文件出现在列表（显示原始
+   文件名与"未入库/文库文件名"两行）。
+3. 对一个已入库条目点"✏️ 重命名"改为新名字 → 确认磁盘文件名变化而文库
+   列表中的文库名不变；打开 PDF 阅读器确认正常渲染与批注。
+4. 对同一条目点"🗑 移入回收站"→"回收站"过滤器可见 →"♻️ 恢复"→ 确认
+   路径与批注仍在。
+5. 文库 Tab：点"未分类"过滤器确认归类关系正确；点"✨ AI 主题归类"（需 AI
+   配置）确认主题提炼与建议采纳。
+6. 快速导入弹窗：粘贴 DOI/BibTeX → 展开目录区块选择根目录并归档 → 若目标
+   同名会弹改名对话框，改新名字后应成功且不产生"(2)"。
+7. 完成后回复"完成"，Agent 复查两份日志确认零新增错误、零 Altero 请求。
