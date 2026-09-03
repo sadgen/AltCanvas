@@ -909,6 +909,33 @@
 - 审计登记的非阻断 P2 技术债同日收紧：`resolved.arXivId` 大小写旁路封堵（两种拼写均纳入长度契约）；`externalRefs` 全字段规范化（`externalAttachmentId` ≤256 字符串、`externalVersion` 非负整数、`sourceUrl` ≤2000 且必须 http(s)，未知键丢弃并输出规范化对象）；新增 5 类非法载荷 400 测试与全字段正向前置持久化断言；
 - **M2 统一 Native 导入管线：PASS（关闭）**。下一阶段：M3 Translation Server 集成。
 
+## 2026-09-03 会话（M3.1 Translation Server 安全适配层）
+
+### 交付内容 ([`server/translation-server.mjs`](file:///home/sadgen/Projects/AltCanvas/server/translation-server.mjs))
+1. **仅服务端配置**：目标地址只来自 `TRANSLATION_SERVER_URL` 环境变量；调用方仅提供输入文本与格式提示，客户端永远无法指定服务器地址；未配置时返回 `{ available: false }`。
+2. **目标信任分级**：
+   - `unix:///path` Unix Socket 与 loopback（`localhost/127.0.0.1/::1`）为可信默认；
+   - 远程目标必须显式 `ALLOW_REMOTE_TRANSLATION_SERVER=true`，并复用共享 SSRF 门（`validateExternalUrl` DNS 解析 + 私网拦截 + 固定 IP 拨号），私网需 `ALLOW_PRIVATE_TRANSLATION_HOSTS`；
+   - 拒绝非 http(s)/unix 协议与内嵌凭据。
+3. **禁止重定向**：3xx 或携带 `Location` 即抛 `redirect_not_allowed`，传输为单次请求（实测重定向服务器仅收到 1 次请求）。
+4. **三层超时**：连接（5s 默认）、响应（30s）、总任务（60s）均可通过环境变量覆盖；注入传输同样受总超时约束（发现并修复了注入路径绕过超时的缺陷）。
+5. **体积上限**：请求体 1 MiB（ bibliography 输入）、响应体 2 MiB（真实传输流式拦截 + 返回体事后复检双重保障）。
+6. **严格响应模式校验**：`{ ok, sourceType, title, creators[], year, doi/url/isbn/arxivId/abstractNote/pdfUrl }` 逐字段类型/长度/范围校验（year 1400–2200 整数、pdfUrl 必须 http(s)），未知字段剥离；`ok:false` 结构化透传错误。
+7. **纯解析无写入**：模块不接触数据库与 Blob；`translationResultToImportItem` 输出直接喂给 `normalizeNativeImportItem`（已导出供契约测试）与 M2 统一执行器。
+
+### 测试（新增第 8 套 `test/translation-server.test.mjs`，接入 npm test）
+- 配置禁用默认、loopback/unix/远程门控、私网 DNS 拦截、非法协议/凭据拒绝；
+- 重定向单次中止、悬挂传输总超时、请求/响应体积上限；
+- 非 2xx / 非 JSON / 六类模式违规 / 未知字段剥离；
+- DTO 通过与 M2 执行器完全相同的 `normalizeNativeImportItem` 契约；
+- 真实 loopback HTTP 服务器往返 + 重定向服务器单请求中止。
+- `npm test` 8 套全过；`git diff --check` 通过。
+
+### 下一步：M3.2 统一解析与导入工作流
+用户输入 → 输入类型识别 → Translation Server 解析 → 规范化 Native DTO → 身份冲突与重复预检 → 用户确认 → M2 Native 导入执行器 → 收件箱/主题关联（全部复用 M2 去重链/确认/PDF 下载/Blob 补偿/import_jobs 状态机）。
+
+---
+
 ## 2026-09-03 会话（M3.0 登录后应用初始化修复——P1 首要前置项）
 
 ### 根因

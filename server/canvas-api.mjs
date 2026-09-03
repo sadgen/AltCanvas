@@ -1529,6 +1529,10 @@ async function executeNativeImportItem(store, actorKey, normalized, {
 // Exported for direct concurrency testing of the exclusive promotion primitive.
 export { defaultPromoteBlob };
 
+// Exported so external parse adapters (e.g. the M3 Translation Server layer) can be
+// contract-tested against the exact import-item normalizer used by the executor.
+export { normalizeNativeImportItem };
+
 export function createCanvasHandler(store, {
   aiCompletion = requestAiCompletion,
   aiPublicConfig = getAiPublicConfig,
