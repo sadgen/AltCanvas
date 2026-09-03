@@ -1541,3 +1541,28 @@
 
 - `npm test` 10 套全部通过（exit 0），`git diff --check` 干净，服务已重启
   且首页 200。M4 维持 CONDITIONAL PASS，等待最后一轮自动化复审。
+
+---
+
+## 2026-09-03 会话（M4 四轮审计：回滚路径内容身份验证，最后一项 P1）
+
+三轮复审后仅余恢复器对称分支 1 个 P1，本轮闭环：
+
+- **reconcileMoveLike 回滚**：DB 已指向 target、target 缺失、source 被换成
+  异内容时，DB 回退到 source 前先经安全句柄重算 source 哈希——不匹配 →
+  `content_mismatch` failed，DB 保持指向 target 且身份不变（审计复现场景
+  state=rolled_back/path=old.pdf/isMismatch=true 已消除）。
+- **reconcileTrash 回滚**：trash 未执行、行回退 active 前验证 source 哈希，
+  不匹配保持 trashed。
+- **reconcileRestore 回滚**：restore 未执行、保留 trashed 前验证回收区载荷
+  哈希，不匹配 → content_mismatch，载荷原样保留。
+- **reconcilePermanentDelete**：补删回收区文件前验证其哈希仍属于该行——
+  被替换的异内容文件不删除、行不清除。
+- 全部验证不匹配时数据库与磁盘零修改；`content_mismatch` 统一错误码。
+- 测试组 23：四条反向行为（换源 move 回滚 / trash 回退 / restore 载荷 /
+  永久删除补删）+ 匹配内容正控；既有 20.4 场景的回收载荷改为与行身份
+  一致以继续隔离符号链接行为。
+
+验证：`npm test` 10 套全部通过，`git diff --check` 干净，服务重启正常。
+M4 维持 CONDITIONAL PASS——按审计结论，本项补完后进入最后人工 UI 与
+日志验收（步骤见 M4 实施会话节）。

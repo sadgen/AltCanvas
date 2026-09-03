@@ -255,7 +255,14 @@ async function reconcileMoveLike(store, op) {
   }
   if (sourceOnDisk && !targetOnDisk) {
     if (row.relative_path === op.targetPath) {
-      // DB moved but FS did not: roll the DB back to the source path.
+      // DB moved but FS did not: before reverting the DB onto the source
+      // path, the source file must still carry the recorded identity — a
+      // replaced source is a content_mismatch, never a clean rollback.
+      const rollbackVerification = await verifyRecoveryTargetContent(root.absolute_path, op.sourcePath, row.sha256);
+      if (!rollbackVerification.ok) {
+        store.failFileOperation(op.id, rollbackVerification.reason === 'unverifiable_hash' ? 'content_mismatch' : rollbackVerification.reason);
+        return 'failed';
+      }
       store.db.prepare(`
         UPDATE source_files SET relative_path = ?, filename = ?, version = version + 1, updated_at = ?
         WHERE id = ? AND owner_key = ?
@@ -302,6 +309,13 @@ async function reconcileTrash(store, op) {
   }
   if (sourceOnDisk && !trashOnDisk) {
     if (row.status === 'trashed') {
+      // The trash never ran and the row is being rolled back to active: the
+      // source file must still match the recorded identity first.
+      const rollbackVerification = await verifyRecoveryTargetContent(root.absolute_path, op.sourcePath, row.sha256);
+      if (!rollbackVerification.ok) {
+        store.failFileOperation(op.id, rollbackVerification.reason === 'unverifiable_hash' ? 'content_mismatch' : rollbackVerification.reason);
+        return 'failed';
+      }
       store.db.prepare(`
         UPDATE source_files SET status = 'active', trashed_at = NULL, version = version + 1, updated_at = ?
         WHERE id = ? AND owner_key = ?
@@ -345,6 +359,13 @@ async function reconcileRestore(store, op) {
     return 'completed';
   }
   if (trashOnDisk && !targetOnDisk) {
+    // The restore never ran and the row stays trashed: bless the rollback
+    // only when the recycle-area payload still matches the recorded identity.
+    const rollbackVerification = await verifyRecoveryTargetContent(root.absolute_path, op.sourcePath, row.sha256);
+    if (!rollbackVerification.ok) {
+      store.failFileOperation(op.id, rollbackVerification.reason === 'unverifiable_hash' ? 'content_mismatch' : rollbackVerification.reason);
+      return 'failed';
+    }
     store.markFileOperationRolledBack(op.id);
     return 'rolledBack';
   }
@@ -404,7 +425,7 @@ async function reconcileImport(store, op) {
   return 'rolledBack';
 }
 
-function reconcilePermanentDelete(store, op) {
+async function reconcilePermanentDelete(store, op) {
   const row = op.sourceFileId ? store.db.prepare('SELECT * FROM source_files WHERE id = ?').get(op.sourceFileId) : null;
   if (!row) {
     store.completeFileOperation(op.id); // purge already finished
@@ -419,6 +440,14 @@ function reconcilePermanentDelete(store, op) {
       return 'failed';
     }
     if (probe.present) {
+      // The compensating delete must only remove the row's OWN payload: a
+      // recycle-area file that no longer matches the recorded identity is a
+      // content_mismatch and stays on disk.
+      const deleteVerification = await verifyRecoveryTargetContent(root.absolute_path, trashRel, row.sha256);
+      if (!deleteVerification.ok) {
+        store.failFileOperation(op.id, deleteVerification.reason === 'unverifiable_hash' ? 'content_mismatch' : deleteVerification.reason);
+        return 'failed';
+      }
       try {
         safeUnlinkInsideRoot(root.absolute_path, trashRel);
       } catch (unlinkErr) {

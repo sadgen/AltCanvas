@@ -1944,10 +1944,12 @@ async function testRecoverySafePaths() {
     fs.mkdirSync(path.join(rootDir, 'd4'));
     fs.mkdirSync(path.join(rootDir, '.altcanvas-trash'), { recursive: true });
     const sf2 = store.createSourceFile(actor, root.id, {
-      relativePath: 'd4/y.pdf', filename: 'y.pdf', sha256: sha256Of(makePdfBytes('y')), sizeBytes: 10,
+      relativePath: 'd4/y.pdf', filename: 'y.pdf', sha256: sha256Of(makePdfBytes('y')), sizeBytes: makePdfBytes('y').length,
       status: 'trashed'
     });
-    fs.writeFileSync(path.join(rootDir, '.altcanvas-trash', `${sf2.id}.pdf`), makePdfBytes('trash-payload'));
+    // The trash payload must match the recorded identity so the scenario
+    // isolates the symlinked-target-parent behavior.
+    fs.writeFileSync(path.join(rootDir, '.altcanvas-trash', `${sf2.id}.pdf`), makePdfBytes('y'));
     const op4 = store.createFileOperation(actor, {
       operationType: 'file.restore',
       sourceFileId: sf2.id,
@@ -2245,6 +2247,128 @@ async function testM4Audit3Fixes() {
   await testListingTruncationBoundary();
 }
 
+
+// ============================================================
+// 23. Fourth-audit P1: ROLLBACK paths must verify source content identity
+//     too — the symmetric counterpart of the completion-side gate.
+// ============================================================
+async function testRecoveryRollbackContentIdentity() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-rb-store-'));
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-rb-root-'));
+  const store = new CanvasStore(path.join(tempDir, 'canvas.sqlite'));
+  const actor = canvasActorKey('local', 'm4-rb');
+  try {
+    const [root] = store.ensureLibraryRootsFromConfig(actor, [{ absolutePath: rootDir, displayName: '回滚验证文库' }]);
+    const writeBytes = (rel, bytes) => {
+      fs.mkdirSync(path.dirname(path.join(rootDir, rel)), { recursive: true });
+      fs.writeFileSync(path.join(rootDir, rel), bytes);
+    };
+    const startCrashedOp = (operationType, detail) => {
+      const op = store.createFileOperation(actor, { operationType, ...detail });
+      store.startFileOperation(op.id);
+      return op;
+    };
+
+    // 23.1 move-like rollback (auditor's repro): DB already points at
+    // new.pdf with SHA-A; new.pdf is gone; old.pdf was replaced by SHA-B.
+    // The DB revert onto old.pdf must be refused: content_mismatch, DB keeps
+    // pointing at new.pdf with the recorded identity.
+    const bytesA = makePdfBytes('rollback-A');
+    const rowA = store.createSourceFile(actor, root.id, {
+      relativePath: 'new.pdf', filename: 'new.pdf',
+      sha256: sha256Of(bytesA), sizeBytes: bytesA.length
+    });
+    writeBytes('old.pdf', makePdfBytes('rollback-B-prime'));
+    const opA = startCrashedOp('file.rename', {
+      sourceFileId: rowA.id, sourcePath: 'old.pdf', targetPath: 'new.pdf'
+    });
+    await recoverInterruptedFileOperations(store);
+    assert.equal(store.getFileOperation(actor, opA.id).state, 'failed');
+    assert.equal(store.getFileOperation(actor, opA.id).errorCode, 'content_mismatch');
+    const rowAAfter = store.getSourceFile(actor, rowA.id);
+    assert.equal(rowAAfter.relativePath, 'new.pdf', 'DB must not roll back onto foreign content');
+    assert.equal(rowAAfter.sha256, sha256Of(bytesA));
+    assert.equal(fs.readFileSync(path.join(rootDir, 'old.pdf')).equals(makePdfBytes('rollback-B-prime')), true,
+      'the replaced source file itself is left untouched');
+
+    // 23.2 trash rollback: row trashed, trash never ran (no recycle file),
+    // source present but replaced -> reverting the row to active is refused.
+    const bytesB = makePdfBytes('rollback-B');
+    const rowB = store.createSourceFile(actor, root.id, {
+      relativePath: 'trash-keep.pdf', filename: 'trash-keep.pdf',
+      sha256: sha256Of(bytesB), sizeBytes: bytesB.length,
+      status: 'trashed'
+    });
+    writeBytes('trash-keep.pdf', makePdfBytes('rollback-B-prime'));
+    const opB = startCrashedOp('file.trash', {
+      sourceFileId: rowB.id, sourcePath: 'trash-keep.pdf', targetPath: `.altcanvas-trash/${rowB.id}.pdf`
+    });
+    await recoverInterruptedFileOperations(store);
+    assert.equal(store.getFileOperation(actor, opB.id).state, 'failed');
+    assert.equal(store.getFileOperation(actor, opB.id).errorCode, 'content_mismatch');
+    assert.equal(store.getSourceFile(actor, rowB.id).status, 'trashed',
+      'a replaced source must never be blessed as an active rollback');
+
+    // 23.3 restore rollback: restore never ran, but the recycle-area payload
+    // was replaced by different bytes -> not a clean rollback; payload stays.
+    const bytesC = makePdfBytes('rollback-C');
+    const rowC = store.createSourceFile(actor, root.id, {
+      relativePath: 'res-keep.pdf', filename: 'res-keep.pdf',
+      sha256: sha256Of(bytesC), sizeBytes: bytesC.length,
+      status: 'trashed'
+    });
+    writeBytes('.altcanvas-trash/' + rowC.id + '.pdf', makePdfBytes('rollback-C-prime'));
+    const opC = startCrashedOp('file.restore', {
+      sourceFileId: rowC.id, sourcePath: `.altcanvas-trash/${rowC.id}.pdf`, targetPath: 'res-keep.pdf'
+    });
+    await recoverInterruptedFileOperations(store);
+    assert.equal(store.getFileOperation(actor, opC.id).state, 'failed');
+    assert.equal(store.getFileOperation(actor, opC.id).errorCode, 'content_mismatch');
+    assert.equal(fs.readFileSync(path.join(rootDir, '.altcanvas-trash', `${rowC.id}.pdf`)).equals(makePdfBytes('rollback-C-prime')), true,
+      'the recycle-area payload is left exactly as found');
+
+    // 23.4 permanent delete: the recycle-area file was replaced by different
+    // bytes -> the compensating delete is refused; file survives, row intact.
+    const bytesD = makePdfBytes('rollback-D');
+    const rowD = store.createSourceFile(actor, root.id, {
+      relativePath: 'perm.pdf', filename: 'perm.pdf',
+      sha256: sha256Of(bytesD), sizeBytes: bytesD.length,
+      status: 'trashed'
+    });
+    writeBytes('.altcanvas-trash/' + rowD.id + '.pdf', makePdfBytes('rollback-D-prime'));
+    const opD = startCrashedOp('file.delete_permanent', {
+      sourceFileId: rowD.id, sourcePath: `.altcanvas-trash/${rowD.id}.pdf`
+    });
+    await recoverInterruptedFileOperations(store);
+    assert.equal(store.getFileOperation(actor, opD.id).state, 'failed');
+    assert.equal(store.getFileOperation(actor, opD.id).errorCode, 'content_mismatch');
+    assert.equal(fs.existsSync(path.join(rootDir, '.altcanvas-trash', `${rowD.id}.pdf`)), true,
+      'a foreign recycle-area file must never be deleted');
+    assert.ok(store.getSourceFile(actor, rowD.id), 'the row is not purged while the payload is unverified');
+
+    // 23.5 positive control: matching payloads still roll back cleanly.
+    const bytesE = makePdfBytes('rollback-E');
+    const rowE = store.createSourceFile(actor, root.id, {
+      relativePath: 'new-e.pdf', filename: 'new-e.pdf',
+      sha256: sha256Of(bytesE), sizeBytes: bytesE.length
+    });
+    writeBytes('old-e.pdf', bytesE);
+    const opE = startCrashedOp('file.rename', {
+      sourceFileId: rowE.id, sourcePath: 'old-e.pdf', targetPath: 'new-e.pdf'
+    });
+    const summary = await recoverInterruptedFileOperations(store);
+    assert.equal(store.getFileOperation(actor, opE.id).state, 'rolled_back');
+    assert.equal(store.getSourceFile(actor, rowE.id).relativePath, 'old-e.pdf');
+    assert.equal(summary.rolledBack >= 1, true);
+
+    console.log('✅ rollback content identity: replaced sources/payloads never roll back or delete; matching content does passed');
+  } finally {
+    try { store.close(); } catch {}
+    fs.rmSync(tempDir, { recursive: true, force: true });
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+}
+
 try {
   await main();
   await testV12Migration();
@@ -2253,6 +2377,7 @@ try {
   await testM4AuditFixes();
   await testM4Audit2Fixes();
   await testM4Audit3Fixes();
+  await testRecoveryRollbackContentIdentity();
   process.exit(0);
 } catch (err) {
   console.error('❌ Native M4 test failure:', err);
