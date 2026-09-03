@@ -931,12 +931,8 @@
 - 启动 IIFE 区域内不得出现绕过统一入口的直调。
 - `npm test` 7 套全过；`git diff --check` 通过。
 
-### 待人工实机验收（M3.0 关闭闸门）
-1. 退出登录并刷新页面；
-2. 使用本地账号密码登录；
-3. **不刷新页面**；
-4. 确认主题选择器、画板、文库和收件箱直接出现；
-5. 回复"完成"，Agent 复查 `.debug/browser.log`：无 Canvas 401、无重复初始化、无 OIDC 提示错误。
+### 人工实机验收（M3.0 关闭闸门）：**PASS（2026-09-03 04:26 UTC）**
+实机日志确认：登录操作后仅 `Browser diagnostics connected`；无新增 Canvas 401、无 `app.initialize`/`canvas.initialize` 错误、无 Altero API 误调用、无 OIDC 遗留提示；登录后统一执行 `checkSession() → initializeAuthenticatedApp()`。**M3.0 正式关闭（PASS）**。
 
 ---
 
