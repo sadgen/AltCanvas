@@ -909,6 +909,30 @@
 - 审计登记的非阻断 P2 技术债同日收紧：`resolved.arXivId` 大小写旁路封堵（两种拼写均纳入长度契约）；`externalRefs` 全字段规范化（`externalAttachmentId` ≤256 字符串、`externalVersion` 非负整数、`sourceUrl` ≤2000 且必须 http(s)，未知键丢弃并输出规范化对象）；新增 5 类非法载荷 400 测试与全字段正向前置持久化断言；
 - **M2 统一 Native 导入管线：PASS（关闭）**。下一阶段：M3 Translation Server 集成。
 
+## 2026-09-03 会话（M3.1 审计整改：真实超时语义与 DNS 固定修复）
+
+### 修复清单（审计两项 P1 + 两项 P2）
+
+1. **[P1] 三层超时语义重写**：
+   - 总期限从 `callTranslationServer()` 入口起算，覆盖目标解析（DNS 悬挂实测被总期限切断）、连接、响应头、响应体与解析全过程；
+   - 连接计时器在 Socket `connect`/`secureConnect` 后立即清除（实测：服务端延迟 80ms 返回、connectTimeout=20ms、responseTimeout=200ms 场景成功）；
+   - 响应计时器在连接建立时武装，覆盖等待响应头与读取响应体（实测：静默服务器触发 `response_timeout`、慢响应体按预算边界成功/截断）；
+   - 所有超时路径销毁请求与 Socket；总期限优先级实测高于更长的响应超时。
+2. **[P1] DNS 固定彻底修复**（实测发现比审计报告更严重：主机名目标的固定拨号此前从未真正生效——Node 22 以 `all:true` 模式调用自定义 lookup，旧的 `(err, ip, family)` 回调在此模式下静默失效）：
+   - 自定义 lookup 同时支持 `all:true`（记录数组）与单地址两种回调模式，且仅返回已验证地址，绝不回落系统 DNS；
+   - `allowPrivate` 只决定是否接受私网地址，**不再决定是否解析**：远程目标无论开关均执行 DNS 解析并固定；
+   - 解析为零地址即拒绝且不拨号（实测传输零调用）；
+   - `localhost` 域名必须解析且全部结果属于 127.0.0.0/8 或 `::1` 后固定（IPv4 优先确定性选择）；IP 字面量直接固定、零 DNS 调用；
+   - `allowPrivate=true` 实测仍解析并固定 192.168.x 地址。
+3. **[P2] 集合数量上限**：creators ≤100、拒绝无任何姓名字段的空 creator（防止放大为空数据库行）。
+4. **[P2] 序列化请求上限**：以最终序列化的 `{input, format}` body 字节为准（真实与注入传输共用），1 MiB input 因 JSON 封套超标实测被拒。
+
+### 新增真实服务器测试（test 10–16）
+慢响应成功（审计原始场景）、无响应头 `response_timeout`、慢响应体双向预算边界、DNS 永久悬挂总期限、总期限优先级、DNS 固定全家桶（allowPrivate 固定/零地址拒绝不拨号/localhost 解析验证与真实回环往返/IP 字面量零 DNS）、集合上限与序列化体积门。
+`npm test` 8 套 28 个断言组全过；`git diff --check` 通过。
+
+---
+
 ## 2026-09-03 会话（M3.1 Translation Server 安全适配层）
 
 ### 交付内容 ([`server/translation-server.mjs`](file:///home/sadgen/Projects/AltCanvas/server/translation-server.mjs))

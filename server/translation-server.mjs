@@ -1,6 +1,7 @@
 import http from 'node:http';
 import https from 'node:https';
-import { validateExternalUrl } from './import-resolver.mjs';
+import dns from 'node:dns/promises';
+import { isPrivateNetworkHost } from './security.mjs';
 
 // M3.1 Translation Server adapter.
 //
@@ -9,15 +10,23 @@ import { validateExternalUrl } from './import-resolver.mjs';
 //    (TRANSLATION_SERVER_URL). Callers supply input text, never an address.
 //  - Loopback and Unix-socket targets are the trusted default; any remote
 //    target additionally requires ALLOW_REMOTE_TRANSLATION_SERVER=true and
-//    passes the shared SSRF gate (DNS pinning, private-network block).
+//    passes a full SSRF gate: DNS is ALWAYS resolved (allowPrivate only
+//    decides acceptance, never whether resolution/pinning happens), private
+//    ranges are rejected unless explicitly allowed, and the connection is
+//    pinned to the validated addresses — never falling back to system DNS.
 //  - Redirects are NEVER followed: a 3xx response is an error.
-//  - Connect, response, and total-task timeouts apply; request and response
-//    bodies are size-capped.
+//  - A single total deadline covers the WHOLE task (target resolution/DNS,
+//    connection, headers, body, parsing). The connect timer is cleared once
+//    the socket connects; the response timer then covers waiting for headers
+//    AND reading the body. Every timeout destroys the request and socket.
+//  - Request and response bodies are size-capped (final serialized request
+//    body included).
 //  - This module only PARSES. It performs no database or Blob writes; its
 //    output is a DTO intended for normalizeNativeImportItem + the M2 executor.
 
-const MAX_REQUEST_BODY_BYTES = 1024 * 1024;       // 1 MiB bibliography input
+const MAX_REQUEST_BODY_BYTES = 1024 * 1024;       // 1 MiB serialized request body
 const MAX_RESPONSE_BODY_BYTES = 2 * 1024 * 1024;  // 2 MiB parsed metadata
+const MAX_CREATORS = 100;                          // collection element cap
 
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
 
@@ -50,11 +59,35 @@ export function isLoopbackHost(hostname) {
   return LOOPBACK_HOSTS.has(String(hostname || '').toLowerCase());
 }
 
+// Any address inside 127.0.0.0/8 or the IPv6 loopback ::1.
+function isLoopbackAddress(address) {
+  const addr = String(address || '');
+  return addr.startsWith('127.') || addr === '::1';
+}
+
+function isIpLiteral(hostname) {
+  const host = String(hostname || '');
+  return /^\d+\.\d+\.\d+\.\d+$/.test(host)
+    || (host.startsWith('[') && host.endsWith(']'))
+    || host.includes(':');
+}
+
+async function resolveHostAddresses(hostname, lookupFn) {
+  const lookup = typeof lookupFn === 'function' ? lookupFn : dns.lookup;
+  const result = await lookup(hostname, { all: true, verbatim: true });
+  const list = Array.isArray(result) ? result : [result];
+  return list
+    .map(record => (typeof record === 'string' ? { address: record, family: record.includes(':') ? 6 : 4 } : record))
+    .filter(record => record && typeof record.address === 'string' && record.address.length > 0);
+}
+
 // Resolve the configured target into a transport description.
 //   { kind: 'disabled' }
 //   { kind: 'socket', socketPath }
-//   { kind: 'loopback', parsed }
-//   { kind: 'remote', parsed, pinnedAddresses }   // after full SSRF validation
+//   { kind: 'loopback', parsed, pinnedAddresses }
+//   { kind: 'remote', parsed, pinnedAddresses }
+// Every network target carries pinnedAddresses: the connection is dialed to a
+// validated address and NEVER falls back to a second system-DNS resolution.
 export async function resolveTranslationTarget(config, { lookupFn } = {}) {
   if (!config.url) return { kind: 'disabled' };
 
@@ -79,8 +112,32 @@ export async function resolveTranslationTarget(config, { lookupFn } = {}) {
     throw new TranslationError('invalid_target', 'translation target must be http(s) or unix://');
   }
 
-  if (isLoopbackHost(parsed.hostname)) {
-    return { kind: 'loopback', parsed };
+  const hostname = parsed.hostname.toLowerCase();
+
+  // IP-literal loopback: pin the literal itself, no DNS involved.
+  if (hostname === '127.0.0.1' || hostname === '::1' || hostname === '[::1]') {
+    const address = hostname.startsWith('[') ? hostname.slice(1, -1) : hostname;
+    return { kind: 'loopback', parsed, pinnedAddresses: [{ address, family: address.includes(':') ? 6 : 4 }] };
+  }
+
+  // The 'localhost' name must resolve and every result must be loopback.
+  if (hostname === 'localhost') {
+    const addresses = await resolveHostAddresses(hostname, lookupFn);
+    if (!addresses.length) {
+      throw new TranslationError('invalid_target', 'localhost resolved to no addresses; refusing to dial');
+    }
+    for (const record of addresses) {
+      if (!isLoopbackAddress(record.address)) {
+        throw new TranslationError(
+          'invalid_target',
+          `localhost resolved to non-loopback address ${record.address}; refusing to dial`
+        );
+      }
+    }
+    // Prefer the IPv4 loopback when available: dual-stack hosts list ::1 first
+    // verbatim, and the conventional AltCanvas listener binds 127.0.0.1.
+    const preferred = addresses.find(a => !String(a.address).includes(':')) ?? addresses[0];
+    return { kind: 'loopback', parsed, pinnedAddresses: [preferred] };
   }
 
   if (!config.allowRemote) {
@@ -90,22 +147,36 @@ export async function resolveTranslationTarget(config, { lookupFn } = {}) {
     );
   }
 
-  // Full SSRF gate for remote targets: DNS resolution with private-network
-  // blocking (unless explicitly allowed) and pinned addresses for dialing.
-  const validation = await validateExternalUrl(parsed.toString(), {
-    allowPrivate: config.allowPrivate,
-    ...(lookupFn ? { lookupFn } : {})
-  });
-  return { kind: 'remote', parsed: validation.parsed, pinnedAddresses: validation.validatedAddresses };
+  // Remote target: DNS is ALWAYS resolved so the connection can be pinned.
+  // allowPrivate only decides acceptance of private ranges, never whether
+  // resolution and pinning happen.
+  const addresses = await resolveHostAddresses(hostname, lookupFn);
+  if (!addresses.length) {
+    throw new TranslationError(
+      'invalid_target',
+      `translation host ${hostname} resolved to no usable addresses; refusing to fall back to system DNS`
+    );
+  }
+  if (!config.allowPrivate) {
+    for (const record of addresses) {
+      if (isPrivateNetworkHost(record.address)) {
+        throw new TranslationError(
+          'forbidden_address',
+          `translation host ${hostname} resolves to forbidden private address ${record.address}`
+        );
+      }
+    }
+  }
+  return { kind: 'remote', parsed, pinnedAddresses: addresses };
 }
 
-// Single-shot HTTP(S) request with socketPath support, pinned dialing for
-// remote targets, hard total timeout, and response size capping.
-// `transportFn` injection keeps this deterministic in tests.
-async function httpJsonRequest(target, payload, config, { transportFn } = {}) {
+// Single-shot HTTP(S) request with socketPath support, pinned dialing,
+// connect/response/total timers with correct lifecycle, and response size
+// capping. `transportFn` injection keeps this deterministic in tests.
+async function httpJsonRequest(target, { payload, bodyBuffer }, config, { transportFn, deadline }) {
   if (typeof transportFn === 'function') {
-    // Injected transports must obey the same hard total-task timeout as the
-    // real transport; otherwise a hanging test/adapter could stall forever.
+    // Injected transports must obey the same hard total deadline as the real
+    // transport; otherwise a hanging test/adapter could stall forever.
     let timer;
     try {
       return await Promise.race([
@@ -113,7 +184,7 @@ async function httpJsonRequest(target, payload, config, { transportFn } = {}) {
         new Promise((_, reject) => {
           timer = setTimeout(() => reject(
             new TranslationError('total_timeout', `translation task exceeded total timeout of ${config.totalTimeoutMs}ms`)
-          ), config.totalTimeoutMs);
+          ), Math.max(0, deadline - Date.now()));
         })
       ]);
     } finally {
@@ -121,7 +192,6 @@ async function httpJsonRequest(target, payload, config, { transportFn } = {}) {
     }
   }
 
-  const bodyBuffer = Buffer.from(JSON.stringify(payload), 'utf8');
   const isHttps = target.kind !== 'socket' && target.parsed.protocol === 'https:';
   const requester = isHttps ? https.request : http.request;
 
@@ -131,73 +201,126 @@ async function httpJsonRequest(target, payload, config, { transportFn } = {}) {
       'Content-Type': 'application/json',
       'Accept': 'application/json',
       'Content-Length': bodyBuffer.length
-    },
-    timeout: config.connectTimeoutMs
+    }
   };
   if (target.kind === 'socket') {
     options.socketPath = target.socketPath;
-  } else if (target.kind === 'loopback') {
-    options.hostname = target.parsed.hostname;
-    options.port = target.parsed.port || (isHttps ? 443 : 80);
-    options.path = `${target.parsed.pathname}${target.parsed.search}`;
-    options.servername = target.parsed.hostname;
   } else {
     options.hostname = target.parsed.hostname;
     options.port = target.parsed.port || (isHttps ? 443 : 80);
     options.path = `${target.parsed.pathname}${target.parsed.search}`;
     options.servername = target.parsed.hostname;
-    const pinned = target.pinnedAddresses?.[0];
-    if (pinned?.address) {
-      options.lookup = (h, opt, cb) => cb(null, pinned.address, pinned.family || 4);
+    if (target.pinnedAddresses?.length) {
+      // Node calls custom lookups in BOTH modes: with {all:true} (records array)
+      // and without (single ip+family). Honor whichever mode is requested and
+      // return ONLY validated addresses — never re-resolve via system DNS.
+      const records = target.pinnedAddresses.map(a => ({
+        address: a.address,
+        family: a.family || (a.address.includes(':') ? 6 : 4)
+      }));
+      options.lookup = (h, opt, cb) => {
+        if (opt && opt.all) cb(null, records);
+        else cb(null, records[0].address, records[0].family);
+      };
     }
   }
 
   return new Promise((resolve, reject) => {
     let settled = false;
+    let connectTimer = null;
+    let responseTimer = null;
+    let req = null;
+    let activeSocket = null;
+
+    const clearTimers = () => {
+      clearTimeout(connectTimer);
+      clearTimeout(responseTimer);
+    };
     const finish = (fn, ...args) => {
       if (settled) return;
       settled = true;
-      clearTimeout(totalTimer);
-      clearTimeout(responseTimer);
+      clearTimers();
       fn(...args);
     };
+    const destroyConnection = () => {
+      try { req?.destroy(); } catch {}
+      try { activeSocket?.destroy(); } catch {}
+    };
 
-    const totalTimer = setTimeout(() => {
-      req?.destroy();
+    // Total deadline: covers connection establishment, headers, and body.
+    const totalRemaining = deadline - Date.now();
+    if (totalRemaining <= 0) {
       finish(reject, new TranslationError('total_timeout', `translation task exceeded total timeout of ${config.totalTimeoutMs}ms`));
-    }, config.totalTimeoutMs);
+      return;
+    }
+    const totalTimer = setTimeout(() => {
+      destroyConnection();
+      finish(reject, new TranslationError('total_timeout', `translation task exceeded total timeout of ${config.totalTimeoutMs}ms`));
+    }, totalRemaining);
+    const originalFinish = finish;
+    // ensure total timer cleared on any settlement
+    const wrapFinish = (fn) => (...args) => { clearTimeout(totalTimer); originalFinish(fn, ...args); };
+    const rejectWith = wrapFinish(reject);
+    const resolveWith = wrapFinish(resolve);
 
-    let responseTimer = null;
-    const req = requester(options, (res) => {
+    // Connect timer: armed now, cleared the moment the socket connects.
+    connectTimer = setTimeout(() => {
+      destroyConnection();
+      rejectWith(new TranslationError('connect_timeout', `translation connection exceeded ${config.connectTimeoutMs}ms`));
+    }, config.connectTimeoutMs);
+
+    const armResponseTimer = () => {
+      if (responseTimer || settled) return;
+      // Response timer: covers waiting for headers AND reading the body,
+      // armed as soon as the connection is established.
       responseTimer = setTimeout(() => {
-        res.destroy();
-        finish(reject, new TranslationError('response_timeout', `translation response exceeded timeout of ${config.responseTimeoutMs}ms`));
+        destroyConnection();
+        rejectWith(new TranslationError('response_timeout', `translation response exceeded ${config.responseTimeoutMs}ms`));
       }, config.responseTimeoutMs);
+    };
 
+    req = requester(options, (res) => {
+      clearTimeout(connectTimer);
       const chunks = [];
       let received = 0;
       res.on('data', (chunk) => {
         received += chunk.length;
         if (received > MAX_RESPONSE_BODY_BYTES) {
-          res.destroy();
-          finish(reject, new TranslationError('response_too_large', `translation response exceeds ${MAX_RESPONSE_BODY_BYTES} bytes`));
+          destroyConnection();
+          rejectWith(new TranslationError('response_too_large', `translation response exceeds ${MAX_RESPONSE_BODY_BYTES} bytes`));
           return;
         }
         chunks.push(chunk);
       });
-      res.on('end', () => finish(resolve, {
-        status: res.statusCode || 0,
-        headers: res.headers || {},
-        body: Buffer.concat(chunks).toString('utf8')
-      }));
-      res.on('error', (err) => finish(reject, new TranslationError('transport_error', err.message)));
+      res.on('end', () => {
+        resolveWith({
+          status: res.statusCode || 0,
+          headers: res.headers || {},
+          body: Buffer.concat(chunks).toString('utf8')
+        });
+      });
+      res.on('error', (err) => {
+        rejectWith(new TranslationError('transport_error', err.message));
+      });
     });
 
-    req.on('timeout', () => {
-      req.destroy();
-      finish(reject, new TranslationError('connect_timeout', `translation connection exceeded ${config.connectTimeoutMs}ms`));
+    req.on('socket', (sock) => {
+      activeSocket = sock;
+      sock.once('connect', () => {
+        clearTimeout(connectTimer);
+        armResponseTimer();
+      });
+      // HTTPS: TLS handshake completes after TCP connect; both clear the
+      // connect timer, and the response timer is armed on the first event.
+      sock.once('secureConnect', () => {
+        clearTimeout(connectTimer);
+        armResponseTimer();
+      });
     });
-    req.on('error', (err) => finish(reject, new TranslationError('transport_error', err.message)));
+
+    req.on('error', (err) => {
+      rejectWith(new TranslationError('transport_error', err.message));
+    });
     req.end(bodyBuffer);
   });
 }
@@ -205,7 +328,7 @@ async function httpJsonRequest(target, payload, config, { transportFn } = {}) {
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
 // Strict validation of the translation server payload. Unknown fields are
-// dropped; every retained field is type- and length-checked.
+// dropped; every retained field is type-, length-, and cardinality-checked.
 export function validateTranslationPayload(data) {
   if (!data || typeof data !== 'object' || Array.isArray(data)) {
     throw new TranslationError('invalid_payload', 'translation response must be a JSON object');
@@ -233,6 +356,9 @@ export function validateTranslationPayload(data) {
     if (!Array.isArray(data.creators)) {
       throw new TranslationError('invalid_payload', 'creators must be an array');
     }
+    if (data.creators.length > MAX_CREATORS) {
+      throw new TranslationError('invalid_payload', `creators must contain at most ${MAX_CREATORS} entries`);
+    }
     out.creators = data.creators.map(c => {
       if (!c || typeof c !== 'object' || Array.isArray(c)) {
         throw new TranslationError('invalid_payload', 'creators entries must be objects');
@@ -245,6 +371,11 @@ export function validateTranslationPayload(data) {
           }
           entry[field] = c[field];
         }
+      }
+      // A creator with no name-ish field carries no information and would only
+      // amplify into empty database rows downstream.
+      if (!entry.firstName && !entry.lastName && !entry.name) {
+        throw new TranslationError('invalid_payload', 'creators entries must carry at least one of firstName, lastName, or name');
       }
       return entry;
     });
@@ -293,13 +424,24 @@ export function translationResultToImportItem(result) {
 }
 
 // Primary entry: parse an input via the configured Translation Server.
-// Never writes to the database or Blob storage.
+// Never writes to the database or Blob storage. A single total deadline
+// starts HERE and covers target resolution (DNS), connection, headers,
+// body, and parsing.
 export async function callTranslationServer({ input, format = null }, {
   config = getTranslationServerConfig(),
   lookupFn = null,
   transportFn = null
 } = {}) {
-  const target = await resolveTranslationTarget(config, lookupFn ? { lookupFn } : {});
+  const deadline = Date.now() + config.totalTimeoutMs;
+
+  const target = await Promise.race([
+    resolveTranslationTarget(config, lookupFn ? { lookupFn } : {}),
+    new Promise((_, reject) => {
+      setTimeout(() => reject(
+        new TranslationError('total_timeout', `translation task exceeded total timeout of ${config.totalTimeoutMs}ms`)
+      ), Math.max(0, deadline - Date.now()));
+    })
+  ]);
   if (target.kind === 'disabled') {
     return { available: false, reason: 'translation_server_not_configured' };
   }
@@ -307,16 +449,22 @@ export async function callTranslationServer({ input, format = null }, {
   if (typeof input !== 'string' || !input.trim()) {
     throw new TranslationError('invalid_input', 'input must be a non-empty string');
   }
-  if (Buffer.byteLength(input, 'utf8') > MAX_REQUEST_BODY_BYTES) {
-    throw new TranslationError('request_too_large', `input exceeds ${MAX_REQUEST_BODY_BYTES} bytes`);
-  }
   if (format !== null && format !== undefined) {
     if (typeof format !== 'string' || format.length > 32) {
       throw new TranslationError('invalid_input', 'format must be a string of at most 32 characters');
     }
   }
 
-  const response = await httpJsonRequest(target, { input, format }, config, { transportFn });
+  const payload = { input, format };
+  const bodyBuffer = Buffer.from(JSON.stringify(payload), 'utf8');
+  // Final serialized-size gate: the declared request cap applies to the body
+  // actually put on the wire (JSON envelope included), shared by the real
+  // and injected transports.
+  if (bodyBuffer.length > MAX_REQUEST_BODY_BYTES) {
+    throw new TranslationError('request_too_large', `serialized request body exceeds ${MAX_REQUEST_BODY_BYTES} bytes`);
+  }
+
+  const response = await httpJsonRequest(target, { payload, bodyBuffer }, config, { transportFn, deadline });
 
   // Belt-and-braces: the real transport enforces the cap while streaming; any
   // returned body (including injected transports) is re-checked here.

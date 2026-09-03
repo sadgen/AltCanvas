@@ -323,5 +323,299 @@ console.log('✅ DTO conversion and normalizeNativeImportItem contract passed');
 }
 console.log('✅ Real loopback HTTP round-trip and redirect abort passed');
 
+// =========================================================================
+// --- Audit round 2: real timeout semantics, DNS pinning, collection caps ---
+// =========================================================================
+
+const startServer = (handler) => new Promise(resolve => {
+  const server = http.createServer(handler);
+  server.listen(0, '127.0.0.1', () => resolve({ server, port: server.address().port }));
+});
+const closeServer = (server) => new Promise(resolve => server.close(resolve));
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+// --- 10. Slow response SUCCEEDS under corrected timer lifecycle ---
+// connectTimeout=20ms would falsely fire under the old (socket-inactivity)
+// semantics; the connect timer must clear on connect and the 80ms response
+// must succeed within responseTimeout=200ms.
+{
+  const { server, port } = await startServer(async (req, res) => {
+    await sleep(80); // deliberate slow-but-valid response
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(validPayload));
+  });
+  try {
+    const call = await callTranslationServer(
+      { input: 'TY - JOUR' },
+      {
+        config: {
+          ...getTranslationServerConfig({}),
+          url: `http://127.0.0.1:${port}/parse`,
+          connectTimeoutMs: 20,
+          responseTimeoutMs: 200,
+          totalTimeoutMs: 2000
+        }
+      }
+    );
+    assert.equal(call.ok, true, 'Slow (80ms) response must succeed: connect timer clears on connect');
+    assert.equal(call.item.title, validPayload.title);
+  } finally {
+    await closeServer(server);
+  }
+}
+console.log('✅ Slow-response success under corrected timer lifecycle passed');
+
+// --- 11. No response headers -> response_timeout (armed at connect) ---
+{
+  const { server, port } = await startServer(() => {
+    // Accept the connection, read the body, never respond.
+  });
+  try {
+    await assert.rejects(
+      callTranslationServer(
+        { input: 'TY - JOUR' },
+        {
+          config: {
+            ...getTranslationServerConfig({}),
+            url: `http://127.0.0.1:${port}/parse`,
+            connectTimeoutMs: 1000,
+            responseTimeoutMs: 150,
+            totalTimeoutMs: 5000
+          }
+        }
+      ),
+      err => err.code === 'response_timeout',
+      'Silent server must trip the response timer while waiting for headers'
+    );
+  } finally {
+    await closeServer(server);
+  }
+}
+console.log('✅ No-response-header response_timeout passed');
+
+// --- 12. Slow body: within budget succeeds; over budget is a hard wall ---
+{
+  // 12a: headers immediate, body after 120ms, responseTimeout=400 -> success
+  {
+    const { server, port } = await startServer(async (req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      await sleep(120);
+      res.end(JSON.stringify(validPayload));
+    });
+    try {
+      const call = await callTranslationServer(
+        { input: 'TY - JOUR' },
+        {
+          config: {
+            ...getTranslationServerConfig({}),
+            url: `http://127.0.0.1:${port}/parse`,
+            connectTimeoutMs: 1000,
+            responseTimeoutMs: 400,
+            totalTimeoutMs: 3000
+          }
+        }
+      );
+      assert.equal(call.ok, true, 'Slow body within the response budget must succeed');
+    } finally {
+      await closeServer(server);
+    }
+  }
+  // 12b: body after 300ms, responseTimeout=150 -> response_timeout
+  {
+    const { server, port } = await startServer(async (req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      await sleep(300);
+      res.end(JSON.stringify(validPayload));
+    });
+    try {
+      await assert.rejects(
+        callTranslationServer(
+          { input: 'TY - JOUR' },
+          {
+            config: {
+              ...getTranslationServerConfig({}),
+              url: `http://127.0.0.1:${port}/parse`,
+              connectTimeoutMs: 1000,
+              responseTimeoutMs: 150,
+              totalTimeoutMs: 5000
+            }
+          }
+        ),
+        err => err.code === 'response_timeout',
+        'Body slower than the response budget must be cut off'
+      );
+    } finally {
+      await closeServer(server);
+    }
+  }
+}
+console.log('✅ Slow-body budget boundaries passed');
+
+// --- 13. Hanging DNS is covered by the total deadline (armed at entry) ---
+{
+  await assert.rejects(
+    callTranslationServer(
+      { input: 'TY - JOUR' },
+      {
+        config: {
+          ...getTranslationServerConfig({}),
+          url: 'https://translate.example.com/parse',
+          allowRemote: true,
+          totalTimeoutMs: 100
+        },
+        lookupFn: () => new Promise(() => {}) // DNS never resolves
+      }
+    ),
+    err => err.code === 'total_timeout',
+    'Hanging DNS resolution must be cut off by the total deadline'
+  );
+}
+console.log('✅ Hanging-DNS total deadline passed');
+
+// --- 14. Total deadline takes priority over longer response timeout ---
+{
+  const { server, port } = await startServer(() => { /* never responds */ });
+  try {
+    await assert.rejects(
+      callTranslationServer(
+        { input: 'TY - JOUR' },
+        {
+          config: {
+            ...getTranslationServerConfig({}),
+            url: `http://127.0.0.1:${port}/parse`,
+            connectTimeoutMs: 5000,
+            responseTimeoutMs: 10_000,
+            totalTimeoutMs: 150
+          }
+        }
+      ),
+      err => err.code === 'total_timeout',
+      'The total deadline must fire before a longer response timeout'
+    );
+  } finally {
+    await closeServer(server);
+  }
+}
+console.log('✅ Total-deadline priority passed');
+
+// --- 15. DNS pinning: resolution ALWAYS happens; allowPrivate accepts but pins ---
+{
+  // 15a: allowPrivate=true still resolves AND pins — no system-DNS fallback.
+  const pinned = await resolveTranslationTarget(
+    {
+      url: 'https://translate.internal.example.com/parse',
+      allowRemote: true,
+      allowPrivate: true
+    },
+    { lookupFn: async () => [{ address: '192.168.1.5', family: 4 }] }
+  );
+  assert.equal(pinned.kind, 'remote');
+  assert.ok(pinned.pinnedAddresses.length >= 1,
+    'allowPrivate=true must still resolve and pin addresses (never skip DNS)');
+  assert.equal(pinned.pinnedAddresses[0].address, '192.168.1.5');
+
+  // 15b: remote resolving to ZERO addresses is rejected; transport never dialed.
+  let transportCalled = false;
+  await assert.rejects(
+    callTranslationServer(
+      { input: 'x' },
+      {
+        config: { ...getTranslationServerConfig({}), url: 'https://translate.example.com/parse', allowRemote: true },
+        lookupFn: async () => [],
+        transportFn: async () => { transportCalled = true; return okResponse(validPayload); }
+      }
+    ),
+    err => err.code === 'invalid_target' && err.message.includes('no usable addresses')
+  );
+  assert.equal(transportCalled, false, 'Must never dial after a zero-address resolution');
+
+  // 15c: 'localhost' resolves, is verified all-loopback, and the connection is pinned.
+  const localhostResolved = await resolveTranslationTarget(
+    { url: 'http://localhost:1969/parse' },
+    { lookupFn: async () => [{ address: '127.0.0.2', family: 4 }] }
+  );
+  assert.equal(localhostResolved.kind, 'loopback');
+  assert.equal(localhostResolved.pinnedAddresses[0].address, '127.0.0.2',
+    'localhost must dial the RESOLVED loopback address, not re-resolve');
+
+  // 15d: 'localhost' resolving to a non-loopback address is rejected.
+  await assert.rejects(
+    resolveTranslationTarget(
+      { url: 'http://localhost:1969/parse' },
+      { lookupFn: async () => [{ address: '10.0.0.1', family: 4 }] }
+    ),
+    err => err.code === 'invalid_target' && err.message.includes('non-loopback')
+  );
+
+  // 15e: IP-literal loopback pins the literal without any DNS lookup.
+  let literalLookupCalled = false;
+  const literalTarget = await resolveTranslationTarget(
+    { url: 'http://127.0.0.1:1969/parse' },
+    { lookupFn: async () => { literalLookupCalled = true; return []; } }
+  );
+  assert.equal(literalTarget.pinnedAddresses[0].address, '127.0.0.1');
+  assert.equal(literalLookupCalled, false, 'IP-literal loopback must not trigger DNS');
+
+  // 15f: real round-trip through the RESOLVED-and-pinned 'localhost' name.
+  const { server, port } = await startServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(validPayload));
+    });
+  });
+  try {
+    const call = await callTranslationServer(
+      { input: 'TY - JOUR' },
+      {
+        config: {
+          ...getTranslationServerConfig({}),
+          url: `http://localhost:${port}/parse`,
+          totalTimeoutMs: 3000
+        }
+      }
+    );
+    assert.equal(call.ok, true, 'Pinned localhost dial must complete a real round-trip');
+  } finally {
+    await closeServer(server);
+  }
+}
+console.log('✅ DNS resolution + pinning (allowPrivate, zero-address, localhost, literal) passed');
+
+// --- 16. Collection caps: creators count and empty-creator rejection ---
+{
+  // 16a: more than MAX_CREATORS creators rejected
+  const manyCreators = Array.from({ length: 101 }, () => ({ name: 'A' }));
+  assert.throws(
+    () => validateTranslationPayload({ ...validPayload, creators: manyCreators }),
+    err => err.code === 'invalid_payload' && err.message.includes('at most 100')
+  );
+  // Exactly 100 passes
+  const hundred = Array.from({ length: 100 }, (_, i) => ({ name: `Author ${i}` }));
+  const okHundred = validateTranslationPayload({ ...validPayload, creators: hundred });
+  assert.equal(okHundred.creators.length, 100);
+
+  // 16b: creator with no name-ish field rejected
+  assert.throws(
+    () => validateTranslationPayload({ ...validPayload, creators: [{ creatorType: 'author' }] }),
+    err => err.code === 'invalid_payload' && err.message.includes('at least one of firstName, lastName, or name')
+  );
+
+  // 16c: serialized request cap applies to the FINAL body, not just the input field
+  // (an input of exactly MAX bytes serializes beyond the cap due to JSON overhead).
+  await assert.rejects(
+    callTranslationServer(
+      { input: 'x'.repeat(1024 * 1024) },
+      {
+        config: { ...getTranslationServerConfig({}), url: 'http://127.0.0.1:1969/parse' },
+        transportFn: async () => { throw new Error('transport must not be called'); }
+      }
+    ),
+    err => err.code === 'request_too_large',
+    'The serialized {input, format} body must be under the request cap, not just the raw input'
+  );
+}
+console.log('✅ Collection caps and serialized request-size gate passed');
+
 restoreEnv();
 console.log('🎉 All M3.1 Translation Server adapter tests passed');
