@@ -2,6 +2,7 @@ import http from 'node:http';
 import https from 'node:https';
 import dns from 'node:dns/promises';
 import { isPrivateNetworkHost } from './security.mjs';
+import { callTranslationServer } from './translation-server.mjs';
 
 const REQUEST_TIMEOUT_MS = 10_000;
 const MAX_RESPONSE_BYTES = 1024 * 1024; // 1 MB
@@ -59,9 +60,9 @@ export function extractDoi(input) {
 export function extractArxivId(input) {
   if (typeof input !== 'string') return null;
   const cleaned = input.trim();
-  const arxivRegex = /(?:arxiv\.org\/(?:abs|pdf)\/|arxiv:\s*)([0-9]{4}\.[0-9]{4,5}(?:v\d+)?|[a-z-]+(?:\.[A-Z]{2})?\/\d{7})/i;
+  const arxivRegex = /(?:arxiv\.org\/(?:abs|pdf)\/|arxiv:\s*)([0-9]{4}\.[0-9]{4,5}(?:v\d+)?|[a-z-]+(?:\.[A-Z]{2})?\/\d{7})|^(?:arxiv:\s*)?([0-9]{4}\.[0-9]{4,5}(?:v\d+)?)$/i;
   const match = arxivRegex.exec(cleaned);
-  return match ? match[1] : null;
+  return match ? (match[1] || match[2]) : null;
 }
 
 function requestWithPinnedIp(parsedUrl, pinnedAddress, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
@@ -477,30 +478,132 @@ export async function resolveHtmlUrl(rawUrl, { fetchFn = safeFetchText, allowPri
   };
 }
 
+export function detectInputFormat(input) {
+  if (typeof input !== 'string') return 'unknown';
+  const trimmed = input.trim();
+  if (!trimmed) return 'unknown';
+
+  // BibTeX: starts with @type{ (e.g. @article{, @book{, @inproceedings{)
+  if (/^\s*@[a-zA-Z]+\s*\{/m.test(trimmed)) {
+    return 'bibtex';
+  }
+
+  // RIS: lines starting with TY  - (standard RIS entry start tag)
+  if (/(?:^|\n)\s*TY\s+-\s+/m.test(trimmed)) {
+    return 'ris';
+  }
+
+  // DOI (bare DOI, not full URL)
+  const doi = extractDoi(trimmed);
+  if (doi && !trimmed.includes('arxiv.org') && !/^\s*https?:\/\//i.test(trimmed)) {
+    return 'doi';
+  }
+
+  // arXiv (bare arXiv ID, not full URL)
+  const arxivId = extractArxivId(trimmed);
+  if (arxivId && !/^\s*https?:\/\//i.test(trimmed)) {
+    return 'arxiv';
+  }
+
+  // Web URL
+  if (/^https?:\/\//i.test(trimmed)) {
+    if (trimmed.includes('arxiv.org')) return 'arxiv';
+    if (doi) return 'doi';
+    return 'url';
+  }
+
+  return 'text';
+}
+
 export async function resolveImportInput(input, options = {}) {
   if (!input || typeof input !== 'string') {
     throw new TypeError('Input query or URL is required');
   }
   const cleanInput = input.trim();
+  const format = options.format || detectInputFormat(cleanInput);
+  const callTs = options.translationServerFn || callTranslationServer;
 
-  // 1. DOI
+  // 1. Bibliography text (BibTeX, RIS, or explicitly requested format)
+  if (format === 'bibtex' || format === 'ris') {
+    const tsRes = await callTs({ input: cleanInput, format }, {
+      config: options.translationServerConfig,
+      lookupFn: options.lookupFn,
+      transportFn: options.transportFn
+    });
+    if (!tsRes.available) {
+      const err = new Error(`Translation Server 未配置，无法解析 ${format.toUpperCase()} 书目内容（需配置 TRANSLATION_SERVER_URL）`);
+      err.code = 'translation_server_unavailable';
+      throw err;
+    }
+    if (!tsRes.ok) {
+      const err = new Error(`Translation Server 解析失败: ${tsRes.error || '未知错误'}`);
+      err.code = 'translation_server_error';
+      throw err;
+    }
+    const item = tsRes.item;
+    return {
+      sourceType: item.sourceType || format,
+      title: item.title,
+      abstractNote: item.abstract || item.abstractNote || '',
+      abstract: item.abstract || item.abstractNote || '',
+      creators: item.creators || [],
+      year: item.year || null,
+      doi: item.doi || null,
+      url: item.url || null,
+      isbn: item.isbn || null,
+      arxivId: item.arxivId || null,
+      pdfUrl: item.pdfUrl || null,
+      resolvedBy: 'translation_server'
+    };
+  }
+
+  // 2. DOI
   const doi = extractDoi(cleanInput);
-  if (doi && !cleanInput.includes('arxiv.org')) {
-    return resolveDoi(doi, options);
+  if (doi && !cleanInput.includes('arxiv.org') && (format === 'doi' || !format || format === 'url')) {
+    const res = await resolveDoi(doi, options);
+    return { ...res, resolvedBy: 'native_resolver' };
   }
 
-  // 2. arXiv
+  // 3. arXiv
   const arxivId = extractArxivId(cleanInput);
-  if (arxivId) {
-    return resolveArxiv(arxivId, options);
+  if (arxivId && (format === 'arxiv' || !format || format === 'url')) {
+    const res = await resolveArxiv(arxivId, options);
+    return { ...res, resolvedBy: 'native_resolver' };
   }
 
-  // 3. Web URL
+  // 4. Web URL
   if (/^https?:\/\//i.test(cleanInput)) {
-    return resolveHtmlUrl(cleanInput, options);
+    const res = await resolveHtmlUrl(cleanInput, options);
+    return { ...res, resolvedBy: 'native_resolver' };
   }
 
-  throw new TypeError('Input could not be recognized as a valid DOI, arXiv identifier, or HTTP(S) URL');
+  // 5. Fallback for raw citation text / unrecognized formats via Translation Server
+  try {
+    const fallbackTs = await callTs({ input: cleanInput, format: options.format || null }, {
+      config: options.translationServerConfig,
+      lookupFn: options.lookupFn,
+      transportFn: options.transportFn
+    });
+    if (fallbackTs.available && fallbackTs.ok && fallbackTs.item?.title) {
+      const item = fallbackTs.item;
+      return {
+        sourceType: item.sourceType || 'text',
+        title: item.title,
+        abstractNote: item.abstract || item.abstractNote || '',
+        abstract: item.abstract || item.abstractNote || '',
+        creators: item.creators || [],
+        year: item.year || null,
+        doi: item.doi || null,
+        url: item.url || null,
+        isbn: item.isbn || null,
+        arxivId: item.arxivId || null,
+        pdfUrl: item.pdfUrl || null,
+        resolvedBy: 'translation_server'
+      };
+    }
+  } catch {}
+
+  throw new TypeError('Input could not be recognized as a valid DOI, arXiv identifier, HTTP(S) URL, or supported bibliography format (BibTeX/RIS)');
 }
 
 export function findDuplicateCandidates(store, actorKey, metadata) {

@@ -1397,15 +1397,16 @@ function normalizeNativeImportItem(item, indexLabel = 'item') {
 async function executeNativeImportItem(store, actorKey, normalized, {
   downloadPdfFn,
   promoteBlobFn = defaultPromoteBlob,
-  fallbackTargetWorkspaceId = null
+  fallbackTargetWorkspaceId = null,
+  translationServerFn = null
 }) {
   let resolved = normalized.resolved;
   if (!resolved && normalized.input) {
     try {
-      resolved = await resolveImportInput(normalized.input);
+      resolved = await resolveImportInput(normalized.input, { translationServerFn });
     } catch (resolveErr) {
-      resolveErr.code = 'resolve_error';
-      resolveErr.status = 400;
+      resolveErr.code = resolveErr.code || 'resolve_error';
+      resolveErr.status = resolveErr.status || 400;
       throw resolveErr;
     }
   }
@@ -1540,6 +1541,7 @@ export function createCanvasHandler(store, {
   fetchAltero = defaultFetchAltero,
   downloadPdfFn = safeDownloadPdfFile,
   promoteBlobFn = defaultPromoteBlob,
+  translationServerFn = null,
 } = {}) {
   recoverQueuedAndRunningJobs(store);
   // NOTE: recoverBlobConsistency is intentionally NOT invoked here. It must only run on
@@ -1656,7 +1658,8 @@ export function createCanvasHandler(store, {
         try {
           outcome = await executeNativeImportItem(store, actor.actorKey, normalized, {
             downloadPdfFn,
-            promoteBlobFn
+            promoteBlobFn,
+            translationServerFn
           });
         } catch (execErr) {
           if (execErr.code === 'pdf_download_failed' || execErr.code === 'blob_persist_failed') {
@@ -1736,7 +1739,8 @@ export function createCanvasHandler(store, {
             const { result, warning } = await executeNativeImportItem(store, actor.actorKey, normalized, {
               downloadPdfFn,
               promoteBlobFn,
-              fallbackTargetWorkspaceId: targetWorkspaceId
+              fallbackTargetWorkspaceId: targetWorkspaceId,
+              translationServerFn
             });
             if (result.outcome === 'requires_confirmation') {
               store.appendImportJobItemReport(actor.actorKey, batchJob.id, {
@@ -2125,12 +2129,16 @@ export function createCanvasHandler(store, {
         if (!body || typeof body !== 'object' || Array.isArray(body)) {
           throw new TypeError('request body must be an object');
         }
-        const rawInput = string(body.input, 'input', { min: 1, max: 2000 });
+        const rawInput = string(body.input, 'input', { min: 1, max: 1024 * 1024 });
+        const format = body.format !== undefined && body.format !== null
+          ? string(body.format, 'format', { max: 32 })
+          : undefined;
         let resolved;
         try {
-          resolved = await resolveImportInput(rawInput);
+          resolved = await resolveImportInput(rawInput, { format, translationServerFn });
         } catch (err) {
-          error(res, 400, 'resolve_error', `Failed to resolve input: ${err.message}`);
+          const status = err.code === 'translation_server_unavailable' ? 503 : 400;
+          error(res, status, err.code || 'resolve_error', `Failed to resolve input: ${err.message}`);
           return;
         }
 
@@ -2138,7 +2146,8 @@ export function createCanvasHandler(store, {
         json(res, 200, {
           data: {
             resolved,
-            duplicateCandidates
+            duplicateCandidates,
+            parsedBy: resolved.resolvedBy || 'native_resolver'
           }
         });
         return;
@@ -2151,9 +2160,9 @@ export function createCanvasHandler(store, {
 
         let resolved = body.resolved;
         if (!resolved) {
-          const rawInput = string(body.input, 'input', { min: 1, max: 2000 });
+          const rawInput = string(body.input, 'input', { min: 1, max: 1024 * 1024 });
           try {
-            resolved = await resolveImportInput(rawInput);
+            resolved = await resolveImportInput(rawInput, { translationServerFn });
           } catch (err) {
             error(res, 400, 'resolve_error', `Failed to resolve input: ${err.message}`);
             return;

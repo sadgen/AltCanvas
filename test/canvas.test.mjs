@@ -3106,6 +3106,7 @@ try {
     resolveArxiv,
     resolveHtmlUrl,
     resolveImportInput,
+    detectInputFormat,
     findDuplicateCandidates
   } = await import('../server/import-resolver.mjs');
 
@@ -3932,6 +3933,196 @@ try {
   assert.equal(listJobsRes.statusCode, 200);
   assert.ok(Array.isArray(listJobsRes.payload.data));
   assert.ok(listJobsRes.payload.data.some(j => j.id === batchImportRes.payload.data.job.id));
+
+  // =========================================================================
+  // --- M3.2: Unified Parse & Import Workflow (Translation Server Pipeline) ---
+  // =========================================================================
+
+  // 12. Input format detection
+  assert.equal(detectInputFormat('@article{vaswani2017,\n  title={Attention Is All You Need}\n}'), 'bibtex');
+  assert.equal(detectInputFormat('@inproceedings{devlin2018bert,\n  title={BERT}\n}'), 'bibtex');
+  assert.equal(detectInputFormat('@book{knuth1997taocp,\n  title={The Art of Computer Programming}\n}'), 'bibtex');
+  assert.equal(detectInputFormat('TY  - JOUR\nTI  - Deep Residual Learning\nER  -'), 'ris');
+  assert.equal(detectInputFormat('10.1038/s41586-020-2649-2'), 'doi');
+  assert.equal(detectInputFormat('2301.12345'), 'arxiv');
+  assert.equal(detectInputFormat('arxiv:2301.12345'), 'arxiv');
+  assert.equal(detectInputFormat('https://arxiv.org/abs/2301.12345'), 'arxiv');
+  assert.equal(detectInputFormat('https://doi.org/10.1038/s41586-020-2649-2'), 'doi');
+  assert.equal(detectInputFormat('https://nature.com/articles/s41586-020-2649-2'), 'url');
+  assert.equal(detectInputFormat('Random search string'), 'text');
+  assert.equal(detectInputFormat(''), 'unknown');
+
+  // 13. Mock Translation Server function for integration testing
+  let tsCallCount = 0;
+  const mockTsResolver = async ({ input, format }) => {
+    tsCallCount++;
+    if (input.includes('SYNTAX_ERROR')) {
+      return {
+        available: true,
+        ok: false,
+        error: 'Syntax error in BibTeX entry at line 2'
+      };
+    }
+    if (format === 'bibtex' && input.includes('@article')) {
+      return {
+        available: true,
+        ok: true,
+        item: {
+          sourceType: 'bibtex',
+          title: 'BibTeX Transformer Paper',
+          abstract: 'Parsed abstract from BibTeX entry.',
+          creators: [{ firstName: 'Ashish', lastName: 'Vaswani' }],
+          year: 2017,
+          doi: '10.3333/bibtex-transformer',
+          url: 'https://arxiv.org/abs/1706.03762',
+          pdfUrl: 'https://arxiv.org/pdf/1706.03762.pdf'
+        }
+      };
+    }
+    if (format === 'ris' && input.includes('TY  -')) {
+      return {
+        available: true,
+        ok: true,
+        item: {
+          sourceType: 'ris',
+          title: 'RIS ResNet Paper',
+          abstract: 'Deep residual learning for image recognition.',
+          creators: [{ firstName: 'Kaiming', lastName: 'He' }],
+          year: 2016,
+          doi: '10.4444/ris-resnet'
+        }
+      };
+    }
+    return { available: false, reason: 'translation_server_not_configured' };
+  };
+
+  // 14. resolveImportInput with Translation Server
+  const bibtexResolved = await resolveImportInput('@article{vaswani2017, title={BibTeX Transformer Paper}}', {
+    translationServerFn: mockTsResolver
+  });
+  assert.equal(bibtexResolved.sourceType, 'bibtex');
+  assert.equal(bibtexResolved.title, 'BibTeX Transformer Paper');
+  assert.equal(bibtexResolved.doi, '10.3333/bibtex-transformer');
+  assert.equal(bibtexResolved.resolvedBy, 'translation_server');
+  assert.equal(bibtexResolved.pdfUrl, 'https://arxiv.org/pdf/1706.03762.pdf');
+
+  const risResolved = await resolveImportInput('TY  - JOUR\nTI  - RIS ResNet Paper\nER  -', {
+    translationServerFn: mockTsResolver
+  });
+  assert.equal(risResolved.sourceType, 'ris');
+  assert.equal(risResolved.title, 'RIS ResNet Paper');
+  assert.equal(risResolved.year, 2016);
+  assert.equal(risResolved.resolvedBy, 'translation_server');
+
+  // TS unavailable throws with translation_server_unavailable code
+  await assert.rejects(
+    () => resolveImportInput('@article{test, title={No TS}}', {
+      translationServerFn: async () => ({ available: false })
+    }),
+    err => err.code === 'translation_server_unavailable' && err.message.includes('Translation Server 未配置')
+  );
+
+  // TS error throws with translation_server_error code
+  await assert.rejects(
+    () => resolveImportInput('@article{SYNTAX_ERROR, title={Error}}', {
+      translationServerFn: mockTsResolver
+    }),
+    err => err.code === 'translation_server_error' && err.message.includes('Syntax error')
+  );
+
+  // Native DOI resolution continues to work directly with resolvedBy: 'native_resolver'
+  const nativeDoiRes = await resolveImportInput('10.1038/s41586-020-2649-2', {
+    fetchFn: mockDoiFetch,
+    translationServerFn: mockTsResolver
+  });
+  assert.equal(nativeDoiRes.sourceType, 'doi');
+  assert.equal(nativeDoiRes.resolvedBy, 'native_resolver');
+
+  // 15. HTTP API: POST /canvas/imports/resolve with Translation Server integration
+  const tsHandler = createCanvasHandler(store, {
+    translationServerFn: mockTsResolver,
+    downloadPdfFn: async (url, targetDir) => {
+      fs.mkdirSync(targetDir, { recursive: true, mode: 0o700 });
+      const tempFilePath = path.join(targetDir, `ts-mock-${crypto.randomBytes(6).toString('hex')}.tmp`);
+      const content = Buffer.from('%PDF-1.7 ts-download\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF');
+      fs.writeFileSync(tempFilePath, content, { mode: 0o600 });
+      return {
+        tempFilePath,
+        sha256: crypto.createHash('sha256').update(content).digest('hex'),
+        sizeBytes: content.length,
+        mimeType: 'application/pdf'
+      };
+    }
+  });
+
+  const resolveBibtexHttpRes = await call(tsHandler, '/canvas/imports/resolve', {
+    method: 'POST', cookie,
+    body: { input: '@article{vaswani2017, title={Attention Is All You Need}}' }
+  });
+  assert.equal(resolveBibtexHttpRes.statusCode, 200);
+  assert.equal(resolveBibtexHttpRes.payload.data.resolved.title, 'BibTeX Transformer Paper');
+  assert.equal(resolveBibtexHttpRes.payload.data.parsedBy, 'translation_server');
+  assert.ok(Array.isArray(resolveBibtexHttpRes.payload.data.duplicateCandidates));
+
+  // HTTP API resolve with TS unavailable returns 503
+  const noTsHandler = createCanvasHandler(store, {
+    translationServerFn: async () => ({ available: false })
+  });
+  const unavailRes = await call(noTsHandler, '/canvas/imports/resolve', {
+    method: 'POST', cookie,
+    body: { input: '@article{vaswani2017, title={No TS}}' }
+  });
+  assert.equal(unavailRes.statusCode, 503);
+  assert.equal(unavailRes.payload.error.code, 'translation_server_unavailable');
+
+  // 16. Full M3.2 pipeline via POST /canvas/imports/native with BibTeX input (parse -> dedup -> PDF download -> native storage)
+  const bibtexImportHttpRes = await call(tsHandler, '/canvas/imports/native', {
+    method: 'POST', cookie,
+    body: {
+      input: '@article{vaswani2017, title={Attention Is All You Need}}',
+      targetWorkspaceId: apiTopic.id
+    }
+  });
+  assert.equal(bibtexImportHttpRes.statusCode, 201);
+  assert.equal(bibtexImportHttpRes.payload.data.outcome, 'created');
+  assert.equal(bibtexImportHttpRes.payload.data.document.title, 'BibTeX Transformer Paper');
+  assert.equal(bibtexImportHttpRes.payload.data.document.doi, '10.3333/bibtex-transformer');
+  assert.equal(bibtexImportHttpRes.payload.data.inboxEntry.libraryType, 'native');
+  assert.ok(bibtexImportHttpRes.payload.data.topicDocument);
+
+  // 17. Idempotent re-import of identical BibTeX input reuses existing document
+  const bibtexReimportRes = await call(tsHandler, '/canvas/imports/native', {
+    method: 'POST', cookie,
+    body: {
+      input: '@article{vaswani2017, title={Attention Is All You Need}}'
+    }
+  });
+  assert.equal(bibtexReimportRes.statusCode, 200);
+  assert.equal(bibtexReimportRes.payload.data.outcome, 'reused');
+  assert.equal(bibtexReimportRes.payload.data.match.strategy, 'sha256', 'Exact same PDF content matches by priority 1 (SHA-256)');
+  assert.equal(bibtexReimportRes.payload.data.document.id, bibtexImportHttpRes.payload.data.document.id);
+
+  // 18. M3.2 Batch pipeline with mixed inputs (BibTeX parsed by TS + native DOI + invalid format)
+  const mixedBatchRes = await call(tsHandler, '/canvas/imports/native/batch', {
+    method: 'POST', cookie,
+    body: {
+      sourceType: 'batch_mixed',
+      targetWorkspaceId: apiTopic.id,
+      items: [
+        { input: '@article{vaswani2017, title={BibTeX Paper in Batch}}' },
+        { title: 'Batch Standalone Paper', doi: '10.9999/batch-mixed-doi' },
+        { title: '', input: '123_invalid_cannot_resolve' }
+      ]
+    }
+  });
+  assert.equal(mixedBatchRes.statusCode, 201);
+  assert.equal(mixedBatchRes.payload.data.job.state, 'completed_with_errors');
+  assert.equal(mixedBatchRes.payload.data.job.totalCount, 3);
+  assert.equal(mixedBatchRes.payload.data.job.completedCount, 2);
+  assert.equal(mixedBatchRes.payload.data.job.failedCount, 1);
+  assert.equal(mixedBatchRes.payload.data.job.report.items[0].ok, true);
+  assert.equal(mixedBatchRes.payload.data.job.report.items[1].ok, true);
+  assert.equal(mixedBatchRes.payload.data.job.report.items[2].ok, false);
 
   const clearedAiConfigResponse = await call(handler, '/canvas/ai/config', { method: 'DELETE', cookie });
   assert.equal(clearedAiConfigResponse.statusCode, 200);

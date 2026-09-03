@@ -810,8 +810,8 @@
 | M2 统一导入管线 | **PASS (完成)** | 规范化多源导入（DOI/arXiv/URL/PDF/RIS/BibTeX/批量）、优先级去重链、模糊防静默合并、import_jobs 逐项报告与 Native 写入 |
 | M3.0 登录后应用初始化修复 | **PASS (关闭)** | 消除页面刷新依赖，统一 initializeAuthenticatedApp 入口与并发锁，全面清除遗留 OIDC 文案 |
 | M3.1 Translation Server 安全适配层 | **PASS (关闭)** | 仅服务端配置、loopback/unix/SSRF 远程门控、无重定向、全链路三层超时生命周期、Keep-Alive 连接复用、双向 DNS 固定、集合上限与纯解析 DTO |
-| M3.2 统一解析与导入工作流 | `就绪 (待启动)` | 下一阶段目标：前端与 API 对接 Translation Server 解析，复用 M2 导入执行器与去重链 |
-| M4 Altero/Zotero 外部迁移器 | `PENDING` | 幂等一次性迁移 |
+| M3.2 统一解析与导入工作流 | **PASS (完成)** | 格式自动探测、Translation Server 管道打通（BibTeX/RIS）、M2 执行器全链路复用、前端快速导入多模态解析 |
+| M4 Altero/Zotero 外部迁移器 | `就绪 (待启动)` | 幂等一次性迁移 |
 | M5 AltCanvas Capture 浏览器扩展 | `PENDING` | 独立扩展仓库 |
 | M6 默认解除 Altero 依赖 | `PENDING` | 默认部署全面切换为 Native |
 
@@ -910,6 +910,33 @@
 - 运行守护：`systemctl --user` 单元 `altcanvas.service` 独占管理（`Restart=always, RestartSec=3`），重复拉起源已根治；
 - 审计登记的非阻断 P2 技术债同日收紧：`resolved.arXivId` 大小写旁路封堵（两种拼写均纳入长度契约）；`externalRefs` 全字段规范化（`externalAttachmentId` ≤256 字符串、`externalVersion` 非负整数、`sourceUrl` ≤2000 且必须 http(s)，未知键丢弃并输出规范化对象）；新增 5 类非法载荷 400 测试与全字段正向前置持久化断言；
 - **M2 统一 Native 导入管线：PASS（关闭）**。下一阶段：M3 Translation Server 集成。
+
+## 2026-09-03 会话（M3.2 统一解析与导入工作流实施）
+
+### 交付内容
+1. **输入格式自动探测** ([`server/import-resolver.mjs`](file:///home/sadgen/Projects/AltCanvas/server/import-resolver.mjs))：
+   - 实现 `detectInputFormat(input)`：精准识别 `bibtex`（`@type{`）、`ris`（`TY  -`）、`doi`（含裸 DOI 与 DOI 链接）、`arxiv`（含裸编号与链接）、`url` 与 `text`；
+   - 增强 `extractArxivId` 支持裸数字编号格式（如 `2301.12345`）。
+2. **Translation Server 与统一解析管线贯通** ([`server/import-resolver.mjs`](file:///home/sadgen/Projects/AltCanvas/server/import-resolver.mjs) & [`server/canvas-api.mjs`](file:///home/sadgen/Projects/AltCanvas/server/canvas-api.mjs))：
+   - `resolveImportInput` 接入 `callTranslationServer`：BibTeX 与 RIS 书目文本直接经 TS 解析为规范化 Native DTO；未配置时返回明确的 `translation_server_unavailable`（503），语法错误返回 `translation_server_error`（400）；
+   - `/canvas/imports/resolve` 解除 2KB 截断限制（放宽至 1 MiB 支持大篇幅书目），输入解析后无缝对接 `findDuplicateCandidates` 进行多维去重预检，响应透传 `parsedBy: 'translation_server' | 'native_resolver'`。
+3. **M2 统一 Native 导入执行器全链路复用**：
+   - `/canvas/imports/native` 与 `/canvas/imports/native/batch` 现支持直接输入 BibTeX / RIS 文本（零前端预解析要求），服务端统一调度 TS 解析、去重预检、PDF 下载、Blob 提升与原子写库；
+   - 完整复用 M2 的 SHA-256 / DOI / external_refs / ISBN 去重链、409 身份冲突拦截、409 模糊确认与双向补偿。
+4. **前端快速导入多模态解析支持** ([`index.html`](file:///home/sadgen/Projects/AltCanvas/index.html))：
+   - 快速导入弹窗切换为多行 `<textarea>`，支持粘贴完整 BibTeX / RIS 内容并保留换行；
+   - 解析结果卡片根据 `parsedBy` 自适应渲染紫底 `BIBTEX (TS)` / `RIS (TS)` 徽标；
+   - 快捷键支持 `Enter`（单行）与 `Ctrl+Enter` / `Cmd+Enter`（多行）即时触发解析。
+5. **测试覆盖** ([`test/canvas.test.mjs`](file:///home/sadgen/Projects/AltCanvas/test/canvas.test.mjs))：
+   - 包含 7 种输入格式探测单元测试；
+   - 包含 BibTeX 与 RIS 的 TS 解析及 DTO 字段断言；
+   - 包含 TS 未配置 503 与语法错误 400 测试；
+   - 包含 BibTeX 单篇直接导入入库 + 附件创建测试；
+   - 包含相同 BibTeX 二次导入 SHA-256 / DOI 优先级去重复用测试；
+   - 包含 BibTeX + DOI 混合批量导入与部分失败报告测试。
+   - `npm test` 8 套测试全部通过，`git diff --check` 通过。
+
+---
 
 ## 2026-09-03 会话（M3.1 终审整改：Keep-Alive 连接复用、目标解析计时器清理与回环字面量统一）
 

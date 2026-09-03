@@ -898,21 +898,21 @@
       <div class="flex items-center justify-between border-b border-slate-800 pb-3">
         <h3 id="quick-import-title" class="text-sm font-semibold text-slate-100 flex items-center gap-2">
           <svg class="w-4 h-4 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path></svg>
-          快速导入文献 (DOI / arXiv / 学术链接)
+          快速导入文献 (DOI / arXiv / URL / BibTeX / RIS)
         </h3>
         <button id="btn-close-quick-import" type="button" class="text-slate-400 hover:text-slate-200 text-lg leading-none" aria-label="关闭">&times;</button>
       </div>
 
       <div class="space-y-3 text-xs">
         <div>
-          <label for="input-quick-import-query" class="block text-slate-300 font-medium mb-1">输入 DOI、arXiv 编号或文献网页 URL</label>
-          <div class="flex gap-2">
-            <input id="input-quick-import-query" type="text" placeholder="例如：10.1038/s41586-020-2649-2 或 https://arxiv.org/abs/2301.12345" class="flex-1 px-3 py-2 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:outline-none focus:border-indigo-500 font-mono text-xs">
+          <label for="input-quick-import-query" class="block text-slate-300 font-medium mb-1">输入 DOI、arXiv 编号、文献网页 URL 或粘贴 BibTeX / RIS 书目</label>
+          <div class="flex gap-2 items-start">
+            <textarea id="input-quick-import-query" rows="2" placeholder="例如：10.1038/... 或 https://arxiv.org/... 或粘贴 @article{...} / TY  - JOUR..." class="flex-1 px-3 py-2 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:outline-none focus:border-indigo-500 font-mono text-xs resize-y"></textarea>
             <button id="btn-quick-import-resolve" type="button" class="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded font-medium transition shrink-0 flex items-center gap-1">
               <span>🔍 解析</span>
             </button>
           </div>
-          <p class="text-[11px] text-slate-500 mt-1">支持标准 DOI、arXiv 论文链接及常见学术期刊网页元数据自动抓取与去重检测。</p>
+          <p class="text-[11px] text-slate-500 mt-1">支持标准 DOI、arXiv 论文链接、学术网页，以及 BibTeX、RIS 标准书目文本解析与多维去重。</p>
         </div>
 
         <!-- Resolution Result Card (Hidden initially) -->
@@ -6677,7 +6677,11 @@
 
         currentResolvedImport = res.resolved;
         titleEl.textContent = res.resolved.title || '未命名文献';
-        badgeEl.textContent = (res.resolved.sourceType || 'DOI').toUpperCase();
+        const sourceLabel = (res.resolved.sourceType || 'DOI').toUpperCase();
+        badgeEl.textContent = res.parsedBy === 'translation_server' ? `${sourceLabel} (TS)` : sourceLabel;
+        badgeEl.className = res.parsedBy === 'translation_server'
+          ? 'px-1.5 py-0.5 rounded bg-purple-950 text-purple-300 border border-purple-800 text-[10px] uppercase shrink-0'
+          : 'px-1.5 py-0.5 rounded bg-indigo-950 text-indigo-300 border border-indigo-800 text-[10px] uppercase shrink-0';
 
         const authorNames = (res.resolved.creators || []).map(c => c.name || `${c.firstName || ''} ${c.lastName || ''}`.trim()).filter(Boolean).slice(0, 3).join(', ');
         const yearStr = res.resolved.year ? `${res.resolved.year} 年` : '年份未知';
@@ -6955,7 +6959,7 @@
     document.getElementById('btn-cancel-quick-import')?.addEventListener('click', closeQuickImportModal);
     document.getElementById('btn-quick-import-resolve')?.addEventListener('click', resolveQuickImport);
     document.getElementById('input-quick-import-query')?.addEventListener('keydown', event => {
-      if (event.key === 'Enter') {
+      if (event.key === 'Enter' && (event.ctrlKey || event.metaKey || !event.target.value.includes('\n'))) {
         event.preventDefault();
         resolveQuickImport();
       }

@@ -1,6 +1,7 @@
 import http from 'node:http';
 import https from 'node:https';
 import dns from 'node:dns/promises';
+import net from 'node:net';
 import { isPrivateNetworkHost } from './security.mjs';
 
 // M3.1 Translation Server adapter.
@@ -62,10 +63,15 @@ export function isLoopbackHost(hostname) {
   return isLoopbackAddress(clean);
 }
 
-// Any address inside 127.0.0.0/8 or the IPv6 loopback ::1.
+// Any valid IPv4 address inside 127.0.0.0/8 or the IPv6 loopback ::1.
 function isLoopbackAddress(address) {
-  const addr = String(address || '');
-  return addr.startsWith('127.') || addr === '::1';
+  const addr = String(address || '').trim();
+  if (addr === '::1') return true;
+  if (net.isIP(addr) === 4) {
+    const firstOctet = Number(addr.split('.')[0]);
+    return firstOctet === 127;
+  }
+  return false;
 }
 
 function isIpLiteral(hostname) {

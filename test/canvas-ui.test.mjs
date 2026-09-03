@@ -576,6 +576,10 @@ assert.match(html, /bindingsTab\.classList\.toggle\('hidden', !caps\.collections
   'collection bindings tab must toggle based on collections capability');
 assert.match(html, /function openQuickImportModal\(/);
 assert.match(html, /async function resolveQuickImport\(\)/);
+assert.match(html, /快速导入文献 \(DOI \/ arXiv \/ URL \/ BibTeX \/ RIS\)/,
+  'quick-import modal title must indicate BibTeX and RIS support');
+assert.match(html, /<textarea id="input-quick-import-query"/,
+  'quick-import query input must use textarea for multi-line bibliography support');
 
 // --- Behavioral test: openLoginModal in local mode with externalLibrary disabled ---
 {

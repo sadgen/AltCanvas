@@ -709,6 +709,7 @@ console.log('✅ Target resolution timer cleanup on immediate success passed');
   assert.equal(isLoopbackHost('127.0.0.2'), true);
   assert.equal(isLoopbackHost('127.100.200.1'), true);
   assert.equal(isLoopbackHost('127.255.255.254'), true);
+  assert.equal(isLoopbackHost('127.evil.example'), false, 'Non-IP hostname starting with 127. must NOT be considered loopback');
   assert.equal(isLoopbackHost('10.0.0.1'), false);
   assert.equal(isLoopbackHost('192.168.1.1'), false);
 
