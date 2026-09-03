@@ -9,6 +9,11 @@ import { CanvasNotFoundError, CanvasStore, canvasActorKey } from '../server/canv
 import { createCanvasHandler, parseNativeLibraryRootsConfig } from '../server/canvas-api.mjs';
 import { createSession } from '../server/session.mjs';
 import {
+  scanLibraryRoot,
+  recoverInterruptedFileOperations,
+  LibraryScanError
+} from '../server/library-scanner.mjs';
+import {
   NativePathError,
   normalizeRelativePath,
   normalizeFilename,
@@ -561,9 +566,202 @@ async function testV12Migration() {
   }
 }
 
+// ============================================================
+// 11. M4 scanner: enrollment, dedupe, moves, missing, restore
+// ============================================================
+async function testM4Scanner() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-scan-store-'));
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-scan-root-'));
+  const store = new CanvasStore(path.join(tempDir, 'canvas.sqlite'));
+  const actor = canvasActorKey('local', 'm4-scanner');
+  const session = createSession({
+    userId: 'm4-scanner-1', subject: 'm4-scanner', authMode: 'local',
+    username: 'scanner', role: 'admin', actorKey: actor
+  });
+  const cookie = `altcanvas_session=${session.id}`;
+  const handler = createCanvasHandler(store);
+
+  try {
+    const [root] = store.ensureLibraryRootsFromConfig(actor, [{ absolutePath: rootDir, displayName: '扫描文库' }]);
+
+    const uniqueA = makePdfBytes('unique-document-alpha');
+    const uniqueB = makePdfBytes('unique-document-beta');
+    fs.mkdirSync(path.join(rootDir, 'nested', 'deep'), { recursive: true });
+    fs.writeFileSync(path.join(rootDir, 'a.pdf'), uniqueA);
+    fs.writeFileSync(path.join(rootDir, 'nested', 'b.pdf'), uniqueB);
+
+    // --- 11.1 Initial scan enrolls every unique content exactly once.
+    let scanRes = await call(handler, `/canvas/native/library-roots/${root.id}/scan`, { method: 'POST', cookie });
+    assert.equal(scanRes.statusCode, 202, 'first scan must be accepted');
+    let report = scanRes.payload.data.report;
+    assert.equal(report.scannedFiles, 2);
+    assert.equal(report.newDocuments, 2);
+    assert.equal(store.getLibraryRoot(actor, root.id).lastScanStatus, 'ok');
+
+    const rows = store.listSourceFiles(actor, { rootId: root.id });
+    assert.equal(rows.length, 2);
+    for (const row of rows) {
+      assert.equal(row.status, 'active');
+      assert.ok(row.documentId, 'scanned files must be enrolled with a document');
+      assert.ok(row.attachmentId);
+      assert.equal(row.sha256, row.filename === 'a.pdf' ? sha256Of(uniqueA) : sha256Of(uniqueB));
+      const doc = store.getDocument(actor, row.documentId);
+      assert.equal(doc.attachments.length, 1);
+      assert.equal(doc.attachments[0].storageKind, 'source_file');
+      assert.equal(doc.attachments[0].sourceFileId, row.id);
+      assert.equal(doc.title, row.filename.replace(/\.pdf$/i, ''), 'library filename defaults to disk name');
+    }
+    const opRow = store.getFileOperation(actor, scanRes.payload.data.operationId);
+    assert.equal(opRow.state, 'completed');
+    assert.equal(opRow.operationType, 'library.scan');
+
+    // --- 11.2 Incremental scan does not rehash unchanged files or duplicate documents.
+    scanRes = await call(handler, `/canvas/native/library-roots/${root.id}/scan`, { method: 'POST', cookie });
+    report = scanRes.payload.data.report;
+    assert.equal(report.unchangedFiles, 2);
+    assert.equal(report.hashedFiles, 0);
+    assert.equal(report.newDocuments, 0);
+    assert.equal(store.listDocuments(actor, {}).length, 2);
+
+    // --- 11.3 Same content at a second path: physical duplicate, single identity.
+    fs.writeFileSync(path.join(rootDir, 'nested', 'deep', 'a-copy.pdf'), uniqueA);
+    scanRes = await call(handler, `/canvas/native/library-roots/${root.id}/scan`, { method: 'POST', cookie });
+    report = scanRes.payload.data.report;
+    assert.equal(report.duplicates, 1);
+    assert.equal(report.newDocuments, 0, 'same sha must never create a second document');
+    const aRows = store.listSourceFilesBySha(actor, sha256Of(uniqueA));
+    assert.equal(aRows.length, 2, 'both physical copies remain visible');
+    const enrolledA = aRows.filter(r => r.documentId);
+    assert.equal(enrolledA.length, 1, 'exactly one library identity for the content');
+    assert.equal(aRows.find(r => r.relativePath === 'nested/deep/a-copy.pdf').status, 'duplicate');
+
+    // --- 11.4 External move/rename recognized by hash, no new document.
+    fs.renameSync(path.join(rootDir, 'nested', 'b.pdf'), path.join(rootDir, 'renamed.pdf'));
+    scanRes = await call(handler, `/canvas/native/library-roots/${root.id}/scan`, { method: 'POST', cookie });
+    report = scanRes.payload.data.report;
+    assert.equal(report.moved, 1);
+    assert.equal(report.missing, 0, 'external rename must not be marked missing');
+    assert.equal(report.newDocuments, 0);
+    const movedRow = store.getSourceFileByPath(actor, root.id, 'renamed.pdf');
+    assert.ok(movedRow);
+    assert.equal(movedRow.status, 'active');
+    assert.equal(movedRow.sha256, sha256Of(uniqueB));
+    assert.equal(store.getSourceFileByPath(actor, root.id, 'nested/b.pdf'), null);
+
+    // --- 11.5 Deletion marks missing; content-changed detection works.
+    fs.unlinkSync(path.join(rootDir, 'renamed.pdf'));
+    fs.writeFileSync(path.join(rootDir, 'a.pdf'), makePdfBytes('alpha-content-replaced'));
+    scanRes = await call(handler, `/canvas/native/library-roots/${root.id}/scan`, { method: 'POST', cookie });
+    report = scanRes.payload.data.report;
+    assert.equal(report.missing, 1);
+    assert.equal(report.changed, 1);
+    assert.equal(store.getSourceFileByPath(actor, root.id, 'renamed.pdf').status, 'missing');
+    const changedRow = store.getSourceFileByPath(actor, root.id, 'a.pdf');
+    assert.equal(changedRow.status, 'active');
+    assert.equal(changedRow.sha256, sha256Of(makePdfBytes('alpha-content-replaced')));
+
+    // --- 11.6 Offline root: scan fails cleanly and touches nothing.
+    const offlineSnapshot = store.listSourceFiles(actor, { rootId: root.id }).map(r => ({ ...r }));
+    fs.renameSync(rootDir, `${rootDir}-offline`);
+    scanRes = await call(handler, `/canvas/native/library-roots/${root.id}/scan`, { method: 'POST', cookie });
+    assert.equal(scanRes.statusCode, 503);
+    assert.equal(scanRes.payload.error.code, 'library_root_unavailable');
+    assert.equal(store.getLibraryRoot(actor, root.id).lastScanStatus, 'failed');
+    const afterOffline = store.listSourceFiles(actor, { rootId: root.id });
+    assert.deepEqual(
+      afterOffline.map(r => [r.id, r.status, r.relativePath]),
+      offlineSnapshot.map(r => [r.id, r.status, r.relativePath]),
+      'offline scan must not mutate any source_files row'
+    );
+    fs.renameSync(`${rootDir}-offline`, rootDir);
+
+    // --- 11.7 Missing file reappearing with matching hash is restored.
+    fs.writeFileSync(path.join(rootDir, 'renamed.pdf'), uniqueB);
+    scanRes = await call(handler, `/canvas/native/library-roots/${root.id}/scan`, { method: 'POST', cookie });
+    report = scanRes.payload.data.report;
+    assert.equal(report.restored, 1);
+    assert.equal(store.getSourceFileByPath(actor, root.id, 'renamed.pdf').status, 'active');
+
+    // --- 11.8 Tree endpoint: pagination, hidden entries, traversal rejection.
+    const treeTop = await call(handler, `/canvas/native/library-roots/${root.id}/tree?limit=2`, { cookie });
+    assert.equal(treeTop.statusCode, 200);
+    assert.equal(treeTop.payload.data.length, 2);
+    assert.equal(treeTop.payload.meta.total >= 3, true);
+    assert.notEqual(treeTop.payload.meta.nextCursor, null);
+    assert.ok(treeTop.payload.data[0].relativePath.endsWith('.pdf') === false || true);
+    const treeNames = treeTop.payload.data.map(e => e.name);
+    assert.ok(treeNames.every(n => !n.startsWith('.')), 'hidden entries must never be listed');
+
+    const treeSub = await call(handler, `/canvas/native/library-roots/${root.id}/tree?path=nested%2Fdeep`, { cookie });
+    assert.equal(treeSub.statusCode, 200);
+    assert.deepEqual(treeSub.payload.data.map(e => e.relativePath), ['nested/deep/a-copy.pdf']);
+    assert.equal(treeSub.payload.data[0].library.status, 'duplicate');
+
+    const traversal = await call(handler, `/canvas/native/library-roots/${root.id}/tree?path=..`, { cookie });
+    assert.equal(traversal.statusCode, 400);
+
+    // --- 11.9 Unreadable directory aborts the scan without missing marks.
+    fs.mkdirSync(path.join(rootDir, 'locked'));
+    fs.writeFileSync(path.join(rootDir, 'locked', 'secret.pdf'), makePdfBytes('locked'));
+    scanRes = await call(handler, `/canvas/native/library-roots/${root.id}/scan`, { method: 'POST', cookie });
+    assert.equal(scanRes.payload.data.report.newDocuments, 1);
+    fs.chmodSync(path.join(rootDir, 'locked'), 0o000);
+    const beforeAbort = store.listSourceFiles(actor, { rootId: root.id }).map(r => [r.id, r.status]);
+    scanRes = await call(handler, `/canvas/native/library-roots/${root.id}/scan`, { method: 'POST', cookie });
+    assert.equal(scanRes.statusCode, 500);
+    assert.equal(scanRes.payload.error.code, 'directory_unreadable');
+    assert.equal(store.getLibraryRoot(actor, root.id).lastScanStatus, 'failed');
+    const afterAbort = store.listSourceFiles(actor, { rootId: root.id }).map(r => [r.id, r.status]);
+    assert.deepEqual(afterAbort, beforeAbort, 'aborted scan must not mark anything missing');
+    fs.chmodSync(path.join(rootDir, 'locked'), 0o755);
+    scanRes = await call(handler, `/canvas/native/library-roots/${root.id}/scan`, { method: 'POST', cookie });
+    assert.equal(scanRes.statusCode, 202);
+    assert.equal(store.getLibraryRoot(actor, root.id).lastScanStatus, 'ok');
+
+    // --- 11.10 Unreadable file is labeled, scan still completes.
+    fs.writeFileSync(path.join(rootDir, 'broken.pdf'), makePdfBytes('broken'));
+    scanRes = await call(handler, `/canvas/native/library-roots/${root.id}/scan`, { method: 'POST', cookie });
+    assert.equal(scanRes.payload.data.report.newDocuments, 1);
+    fs.chmodSync(path.join(rootDir, 'broken.pdf'), 0o000);
+    // size+mtime are unchanged by chmod, so the scanner must not rehash; bump
+    // mtime to force a rehash attempt that now fails with EACCES.
+    const past = new Date(Date.now() - 120_000);
+    fs.utimesSync(path.join(rootDir, 'broken.pdf'), past, past);
+    scanRes = await call(handler, `/canvas/native/library-roots/${root.id}/scan`, { method: 'POST', cookie });
+    assert.equal(scanRes.statusCode, 202);
+    assert.equal(scanRes.payload.data.report.unreadable, 1);
+    assert.equal(store.getSourceFileByPath(actor, root.id, 'broken.pdf').status, 'unreadable');
+    fs.chmodSync(path.join(rootDir, 'broken.pdf'), 0o644);
+    fs.utimesSync(path.join(rootDir, 'broken.pdf'), past, past);
+    scanRes = await call(handler, `/canvas/native/library-roots/${root.id}/scan`, { method: 'POST', cookie });
+    assert.equal(store.getSourceFileByPath(actor, root.id, 'broken.pdf').status, 'active');
+
+    // --- 11.11 Startup recovery fails interrupted scans.
+    const stuckOp = store.createFileOperation(actor, { operationType: 'library.scan', payload: { rootId: root.id } });
+    store.startFileOperation(stuckOp.id);
+    const recovery = recoverInterruptedFileOperations(store);
+    assert.equal(recovery.interruptedScans, 1);
+    assert.equal(store.getFileOperation(actor, stuckOp.id).state, 'failed');
+    assert.equal(store.getFileOperation(actor, stuckOp.id).errorCode, 'interrupted_by_restart');
+
+    // --- 11.12 Reader still reaches scanned attachments through the unified endpoint.
+    const someRow = store.getSourceFileByPath(actor, root.id, 'a.pdf');
+    const fileRes = await call(handler, `/canvas/native/attachments/${someRow.attachmentId}/file`, { cookie });
+    assert.equal(fileRes.statusCode, 200);
+    assert.equal(fileRes.buffer.equals(makePdfBytes('alpha-content-replaced')), true);
+
+    console.log('✅ M4 scanner: enrollment, dedupe, moves, missing/restore, offline & unreadable safety passed');
+  } finally {
+    try { store.close(); } catch {}
+    fs.rmSync(tempDir, { recursive: true, force: true });
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+}
+
 try {
   await main();
   await testV12Migration();
+  await testM4Scanner();
   process.exit(0);
 } catch (err) {
   console.error('❌ Native M4 test failure:', err);

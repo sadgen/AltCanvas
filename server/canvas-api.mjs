@@ -18,7 +18,8 @@ import {
 import { getSession, getSessionIdFromRequest } from './session.mjs';
 import { getAiPublicConfig, requestAiCompletion, validateAiEndpoint } from './ai-provider.mjs';
 import { resolveImportInput, findDuplicateCandidates, safeDownloadPdfFile } from './import-resolver.mjs';
-import { NativePathError, openFileInsideRoot } from './native-fs.mjs';
+import { NativePathError, openFileInsideRoot, normalizeRelativePath, listDirectoryLevel } from './native-fs.mjs';
+import { scanLibraryRoot, LibraryScanError } from './library-scanner.mjs';
 
 // M4: server-configured library roots. Format: JSON array
 // [{"path": "/data/library", "name": "研究文库"}] or a semicolon separated
@@ -1984,6 +1985,72 @@ export function createCanvasHandler(store, {
         const configuredRoots = parseNativeLibraryRootsConfig();
         const roots = store.ensureLibraryRootsFromConfig(actor.actorKey, configuredRoots);
         json(res, 200, { data: roots });
+        return;
+      }
+
+      match = /^\/canvas\/native\/library-roots\/([0-9a-f-]+)\/tree$/.exec(pathname);
+      if (match && method === 'GET') {
+        const root = store.requireLibraryRoot(actor.actorKey, match[1]);
+        const rawPath = url.searchParams.get('path') || '';
+        const relativePath = rawPath ? normalizeRelativePath(rawPath) : '';
+        const limit = Math.max(1, Math.min(500, Number(url.searchParams.get('limit')) || 200));
+        const cursor = Math.max(0, Number(url.searchParams.get('cursor')) || 0);
+        const level = listDirectoryLevel(root.absolutePath, relativePath);
+        const page = level.slice(cursor, cursor + limit);
+        const nextCursor = cursor + limit < level.length ? cursor + limit : null;
+        const pdfPaths = page.filter(e => e.type === 'pdf').map(e => e.relativePath);
+        const libraryInfo = store.getSourceFileLibraryInfoByPaths(actor.actorKey, root.id, pdfPaths);
+        const data = page.map(entry => {
+          const binding = libraryInfo.get(entry.relativePath) || null;
+          return { ...entry, library: binding };
+        });
+        json(res, 200, {
+          data,
+          meta: {
+            rootId: root.id,
+            path: relativePath,
+            total: level.length,
+            cursor,
+            nextCursor
+          }
+        });
+        return;
+      }
+
+      match = /^\/canvas\/native\/library-roots\/([0-9a-f-]+)\/scan$/.exec(pathname);
+      if (match && method === 'POST') {
+        const root = store.requireLibraryRoot(actor.actorKey, match[1]);
+        let result;
+        try {
+          result = await scanLibraryRoot(store, actor.actorKey, root.id);
+        } catch (err) {
+          if (err instanceof LibraryScanError || err?.code === 'library_root_unavailable') {
+            error(res, err.code === 'library_root_unavailable' ? 503 : 500,
+              err.code || 'library_scan_failed',
+              err.code === 'library_root_unavailable' ? 'Library root is not available' : 'Library scan failed');
+            return;
+          }
+          throw err;
+        }
+        json(res, result.alreadyRunning ? 200 : 202, {
+          data: {
+            operationId: result.operationId,
+            state: result.state,
+            alreadyRunning: result.alreadyRunning,
+            report: result.report || null
+          }
+        });
+        return;
+      }
+
+      match = /^\/canvas\/native\/file-operations\/([0-9a-f-]+)$/.exec(pathname);
+      if (match && method === 'GET') {
+        const operation = store.getFileOperation(actor.actorKey, match[1]);
+        if (!operation) {
+          error(res, 404, 'not_found', 'File operation not found');
+          return;
+        }
+        json(res, 200, { data: operation });
         return;
       }
 
@@ -4084,6 +4151,12 @@ ${textSnippet.slice(0, 8000) || '无'}`;
     } catch (err) {
       if (err instanceof CanvasNotFoundError) error(res, 404, 'not_found', 'Canvas resource not found');
       else if (err instanceof CanvasConflictError) error(res, 412, 'version_conflict', 'The resource has changed; reload and retry');
+      else if (err instanceof NativePathError) {
+        const status = err.code === 'library_root_unavailable' ? 503
+          : err.code === 'file_not_found' || err.code === 'directory_not_found' ? 404
+            : 400;
+        error(res, status, err.code, err.message);
+      }
       else if (err instanceof TypeError || err.status === 400) error(res, 400, 'invalid_request', err.message);
       else if (err.status === 403) error(res, 403, 'source_forbidden', err.message);
       else if (err.status === 413) error(res, 413, 'payload_too_large', err.message);

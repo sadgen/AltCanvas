@@ -4843,6 +4843,34 @@ export class CanvasStore {
     `).all(...params).map(sourceFileRow);
   }
 
+  // Library binding info for a set of concrete paths inside one root, used by
+  // the original-files tree view to show the library filename (document title)
+  // next to each disk file. Documents soft-deleted from the library count as
+  // unbound (未入库).
+  getSourceFileLibraryInfoByPaths(actorKey, rootId, relativePaths) {
+    const info = new Map();
+    if (!Array.isArray(relativePaths) || relativePaths.length === 0) return info;
+    const placeholders = relativePaths.map(() => '?').join(', ');
+    const rows = this.db.prepare(`
+      SELECT sf.id, sf.relative_path, sf.status, sf.document_id, sf.attachment_id,
+             d.title AS document_title, d.deleted_at AS document_deleted_at
+      FROM source_files sf
+      LEFT JOIN documents d ON d.id = sf.document_id
+      WHERE sf.owner_key = ? AND sf.root_id = ? AND sf.deleted_at IS NULL
+        AND sf.relative_path IN (${placeholders})
+    `).all(actorKey, rootId, ...relativePaths);
+    for (const row of rows) {
+      info.set(row.relative_path, {
+        sourceFileId: row.id,
+        status: row.status,
+        documentId: row.document_deleted_at ? null : row.document_id,
+        attachmentId: row.document_deleted_at ? null : row.attachment_id,
+        documentTitle: row.document_deleted_at ? null : row.document_title
+      });
+    }
+    return info;
+  }
+
   // Full scan inventory of a root (not-deleted, non-trashed rows) used for
   // incremental diffing; scanner compares this against the live directory.
   listRootSourceFilesForScan(actorKey, rootId) {
@@ -4887,6 +4915,39 @@ export class CanvasStore {
 
   linkSourceFileToDocument(actorKey, sourceFileId, { documentId, attachmentId }) {
     return this.updateSourceFile(actorKey, sourceFileId, { documentId, attachmentId });
+  }
+
+  // Bulk scan bookkeeping: refresh last_seen without bumping version, so
+  // unchanged files do not churn concurrency versions on every scan.
+  touchSourceFiles(actorKey, rootId, sourceFileIds, timestamp) {
+    if (!Array.isArray(sourceFileIds) || sourceFileIds.length === 0) return;
+    const placeholders = sourceFileIds.map(() => '?').join(', ');
+    this.db.prepare(`
+      UPDATE source_files SET last_seen_at = ?, updated_at = ?
+      WHERE owner_key = ? AND root_id = ? AND id IN (${placeholders})
+    `).run(timestamp, timestamp, actorKey, rootId, ...sourceFileIds);
+  }
+
+  // Creates the source_file-backed attachment for an enrolled document.
+  // The CHECK constraint on attachments requires source_file kind rows to
+  // carry a source_file_id and a NULL blob_hash.
+  createSourceFileAttachment(actorKey, documentId, {
+    sourceFileId,
+    originalFilename = '',
+    title = '',
+    sizeBytes = 0,
+    mimeType = 'application/pdf'
+  }) {
+    this.requireDocument(actorKey, documentId);
+    const attachmentId = id();
+    const timestamp = nowIso();
+    this.db.prepare(`
+      INSERT INTO attachments
+        (id, document_id, blob_hash, mime_type, original_filename, title, size_bytes,
+         storage_kind, source_file_id, version, created_at, updated_at)
+      VALUES (?, ?, NULL, ?, ?, ?, ?, 'source_file', ?, 1, ?, ?)
+    `).run(attachmentId, documentId, mimeType, originalFilename, title, sizeBytes, sourceFileId, timestamp, timestamp);
+    return this.getAttachment(actorKey, attachmentId);
   }
 
   // --- File operations (persistent operation log with crash compensation) ---

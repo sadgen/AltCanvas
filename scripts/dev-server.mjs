@@ -365,6 +365,13 @@ server.listen(PORT, '0.0.0.0', () => {
         console.log(`[dev-server] Blob 一致性恢复完成: ${JSON.stringify(summary)}`);
       }
     }
+    if (canvasStore) {
+      const { recoverInterruptedFileOperations } = await import('../server/library-scanner.mjs');
+      const fileOpSummary = recoverInterruptedFileOperations(canvasStore);
+      if (fileOpSummary && (fileOpSummary.interruptedScans || fileOpSummary.otherInterrupted)) {
+        console.log(`[dev-server] 文件操作恢复完成: ${JSON.stringify(fileOpSummary)}`);
+      }
+    }
   } catch (err) {
     console.warn('[dev-server] Blob consistency recovery failed:', err?.message || err);
   }
