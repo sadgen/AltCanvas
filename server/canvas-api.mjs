@@ -1253,7 +1253,12 @@ function normalizeNativeImportItem(item, indexLabel = 'item') {
 
   // Client-supplied `resolved` objects go through the SAME contract as top-level fields.
   if (resolved) {
-    const RESOLVED_LIMITS = { abstractNote: 20_000, sourceType: 64, doi: 2000, url: 2000, pdfUrl: 2000, arxivId: 64 };
+    // The executor accepts both spellings; BOTH must satisfy the contract so neither
+    // casing can bypass validation.
+    const RESOLVED_LIMITS = {
+      abstractNote: 20_000, sourceType: 64, doi: 2000, url: 2000, pdfUrl: 2000,
+      arxivId: 64, arXivId: 64
+    };
     for (const [field, maxLen] of Object.entries(RESOLVED_LIMITS)) {
       if (resolved[field] !== undefined && resolved[field] !== null) {
         if (typeof resolved[field] !== 'string') {
@@ -1338,7 +1343,32 @@ function normalizeNativeImportItem(item, indexLabel = 'item') {
       && (typeof ref.externalLibraryId !== 'string' || ref.externalLibraryId.length > 128)) {
       throw new TypeError(`${indexLabel}.externalRefs.externalLibraryId must be a string of at most 128 characters`);
     }
-    return ref;
+    if (ref.externalAttachmentId !== undefined && ref.externalAttachmentId !== null
+      && (typeof ref.externalAttachmentId !== 'string' || ref.externalAttachmentId.length > 256)) {
+      throw new TypeError(`${indexLabel}.externalRefs.externalAttachmentId must be a string of at most 256 characters`);
+    }
+    if (ref.externalVersion !== undefined && ref.externalVersion !== null) {
+      if (typeof ref.externalVersion !== 'number' || !Number.isInteger(ref.externalVersion) || ref.externalVersion < 0) {
+        throw new TypeError(`${indexLabel}.externalRefs.externalVersion must be a non-negative integer`);
+      }
+    }
+    if (ref.sourceUrl !== undefined && ref.sourceUrl !== null) {
+      if (typeof ref.sourceUrl !== 'string' || ref.sourceUrl.length > 2000) {
+        throw new TypeError(`${indexLabel}.externalRefs.sourceUrl must be a string of at most 2000 characters`);
+      }
+      if (ref.sourceUrl !== '' && !/^https?:\/\//i.test(ref.sourceUrl)) {
+        throw new TypeError(`${indexLabel}.externalRefs.sourceUrl must be an http(s) URL`);
+      }
+    }
+    // Emit a fully normalized reference object; unknown keys are dropped.
+    return {
+      provider: ref.provider,
+      externalItemId: ref.externalItemId,
+      externalLibraryId: ref.externalLibraryId ?? null,
+      externalAttachmentId: ref.externalAttachmentId ?? null,
+      externalVersion: ref.externalVersion ?? null,
+      sourceUrl: ref.sourceUrl ?? null
+    };
   });
 
   return {

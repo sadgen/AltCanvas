@@ -906,6 +906,7 @@
 
 - 证据浮层人工验收 PASS（见上），M2 全部审计轮次的 P1/P2 均已闭环并附测试；
 - 运行守护：`systemctl --user` 单元 `altcanvas.service` 独占管理（`Restart=always, RestartSec=3`），重复拉起源已根治；
+- 审计登记的非阻断 P2 技术债同日收紧：`resolved.arXivId` 大小写旁路封堵（两种拼写均纳入长度契约）；`externalRefs` 全字段规范化（`externalAttachmentId` ≤256 字符串、`externalVersion` 非负整数、`sourceUrl` ≤2000 且必须 http(s)，未知键丢弃并输出规范化对象）；新增 5 类非法载荷 400 测试与全字段正向前置持久化断言；
 - **M2 统一 Native 导入管线：PASS（关闭）**。下一阶段：M3 Translation Server 集成。
 
 ---

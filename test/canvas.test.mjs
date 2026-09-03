@@ -3861,7 +3861,12 @@ try {
       { sourceType: 'manual', title: 'Bad Year Type', year: 'twenty' },
       { sourceType: 'manual', title: 'Bad Resolved Year', resolved: { sourceType: 'doi', title: 'R', year: 'abc' } },
       { sourceType: 'manual', title: 'Bad Resolved Abstract', resolved: { sourceType: 'doi', title: 'R', abstractNote: 'x'.repeat(20_001) } },
-      { sourceType: 'manual', title: 'Bad Resolved PdfUrl', resolved: { sourceType: 'doi', title: 'R', pdfUrl: 'gopher://x' } }
+      { sourceType: 'manual', title: 'Bad Resolved PdfUrl', resolved: { sourceType: 'doi', title: 'R', pdfUrl: 'gopher://x' } },
+      { sourceType: 'manual', title: 'Bad Resolved ArXiv Casing', resolved: { sourceType: 'arxiv', title: 'R', arXivId: 'x'.repeat(100) } },
+      { sourceType: 'manual', title: 'Bad Ref Version', externalRefs: [{ provider: 'zotero', externalItemId: 'V1', externalVersion: 'abc' }] },
+      { sourceType: 'manual', title: 'Bad Ref Version Negative', externalRefs: [{ provider: 'zotero', externalItemId: 'V2', externalVersion: -1 }] },
+      { sourceType: 'manual', title: 'Bad Ref SourceUrl', externalRefs: [{ provider: 'zotero', externalItemId: 'S1', sourceUrl: 'file:///etc/passwd' }] },
+      { sourceType: 'manual', title: 'Bad Ref AttId Type', externalRefs: [{ provider: 'zotero', externalItemId: 'A1', externalAttachmentId: 123 }] }
     ];
     for (const payload of badSinglePayloads) {
       const res = await call(handler, '/canvas/imports/native', { method: 'POST', cookie, body: payload });
@@ -3872,9 +3877,31 @@ try {
     assert.equal(batchRes.statusCode, 400, 'Batch non-http pdfUrl must 400');
     assert.equal(store.listDocuments(m2Actor, {}).length, docsBefore, 'No documents may be created by rejected payloads');
     assert.equal(store.db.prepare('SELECT COUNT(*) AS c FROM import_jobs').get().c, jobsBefore, 'No jobs may be created by rejected payloads');
-  }
 
-  // 10. HTTP API: Cancel import job
+    // Positive: fully-populated externalRef passes and persists with normalized fields
+    const fullRefRes = await call(handler, '/canvas/imports/native', {
+      method: 'POST', cookie,
+      body: {
+        sourceType: 'zotero',
+        title: 'Full External Ref Paper',
+        externalRefs: [{
+          provider: 'zotero',
+          externalItemId: 'FULL_REF_1',
+          externalLibraryId: 'user_42',
+          externalAttachmentId: 'ATT_FULL_1',
+          externalVersion: 7,
+          sourceUrl: 'https://zotero.org/items/FULL_REF_1'
+        }]
+      }
+    });
+    assert.equal(fullRefRes.statusCode, 201);
+    const persistedRef = store.listExternalRefs(m2Actor, fullRefRes.payload.data.document.id)
+      .find(r => r.externalItemId === 'FULL_REF_1');
+    assert.ok(persistedRef, 'Fully populated externalRef must persist');
+    assert.equal(persistedRef.externalAttachmentId, 'ATT_FULL_1');
+    assert.equal(persistedRef.externalVersion, 7);
+    assert.equal(persistedRef.sourceUrl, 'https://zotero.org/items/FULL_REF_1');
+  }
 
   // 9i. Deep pre-validation rejects malformed nested structures without creating any job
   {
