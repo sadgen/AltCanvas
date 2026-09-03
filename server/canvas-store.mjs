@@ -848,7 +848,7 @@ function ensureM4LibraryTables(db) {
     CREATE TABLE IF NOT EXISTS file_operations (
       id TEXT PRIMARY KEY,
       owner_key TEXT NOT NULL,
-      operation_type TEXT NOT NULL CHECK (operation_type IN ('file.import', 'file.rename', 'file.move', 'file.trash', 'file.restore', 'file.delete_permanent', 'library.scan', 'library.reconcile')),
+      operation_type TEXT NOT NULL CHECK (operation_type IN ('file.import', 'file.rename', 'file.move', 'file.trash', 'file.restore', 'file.delete_permanent', 'file.mkdir', 'library.scan', 'library.reconcile')),
       source_file_id TEXT,
       source_path TEXT,
       target_path TEXT,
@@ -1077,6 +1077,57 @@ function ensureAllIndexes(db) {
       CREATE INDEX IF NOT EXISTS file_operations_source_file_idx ON file_operations(source_file_id);
     `);
   }
+}
+
+
+// M4 compatibility migration: native-era inbox entries are deprecated. Every
+// legacy native entry is checked against its document; valuable metadata is
+// backfilled only into EMPTY document fields (manual/library values always
+// win) and entries without a document are reported, never silently dropped.
+function migrateLegacyNativeInboxEntries(db, dbDirectory) {
+  let rows = [];
+  try {
+    rows = db.prepare("SELECT * FROM inbox_entries WHERE library_type = 'native' AND deleted_at IS NULL").all();
+  } catch {
+    return null; // no inbox table (fresh install)
+  }
+  if (!rows.length) {
+    return { migratedAt: nowIso(), totalNativeEntries: 0, linkedDocuments: 0, backfilledDocuments: 0, orphanedEntries: 0, orphanDetails: [] };
+  }
+  let linked = 0;
+  let backfilled = 0;
+  const orphanDetails = [];
+  for (const row of rows) {
+    const doc = db.prepare('SELECT id, doi FROM documents WHERE id = ? AND deleted_at IS NULL').get(row.item_key);
+    if (!doc) {
+      orphanDetails.push({
+        inboxEntryId: row.id,
+        itemKey: row.item_key,
+        title: row.title || '',
+        detectedFrom: row.detected_from || '',
+        firstSeenAt: row.first_seen_at || null
+      });
+      continue;
+    }
+    linked += 1;
+    if (!doc.doi && row.doi) {
+      db.prepare('UPDATE documents SET doi = ? WHERE id = ?').run(row.doi, doc.id);
+      backfilled += 1;
+    }
+  }
+  const report = {
+    migratedAt: nowIso(),
+    totalNativeEntries: rows.length,
+    linkedDocuments: linked,
+    backfilledDocuments: backfilled,
+    orphanedEntries: orphanDetails.length,
+    orphanDetails
+  };
+  try {
+    const reportPath = path.join(dbDirectory, 'm4-inbox-migration-report.json');
+    fs.writeFileSync(reportPath, JSON.stringify(report, null, 2), { mode: 0o600 });
+  } catch {}
+  return report;
 }
 
 export class CanvasStore {
@@ -1637,6 +1688,15 @@ export class CanvasStore {
       const violations = this.db.prepare('PRAGMA foreign_key_check').all();
       if (violations.length > 0) {
         throw new Error(`Schema v13 migration left foreign key violations: ${JSON.stringify(violations.slice(0, 5))}`);
+      }
+      const inboxReport = migrateLegacyNativeInboxEntries(this.db, path.dirname(this.dbPath));
+      if (inboxReport && inboxReport.totalNativeEntries > 0) {
+        console.log(`[m4-migration] legacy native inbox entries: ${JSON.stringify({
+          total: inboxReport.totalNativeEntries,
+          linked: inboxReport.linkedDocuments,
+          backfilled: inboxReport.backfilledDocuments,
+          orphaned: inboxReport.orphanedEntries
+        })}`);
       }
     }
   }
@@ -3665,18 +3725,8 @@ export class CanvasStore {
         sizeBytes
       });
 
-      // 5. Inbox Entry Registration
-      this.upsertInboxEntries(actorKey, [{
-        libraryType: 'native',
-        libraryId: 'local',
-        itemKey: document.id,
-        attachmentKey: attachment.id,
-        detectedFrom: 'native_upload',
-        title: cleanTitle,
-        year: null,
-        abstractNote: '',
-        tags: []
-      }]);
+      // 5. (M4) Inbox retired: new uploads go straight to the library.
+      // The deprecated inbox_entries table is no longer written.
 
       // 6. Topic Document association
       let topicDoc = null;
@@ -4297,20 +4347,8 @@ export class CanvasStore {
         }
       }
 
-      const inboxUpserted = this.upsertInboxEntries(actorKey, [{
-        libraryType: 'native',
-        libraryId: 'local',
-        itemKey: document.id,
-        attachmentKey: linkedAttachment?.attachment?.id || document.attachments?.[0]?.id || null,
-        detectedFrom: `import:${sourceType || 'manual'}`,
-        title: document.title,
-        year: document.year ? String(document.year) : (year ? String(year) : null),
-        creators: creatorsInput,
-        abstractNote: document.abstract || abstract || '',
-        tags,
-        doi: document.doi || normalizedDoi || null
-      }]);
-      const inboxEntry = inboxUpserted[0];
+      // (M4) Inbox retired: imports bind topics directly, no inbox_entries writes.
+      const resolvedAttachmentId = linkedAttachment?.attachment?.id || document.attachments?.[0]?.id || null;
 
       let topicDocument = null;
       if (targetWorkspaceId) {
@@ -4318,7 +4356,7 @@ export class CanvasStore {
           libraryType: 'native',
           libraryId: 'local',
           itemKey: document.id,
-          attachmentKey: inboxEntry?.attachmentKey || null,
+          attachmentKey: resolvedAttachmentId,
           status: 'accepted',
           origin: 'canvas_import'
         });
@@ -4330,7 +4368,7 @@ export class CanvasStore {
         match: matched ? { strategy: matched.strategy, documentId: matched.document.id } : null,
         document: fullDoc,
         attachment: linkedAttachment?.attachment || fullDoc.attachments?.[0] || null,
-        inboxEntry,
+        inboxEntry: null,
         topicDocument
       };
     });

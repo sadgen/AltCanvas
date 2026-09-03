@@ -23,13 +23,15 @@ for (const id of [
   'ai-provider-status', 'ai-provider-name', 'ai-provider-model', 'btn-test-ai-conn',
   'input-ai-base-url', 'input-ai-model', 'input-ai-key', 'btn-clear-ai-config',
   'btn-canvas-zoom-out', 'btn-canvas-zoom-reset', 'btn-canvas-zoom-in', 'canvas-save-state',
-  'select-topic-workspace', 'btn-open-topic-settings', 'btn-open-inbox', 'inbox-unread-badge', 'btn-toggle-canvas-max',
-  'inbox-modal', 'inbox-panel', 'btn-close-inbox', 'btn-inbox-scan-now', 'btn-inbox-classify-ai', 'btn-inbox-accept-ai', 'input-inbox-search', 'inbox-items-container',
-  'btn-inbox-batch-assign', 'btn-inbox-batch-defer', 'btn-inbox-batch-ignore',
-  'batch-topics-modal', 'batch-topics-panel', 'btn-close-batch-topics', 'batch-topics-list', 'input-new-topic-quick', 'btn-create-topic-quick', 'btn-confirm-batch-topics',
-  'topic-settings-modal', 'topic-settings-panel', 'btn-close-topic-settings', 'input-topic-name', 'input-topic-desc', 'input-topic-question', 'input-topic-inclusion', 'input-topic-exclusion', 'btn-save-topic-meta', 'btn-delete-topic', 'select-bind-collection', 'select-bind-mode', 'btn-submit-bind-collection', 'topic-bindings-list', 'topic-docs-list',
+  'select-topic-workspace', 'btn-open-topic-settings', 'btn-toggle-canvas-max',
+  'topic-settings-modal', 'topic-settings-panel', 'btn-close-topic-settings', 'input-topic-name', 'input-topic-desc', 'input-topic-question', 'input-topic-inclusion', 'input-topic-exclusion', 'btn-save-topic-meta', 'btn-delete-topic', 'topic-docs-list',
+  // M4 原始文件视图与文库过滤
+  'btn-library-view-files', 'library-files-panel', 'source-files-root-select', 'btn-source-rescan', 'btn-source-new-dir', 'btn-source-up', 'source-files-path-label', 'source-files-items',
+  'library-filter-chips', 'btn-library-ai-classify',
+  'file-name-modal', 'file-name-modal-title', 'file-name-modal-hint', 'file-name-modal-input', 'file-name-modal-extra', 'file-name-modal-dir-input', 'file-name-modal-error', 'btn-close-file-name-modal', 'btn-cancel-file-name-modal', 'btn-confirm-file-name-modal',
   'doc-meta-modal', 'doc-meta-panel', 'btn-close-doc-meta', 'input-doc-meta-clean-title', 'input-doc-meta-institution', 'input-doc-meta-year', 'input-doc-meta-report-title', 'input-doc-meta-subtitle', 'input-doc-meta-summary', 'btn-doc-meta-ai-extract', 'btn-cancel-doc-meta', 'btn-save-doc-meta', 'btn-doc-edit-title', 'btn-doc-ai-title',
-  'btn-canvas-quick-import', 'btn-inbox-quick-import', 'quick-import-modal', 'quick-import-panel', 'btn-close-quick-import', 'input-quick-import-query', 'btn-quick-import-resolve', 'quick-import-result-card', 'btn-cancel-quick-import', 'btn-quick-import-inbox-only', 'btn-quick-import-topic',
+  'btn-canvas-quick-import', 'quick-import-modal', 'quick-import-panel', 'btn-close-quick-import', 'input-quick-import-query', 'btn-quick-import-resolve', 'quick-import-result-card', 'btn-cancel-quick-import', 'btn-quick-import-topic',
+  'quick-import-directory-section', 'quick-import-target-root', 'quick-import-target-dir', 'quick-import-filename', 'quick-import-dir-topics', 'btn-quick-import-directory',
   'canvas-evidence-popover', 'evidence-popover-panel', 'btn-close-evidence-popover', 'evidence-popover-title', 'evidence-popover-page-badge', 'evidence-popover-doc-title', 'evidence-popover-quote-box', 'btn-dismiss-evidence-popover', 'btn-evidence-popover-jump'
 ]) {
   assert.equal((html.match(new RegExp(`id=["']${id}["']`, 'g')) || []).length, 1, `${id} must exist exactly once`);
@@ -43,10 +45,14 @@ assert.match(html, /btn-item-edit-meta/);
 assert.match(html, /function openQuickEvidencePopover\(/, 'Canvas cards must support in-place evidence quick verification popover');
 assert.match(html, /function openQuickImportModal\(/, 'Canvas and Inbox must support quick DOI/arXiv/URL import');
 assert.match(html, /async function resolveQuickImport\(\)/, 'Quick import must resolve metadata and duplicate detection');
-assert.match(html, /async function executeQuickImport\(/, 'Quick import must execute durable import into workspace or inbox');
+assert.match(html, /async function executeQuickImport\(/, 'Quick import must execute durable import into workspace');
+assert.match(html, /async function executeQuickDirectoryImport\(/, 'M4 quick import must support archiving PDFs into library-root directories');
+assert.match(html, /async function scanLibraryRootWithFeedback|function sourceScanFlow\(/, 'M4 source-files view must support recursive scanning with feedback');
+assert.match(html, /function promptM4FileName\(/, 'M4 must provide the original-filename conflict dialog');
+assert.match(html, /M4_SOURCE_STATUS_LABELS/, 'M4 must label source-file states (正常/重复/缺失/损坏/回收站)');
 assert.match(html, /canvas-node-quick-verify/, 'Canvas cards with sourceRef must render quick-verify button');
-assert.match(html, /documentMetas\.get\(docMetaKey\(entry\.libraryType, entry\.libraryId, entry\.itemKey\)\)/,
-  'inbox rendering must use composite key to lookup document metadata');
+assert.match(html, /documentMetas\.get\(docMetaKey\(/,
+  'rendering must use composite key to lookup document metadata');
 assert.match(html, /documentMetas\.clear\(\)/,
   'library reloading and logout must clear in-memory document metadata');
 
@@ -201,98 +207,94 @@ assert.match(html, /async function loadTopicWorkspaces\(/);
 assert.match(html, /async function switchTopicWorkspace\(/);
 assert.match(html, /async function openTopicSettingsModal\(/);
 assert.match(html, /async function saveTopicMetadata\(\)/);
-assert.match(html, /async function loadTopicBindings\(\)/);
-assert.match(html, /async function syncCollectionBinding\(/);
-assert.match(html, /async function loadInboxEntries\(/);
-assert.match(html, /function renderInboxEntries\(\)/);
-assert.match(html, /async function scanAlteroInbox\(\)/);
-assert.match(html, /async function classifyInboxWithAi\(\)/);
-assert.match(html, /async function acceptAllAiSuggestions\(\)/);
-assert.match(html, /id="btn-library-view-all"/);
-assert.match(html, /id="btn-library-view-topics"/);
-assert.match(html, /id="select-library-topic"/);
-assert.match(html, /async function loadTopicLibraryDocuments\(\)/);
-assert.match(html, /resolveTopicLibraryPdf/);
-assert.match(html, /rememberDocumentMetas\(result\?\.documentMetas\)/,
-  'AI classification must display Chinese names returned by the same request');
+// [M4] Retired inbox/collection UI and functions must be GONE from the page.
+for (const retired of [
+  'id="btn-open-inbox"', 'id="inbox-modal"', 'id="inbox-unread-badge"', 'id="inbox-items-container"',
+  'id="btn-inbox-scan-now"', 'id="btn-inbox-classify-ai"', 'id="btn-inbox-generate-topics-ai"',
+  'id="btn-inbox-accept-ai"', 'id="btn-inbox-batch-assign"', 'id="btn-quick-import-inbox-only"',
+  'id="batch-topics-modal"', 'id="select-bind-collection"', 'id="btn-submit-bind-collection"',
+  'id="topic-bindings-list"', 'data-tab="bindings"',
+]) {
+  assert.equal((html.match(new RegExp(retired.replaceAll(/[.*+?^${}()|[\]\\]/g, '\\$&'))) || []).length, 0,
+    `${retired} must be absent after the M4 retirement`);
+}
+for (const retiredFn of ['renderInboxEntries', 'scanAlteroInbox', 'classifyInboxWithAi', 'acceptAllAiSuggestions',
+  'openBatchTopicsModal', 'confirmBatchTopicAssignment', 'loadTopicBindings', 'submitAddCollectionBinding',
+  'syncCollectionBinding', 'loadAlteroCollectionsForBinding', 'openInboxEntryForReading']) {
+  assert.doesNotMatch(html, new RegExp(`(async )?function ${retiredFn}\\(`),
+    `${retiredFn} must be removed after the M4 retirement`);
+}
+assert.doesNotMatch(html, /\/inbox\/(scan|classify|generate-topics|batch-action)/,
+  'page must not call retired inbox endpoints');
+assert.doesNotMatch(html, /collection-bindings/, 'page must not call retired collection-binding endpoints');
 
-// --- Behavioral test: Directly invoking production acceptAllAiSuggestions from index.html ---
+// M4 additions: 原始文件视图、文库过滤、双名称、冲突对话框、回收站、文库级 AI
+assert.match(html, /id="btn-library-view-files"/);
+assert.match(html, /id="library-files-panel"/);
+assert.match(html, /id="source-files-root-select"/);
+assert.match(html, /id="btn-source-rescan"/);
+assert.match(html, /id="btn-source-new-dir"/);
+assert.match(html, /async function loadSourceFiles\(/, 'M4 source-files view must load the real directory tree');
+assert.match(html, /async function applyLibraryFilter\(/, 'M4 library must support 未分类/无 PDF/文件缺失/回收站 filters');
+assert.match(html, /async function libraryAiClassifyFlow\(/, 'AI topic suggestion must be a library-level batch operation');
+assert.match(html, /data-native-action="rename-original"/, 'library items must expose explicit original-file rename');
+assert.match(html, /data-native-action="trash"/, 'library items must expose trash actions');
+assert.match(html, /data-native-action="restore"/, 'library items must expose restore actions');
+assert.match(html, /原始文件名（磁盘文件名）/, 'library items must display the original disk filename');
+
+// --- Behavioral test: libraryAiClassifyFlow applies >=0.7 suggestions via batch-topics ---
 {
-  const fnMatch = /async function acceptAllAiSuggestions\(\)\s*\{([\s\S]*?)\n    \}/.exec(scripts[0]);
-  assert.ok(fnMatch, 'acceptAllAiSuggestions must be found in script');
+  const fnMatch = /async function libraryAiClassifyFlow\(\)\s*\{([\s\S]*?)\n    \}/.exec(scripts[0]);
+  assert.ok(fnMatch, 'libraryAiClassifyFlow must be found in script');
 
-  const inboxAiClassifications = new Map();
-  inboxAiClassifications.set('entry-1', [
-    { workspaceId: 'ws-A', workspaceName: 'Topic A', confidence: 0.9 },
-    { workspaceId: 'ws-B', workspaceName: 'Topic B', confidence: 0.85 }
-  ]);
-
-  const calls = [];
+  const m4Calls = [];
   const toastCalls = [];
-  const mockContext = {
-    inboxAiClassifications,
-    showToast: (msg, type) => toastCalls.push({ msg, type }),
-    canvasFetch: async (path, options) => {
-      calls.push({ path, options });
-      const targetWs = options.body.targetWorkspaceIds[0];
-      if (targetWs === 'ws-A') return { processed: 1 };
-      throw new Error('Network error on Topic B');
-    },
-    document: {
-      getElementById: () => ({ disabled: false })
-    },
-    loadInboxEntries: async () => {},
-    loadTopicDocuments: async () => {},
-    console: { warn: () => {} }
+  const buttonState = { disabled: false, text: '' };
+  const mockDocument = {
+    getElementById: () => ({ disabled: false, textContent: '' })
   };
-
   const runner = new Function(
-    'inboxAiClassifications', 'showToast', 'canvasFetch', 'document', 'loadInboxEntries', 'loadTopicDocuments', 'console',
+    'm4Fetch', 'document', 'showToast', 'userWorkspaces', 'canvasFetch', 'applyLibraryFilter', 'libraryFilterState',
     `return (async () => { ${fnMatch[1]} })();`
   );
-
   await runner(
-    mockContext.inboxAiClassifications,
-    mockContext.showToast,
-    mockContext.canvasFetch,
-    mockContext.document,
-    mockContext.loadInboxEntries,
-    mockContext.loadTopicDocuments,
-    mockContext.console
+    async (path, options) => {
+      m4Calls.push({ path, body: options?.body });
+      if (path === '/native/classify/generate-topics') {
+        return { data: {
+          createdWorkspaces: [{ id: 'ws-new' }],
+          classifications: {
+            'doc-1': [
+              { workspaceId: 'ws-A', confidence: 0.9, reason: 'fit' },
+              { workspaceId: 'ws-B', confidence: 0.5, reason: 'weak' }
+            ],
+            'doc-2': [
+              { workspaceId: 'ws-A', confidence: 0.8, reason: 'fit' }
+            ]
+          }
+        } };
+      }
+      if (path === '/native/documents/batch-topics') {
+        return { data: (options.body.documentIds || []).map(id => ({ documentId: id, ok: true })) };
+      }
+      if (path === '/workspaces') return [{ id: 'ws-A' }];
+      return { data: [] };
+    },
+    mockDocument,
+    (msg, type) => toastCalls.push({ msg, type }),
+    [{ id: 'ws-A', name: 'Topic A' }],
+    async (path) => [{ id: 'ws-A', name: 'Topic A' }],
+    async () => {},
+    'all'
   );
 
-  assert.equal(calls.length, 2, 'Must attempt both topics');
-  assert.equal(toastCalls.length, 1, 'Must show error toast on partial failure');
-  assert.match(toastCalls[0].msg, /1 个主题处理失败/);
-  assert.equal(inboxAiClassifications.has('entry-1'), true, 'Entry must be retained when Topic B fails');
-  assert.deepEqual(inboxAiClassifications.get('entry-1'), [
-    { workspaceId: 'ws-B', workspaceName: 'Topic B', confidence: 0.85 }
-  ], 'Only failed topic recommendations should remain in the map for retry');
+  const batchCalls = m4Calls.filter(c => c.path === '/native/documents/batch-topics');
+  assert.equal(batchCalls.length, 1, 'Only one workspace received >=0.7 suggestions');
+  assert.deepEqual(batchCalls[0].body, { documentIds: ['doc-1', 'doc-2'], topicIds: ['ws-A'] });
+  assert.equal(toastCalls.some(t => t.type === 'success' && /采纳 2 条/.test(t.msg)), true,
+    'must report the number of applied suggestions');
 }
 
-assert.match(html, /async function executeInboxBatchAction\(/);
-assert.match(html, /id="inbox-scroll-region"/);
-assert.match(html, /#inbox-panel\s*\{[\s\S]*height:\s*min\(46rem, calc\(100dvh - 2rem\)\)/,
-  'the inbox must stay within the viewport and scroll only its document region');
-assert.match(html, /id="btn-inbox-batch-reopen"/);
-assert.match(html, /action === 'reopen'/);
-assert.match(html, /已归入的主题不会被移除/);
-assert.match(html, /function openBatchTopicsModal\(/);
-assert.match(html, /async function confirmBatchTopicAssignment\(\)/);
-assert.match(html, /function toggleCanvasMaximize\(\)/);
-assert.match(html, /id="btn-inbox-generate-topics-ai"/);
-assert.match(html, /async function generateTopicsWithAi\(\)/);
-assert.match(html, /async function openInboxEntryForReading\(/);
-assert.match(html, /class="btn-entry-read/);
-assert.match(html, /\/inbox\/scan/);
-assert.match(html, /\/inbox\/classify/);
-assert.match(html, /\/inbox\/generate-topics/);
-assert.match(html, /\/inbox\/batch-action/);
-assert.match(html, /已直接复用现有全文分析图谱/);
-assert.match(html, /async function loadAlteroCollectionsForBinding\(\)/);
-assert.match(html, /const seenKeys = new Set\(\);[\s\S]*Duplicate collection key/);
-assert.match(html, /Collections count exceeded safety limit/);
-assert.match(html, /\/collection-bindings\/\$\{bindingId\}\/sync/);
 assert.match(html, /局域网 HTTP 会明文传输卡片内容与凭据/,
   'AI settings must warn about plaintext private-network transport');
 assert.match(html, /libraryType === 'native'/,
@@ -568,12 +570,8 @@ assert.match(html, /function applyCapabilitiesUI\(\)/,
   'UI must define applyCapabilitiesUI to control capability-driven views');
 assert.match(html, /config\.capabilities = data\.capabilities/,
   'checkSession must store capabilities');
-assert.match(html, /btnScan\.classList\.toggle\('hidden', !caps\.upstreamSync\)/,
-  'inbox scan button must toggle based on upstreamSync capability');
 assert.match(html, /collectionsContainer\.classList\.toggle\('hidden', !caps\.collections\)/,
   'collections container must toggle based on collections capability');
-assert.match(html, /bindingsTab\.classList\.toggle\('hidden', !caps\.collections\)/,
-  'collection bindings tab must toggle based on collections capability');
 assert.match(html, /function openQuickImportModal\(/);
 assert.match(html, /async function resolveQuickImport\(\)/);
 assert.match(html, /快速导入文献 \(DOI \/ arXiv \/ URL \/ BibTeX \/ RIS\)/,
@@ -1330,79 +1328,8 @@ assert.match(html, /config\.authMode === 'altero' &&\s*config\.capabilities\?\.e
   assert.equal(alteroCalled, false, 'jumpToSourceAnnotation must not call Altero for native source');
 }
 
-// Behavioral Test: Native inbox entry opening (cache hit vs miss, 0 Altero calls)
-{
-  const openInboxMatch = html.match(/async function openInboxEntryForReading\(entry\) \{([\s\S]*?)\n    \}/);
-  assert.ok(openInboxMatch, 'openInboxEntryForReading definition must exist');
-
-  let openItemCalled = null;
-  let nativeFetched = false;
-  let alteroPrefixCalled = false;
-
-  const sampleNativeItem = {
-    key: 'item-nat-1',
-    libraryType: 'native',
-    libraryId: 'local',
-    isNative: true,
-    data: { title: 'Cached Native Doc' },
-    children: [{ key: 'att-1', isNative: true, data: { contentType: 'application/pdf' } }]
-  };
-
-  const openInboxRunner = new Function(
-    'closeInboxModal', 'allItems', 'normalizeLibraryContext', 'isSameLibrary', 'getNativeLibraryItem',
-    'getApiUrl', 'libraryApiPrefix', 'fetch', 'getHeaders', 'openItem', 'console',
-    'entry',
-    `return (async () => { ${openInboxMatch[1]} })();`
-  );
-
-  // 1. Cache hit
-  await openInboxRunner(
-    () => {},
-    [sampleNativeItem],
-    s => ({ libraryType: s.libraryType || 'native', libraryId: s.libraryId || 'local' }),
-    (a, b) => a.libraryType === b.libraryType && a.libraryId === b.libraryId,
-    async () => { nativeFetched = true; },
-    s => s,
-    () => { alteroPrefixCalled = true; throw new Error('libraryApiPrefix called'); },
-    async () => ({ ok: true }),
-    () => ({}),
-    async (item, lib) => { openItemCalled = { item, lib }; },
-    { warn: () => {} },
-    { itemKey: 'item-nat-1', libraryType: 'native', libraryId: 'local', title: 'Cached Native Doc' }
-  );
-
-  assert.ok(openItemCalled, 'Cache hit must call openItem');
-  assert.equal(openItemCalled.item.key, 'item-nat-1');
-  assert.equal(nativeFetched, false, 'Cache hit must not fetch from backend');
-  assert.equal(alteroPrefixCalled, false, 'libraryApiPrefix must not be called');
-
-  // 2. Cache miss
-  let fetchedDocId = null;
-  openItemCalled = null;
-
-  await openInboxRunner(
-    () => {},
-    [], // empty cache
-    s => ({ libraryType: s.libraryType || 'native', libraryId: s.libraryId || 'local' }),
-    (a, b) => a.libraryType === b.libraryType && a.libraryId === b.libraryId,
-    async (docId) => {
-      fetchedDocId = docId;
-      return { ...sampleNativeItem, key: docId };
-    },
-    s => s,
-    () => { alteroPrefixCalled = true; throw new Error('libraryApiPrefix called'); },
-    async () => ({ ok: true }),
-    () => ({}),
-    async (item, lib) => { openItemCalled = { item, lib }; },
-    { warn: () => {} },
-    { itemKey: 'item-nat-2', libraryType: 'native', libraryId: 'local', title: 'Remote Native Doc' }
-  );
-
-  assert.ok(openItemCalled, 'Cache miss must fetch and call openItem');
-  assert.equal(fetchedDocId, 'item-nat-2', 'Must request native document by key');
-  assert.equal(openItemCalled.item.key, 'item-nat-2');
-  assert.equal(alteroPrefixCalled, false, 'libraryApiPrefix must not be called for native entry');
-}
+// [M4] The inbox-entry reading behavior test was retired with the inbox;
+// native routing coverage continues through the openDocument router test below.
 
 // Behavioral Test: Unified openDocument router
 {

@@ -18,7 +18,7 @@ import {
 import { getSession, getSessionIdFromRequest } from './session.mjs';
 import { getAiPublicConfig, requestAiCompletion, validateAiEndpoint } from './ai-provider.mjs';
 import { resolveImportInput, findDuplicateCandidates, safeDownloadPdfFile } from './import-resolver.mjs';
-import { NativePathError, openFileInsideRoot, normalizeRelativePath, normalizeFilename, listDirectoryLevel } from './native-fs.mjs';
+import { NativePathError, openFileInsideRoot, normalizeRelativePath, normalizeFilename, listDirectoryLevel, ensureDirectoryInsideRoot } from './native-fs.mjs';
 import { scanLibraryRoot, LibraryScanError } from './library-scanner.mjs';
 import {
   FileOpError,
@@ -1543,6 +1543,173 @@ function normalizeNativeImportItem(item, indexLabel = 'item') {
 // Unified M2 native import executor shared by single and batch endpoints.
 // Sequencing: resolve -> safe download -> precheck (no writes) -> promote blob -> DB write,
 // with bidirectional compensation so neither orphan files nor dangling DB rows survive.
+// Shared M4 AI topic classification over classification-shaped entries.
+// Used by /canvas/native/documents/classify; throws on AI failures so the
+// endpoint can map AbortError to 504 and everything else to 502.
+async function runAiClassification({ store, actorKey, targetEntries, workspaces, privateConfig, aiCompletion }) {
+  const systemPrompt = [
+    '你是专业学术研究助手。你的任务是根据用户的多个研究主题及其纳入/排除规则，评估给定的文献是否适合归入各主题。',
+    '只输出一个合法的 JSON 对象，不要 Markdown 代码块。',
+    'JSON 格式示例：',
+    '{"classifications": {',
+    '  "entry-id-1": [',
+    '    {"workspaceId": "ws-1", "workspaceName": "主题名称", "confidence": 0.92, "reason": "匹配纳入规则：聚焦于大模型逻辑推理机制"}',
+    '  ]',
+    '}, "documentMetadata": {',
+    '  "entry-id-1": {"cleanTitle": "【机构】规范中文标题（2025）", "institution": "机构", "reportTitle": "中文主标题", "subtitle": "", "year": "2025", "summary": "一句话中文摘要"}',
+    '}}',
+    '【规则】',
+    '1. confidence 为 0.0 到 1.0 之间的浮点数。若不符合主题或命中排除规则，置信度应低于 0.3；',
+    '2. reason 简述推荐或不推荐的核心理由（30字以内）；',
+    '3. 同一篇文献可同时推荐给多个符合的主题（多对多归类）；',
+    '4. 必须在同一次返回中为每篇文献生成 documentMetadata；cleanTitle 必须是准确、自然、可直接展示的简体中文名，保留机构与年份等关键辨识信息。'
+  ].join('\n');
+
+  const topicContexts = workspaces.map((w, idx) => `[主题 ${idx + 1}] ID: ${w.id}\n名称: ${w.name}\n研究问题: ${w.researchQuestion || '无'}\n纳入规则: ${w.inclusionRules || '无'}\n排除规则: ${w.exclusionRules || '无'}`).join('\n\n');
+  const docContexts = targetEntries.map(e => `[待分拣文献] ID: ${e.id}\n标题: ${e.title}\n作者: ${(e.creators || []).map(c => typeof c === 'string' ? c : (c.name || `${c.firstName || ''} ${c.lastName || ''}`)).join(', ')}\n年份: ${e.year || '未知'}\n摘要: ${(e.abstractNote || '').slice(0, 800)}\n标签: ${(e.tags || []).join(', ')}`).join('\n\n');
+
+  const aiResponse = await aiCompletion({
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: `【候选研究主题】\n\n${topicContexts}\n\n【待分类文献列表】\n\n${docContexts}` }
+    ],
+    temperature: 0.2
+  }, privateConfig);
+
+  let parsed = parseAiJson(aiResponse);
+  if (!parsed || typeof parsed !== 'object') parsed = { classifications: {} };
+  const rawMap = parsed.classifications || parsed;
+  const classifications = {};
+
+  for (const entry of targetEntries) {
+    const list = Array.isArray(rawMap[entry.id])
+      ? rawMap[entry.id]
+      : (Array.isArray(rawMap[entry.itemKey])
+        ? rawMap[entry.itemKey]
+        : (Array.isArray(rawMap[entry.title]) ? rawMap[entry.title] : []));
+
+    classifications[entry.id] = list.map(item => {
+      const matchedWs = workspaces.find(w => w.id === item.workspaceId) || workspaces.find(w => w.name === item.workspaceName);
+      if (!matchedWs) return null;
+      const conf = typeof item.confidence === 'number' ? Math.max(0, Math.min(1, item.confidence)) : 0.5;
+      return {
+        workspaceId: matchedWs.id,
+        workspaceName: matchedWs.name,
+        confidence: conf,
+        reason: String(item.reason || '主题匹配').slice(0, 30)
+      };
+    }).filter(Boolean);
+  }
+
+  const documentMetas = saveClassificationDocumentMetas(store, actorKey, targetEntries, parsed);
+  return { classifications, documentMetas };
+}
+
+// Shared M4 AI topic-taxonomy generation over classification-shaped entries.
+async function runAiTopicGeneration({ store, actorKey, targetEntries, maxTopics = 5, privateConfig, aiCompletion }) {
+  const existingWorkspaces = store.listWorkspaces(actorKey);
+  const systemPrompt = [
+    '你是资深学术研究与产业分析专家。请根据给定的文献列表，自动提炼并规划一套清晰、聚焦的研究主题体系（Topic Taxonomy）。',
+    '【关键原则】',
+    `1. 主题数量严格精炼：提炼 3 到 ${maxTopics} 个高层次、非重叠的核心研究方向，避免过多细碎主题；`,
+    '2. 若已有候选主题且语义契合，请优先复用或在其基础上扩展，避免创建重复主题；',
+    '3. 为每个主题提供：`name`（15字以内的凝练中文名称）、`researchQuestion`（核心研究问题）、`inclusionRules`（清晰的纳入规则）、`exclusionRules`（排除规则）；',
+    '4. 为每篇待分类文献推荐最契合的主题（可多对多），仅当极个别文献确实与主要主题完全无关时才设立兜底补充主题；',
+    '5. 在同一次返回中为每篇文献生成规范中文名与元数据，不要要求第二次模型调用；',
+    '6. 只输出合法的 JSON 对象，严禁 Markdown 代码块。',
+    'JSON 格式示例：',
+    '{',
+    '  "topics": [',
+    '    {',
+    '      "name": "具身智能与机器人控制",',
+    '      "researchQuestion": "端到端具身多模态模型在通用机器人控制与动作规划中的落地机制",',
+    '      "inclusionRules": "涉及机器人感知、决策、控制、动作生成及具身数据训练的文献",',
+    '      "exclusionRules": "纯软件大模型推理或传统非智能自动化"',
+    '    }',
+    '  ],',
+    '  "classifications": {',
+    '    "entry-id-1": [',
+    '      { "topicName": "具身智能与机器人控制", "confidence": 0.95, "reason": "聚焦端到端机器人动作生成" }',
+    '    ]',
+    '  },',
+    '  "documentMetadata": {',
+    '    "entry-id-1": { "cleanTitle": "【机构】规范中文标题（2025）", "institution": "机构", "reportTitle": "中文主标题", "subtitle": "", "year": "2025", "summary": "一句话中文摘要" }',
+    '  }',
+    '}'
+  ].join('\n');
+
+  const existingContext = existingWorkspaces.length
+    ? existingWorkspaces.map((w, idx) => `[已有主题 ${idx + 1}] 名称: ${w.name}\n研究问题: ${w.researchQuestion || '无'}\n纳入规则: ${w.inclusionRules || '无'}`).join('\n\n')
+    : '（当前尚无已有主题）';
+
+  const docContexts = targetEntries.map(e => `[文献] ID: ${e.id}\n标题: ${e.title}\n作者: ${(e.creators || []).map(c => typeof c === 'string' ? c : (c.name || `${c.firstName || ''} ${c.lastName || ''}`)).join(', ')}\n年份: ${e.year || '未知'}\n摘要: ${(e.abstractNote || '').slice(0, 500)}\n标签: ${(e.tags || []).join(', ')}`).join('\n\n');
+
+  const aiResponse = await aiCompletion({
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: `【用户已有主题】\n\n${existingContext}\n\n【待分析与归类文献列表】\n\n${docContexts}` }
+    ],
+    temperature: 0.2
+  }, privateConfig);
+
+  let parsed = parseAiJson(aiResponse);
+  if (!parsed || typeof parsed !== 'object') parsed = { topics: [], classifications: {} };
+
+  const rawTopics = Array.isArray(parsed.topics) ? parsed.topics : [];
+  const rawClassifications = parsed.classifications || {};
+
+  const createdWorkspaces = [];
+  const allCurrentWorkspaces = [...existingWorkspaces];
+
+  for (const topic of rawTopics) {
+    const rawName = String(topic?.name || '').trim().slice(0, 100);
+    if (!rawName) continue;
+    const existing = allCurrentWorkspaces.find(w => w.name.toLowerCase() === rawName.toLowerCase());
+    if (existing) continue;
+
+    const ws = store.createWorkspace(actorKey, {
+      name: rawName,
+      researchQuestion: String(topic.researchQuestion || '').slice(0, 500),
+      inclusionRules: String(topic.inclusionRules || '').slice(0, 500),
+      exclusionRules: String(topic.exclusionRules || '').slice(0, 500)
+    });
+    createdWorkspaces.push(ws);
+    allCurrentWorkspaces.push(ws);
+  }
+
+  const classifications = {};
+  for (const entry of targetEntries) {
+    const list = Array.isArray(rawClassifications[entry.id])
+      ? rawClassifications[entry.id]
+      : (Array.isArray(rawClassifications[entry.itemKey])
+        ? rawClassifications[entry.itemKey]
+        : (Array.isArray(rawClassifications[entry.title]) ? rawClassifications[entry.title] : []));
+
+    classifications[entry.id] = list.map(item => {
+      const topicName = String(item?.topicName || item?.workspaceName || '').trim().toLowerCase();
+      const wsId = item?.workspaceId;
+      const matchedWs = allCurrentWorkspaces.find(w => w.id === wsId) || allCurrentWorkspaces.find(w => w.name.toLowerCase() === topicName);
+      if (!matchedWs) return null;
+      const conf = typeof item.confidence === 'number' ? Math.max(0, Math.min(1, item.confidence)) : 0.85;
+      return {
+        workspaceId: matchedWs.id,
+        workspaceName: matchedWs.name,
+        confidence: conf,
+        reason: String(item.reason || '契合主题研究方向').slice(0, 30)
+      };
+    }).filter(Boolean);
+  }
+
+  const documentMetas = saveClassificationDocumentMetas(store, actorKey, targetEntries, parsed);
+
+  return {
+    createdWorkspaces,
+    workspaces: store.listWorkspaces(actorKey),
+    classifications,
+    documentMetas
+  };
+}
+
 async function executeNativeImportItem(store, actorKey, normalized, {
   downloadPdfFn,
   promoteBlobFn = defaultPromoteBlob,
@@ -2167,6 +2334,30 @@ export function createCanvasHandler(store, {
         return;
       }
 
+      match = /^\/canvas\/native\/library-roots\/([0-9a-f-]+)\/directories$/.exec(pathname);
+      if (match && method === 'POST') {
+        const root = store.requireLibraryRoot(actor.actorKey, match[1]);
+        const body = await readJson(req);
+        const relativeDir = body?.path ? normalizeRelativePath(body.path) : '';
+        const name = normalizeFilename(body?.name, { requirePdf: false });
+        const targetRel = relativeDir ? `${relativeDir}/${name}` : name;
+        const operation = store.createFileOperation(actor.actorKey, {
+          operationType: 'file.mkdir',
+          targetPath: `${root.absolutePath}/${targetRel}`,
+          payload: { rootId: root.id, path: targetRel }
+        });
+        store.startFileOperation(operation.id);
+        try {
+          ensureDirectoryInsideRoot(root.absolutePath, targetRel);
+          store.completeFileOperation(operation.id);
+          json(res, 201, { data: { path: targetRel } });
+        } catch (err) {
+          store.failFileOperation(operation.id, 'mkdir_failed');
+          throw err;
+        }
+        return;
+      }
+
       match = /^\/canvas\/native\/library-roots\/([0-9a-f-]+)\/scan$/.exec(pathname);
       if (match && method === 'POST') {
         const root = store.requireLibraryRoot(actor.actorKey, match[1]);
@@ -2678,106 +2869,19 @@ export function createCanvasHandler(store, {
       }
 
       if (pathname === '/canvas/inbox' && method === 'GET') {
-        const state = url.searchParams.get('state') || undefined;
-        const collectionKey = url.searchParams.get('collectionKey') || undefined;
-        const limit = url.searchParams.get('limit') ? Number(url.searchParams.get('limit')) : 100;
-        const cursor = url.searchParams.get('cursor') || undefined;
-        const entries = store.listInboxEntries(actor.actorKey, { state, collectionKey, limit, cursor });
-        const unreadCount = store.countInboxEntries(actor.actorKey, { state: 'new' });
-        const totalCount = store.countInboxEntries(actor.actorKey, { state, collectionKey });
-        const lastEntry = entries.length === limit ? entries[entries.length - 1] : null;
-        const nextCursor = lastEntry ? `${lastEntry.updatedAt}|${lastEntry.id}` : null;
-        json(res, 200, {
-          data: entries,
-          meta: {
-            unreadCount,
-            totalCount,
-            nextCursor
-          }
-        });
+        error(res, 410, 'feature_retired', '收件箱已于 M4 退役；未分类文献请使用文库“未分类”筛选');
         return;
       }
       if (pathname === '/canvas/inbox/scan' && method === 'POST') {
-        const body = await readJson(req);
-        if (body && (typeof body !== 'object' || Array.isArray(body))) {
-          throw new TypeError('request body must be an object');
-        }
-        const libType = body?.libraryType !== undefined ? string(body.libraryType, 'libraryType') : (actor.session.authMode === 'local' ? 'native' : 'user');
-        const libId = body?.libraryId !== undefined ? string(body.libraryId, 'libraryId', { max: 128 }) : (libType === 'native' ? 'local' : actor.session.userId);
-        const targetLib = validateLibraryAccess(libType, libId, actor.session);
-
-        if (targetLib.libraryType === 'native') {
-          json(res, 200, {
-            data: {
-              scanned: 0,
-              upsertedCount: 0,
-              lastLibraryVersion: 0
-            }
-          });
-          return;
-        }
-        const since = body?.since === undefined || body?.since === null
-          ? undefined
-          : number(body.since, 'since', { min: 0, max: Number.MAX_SAFE_INTEGER, integer: true });
-
-        const prefix = targetLib.libraryType === 'group' ? 'groups' : 'users';
-        const basePath = `/${prefix}/${encodeURIComponent(targetLib.libraryId)}/items/top`;
-
-        let scannedCount = 0;
-        let upsertedCount = 0;
-        let fetchResult;
-        try {
-          fetchResult = await fetchAllUpstreamItems(fetchAltero, actor.session, basePath, {
-            since,
-            limitPerPage: 100,
-            onPage: async (itemsChunk) => {
-              const enrichedChunk = await mapWithConcurrency(itemsChunk, 6, item => resolveItemAttachment(fetchAltero, actor.session, targetLib.libraryType, targetLib.libraryId, item));
-              const entries = enrichedChunk
-                .map(item => normalizeZoteroItemToInboxEntry(item, targetLib.libraryType, targetLib.libraryId))
-                .filter(Boolean);
-              scannedCount += entries.length;
-              if (entries.length) {
-                const upserted = store.upsertInboxEntries(actor.actorKey, entries);
-                upsertedCount += upserted.length;
-              }
-            }
-          });
-        } catch (upstreamErr) {
-          error(res, 502, 'upstream_error', `Altero items scan failed: ${upstreamErr.message}`);
-          return;
-        }
-
-        json(res, 200, {
-          data: {
-            scanned: scannedCount,
-            upsertedCount,
-            lastLibraryVersion: fetchResult.lastModifiedVersion
-          }
-        });
+        error(res, 410, 'feature_retired', 'Altero 扫描与收件箱已于 M4 退役；文库内容请使用原始文件扫描');
         return;
       }
       if (pathname === '/canvas/inbox/entries' && method === 'POST') {
-        const body = await readJson(req);
-        if (!Array.isArray(body.entries) || body.entries.length > 500) {
-          throw new TypeError('entries must be an array of at most 500 items');
-        }
-        const validatedEntries = body.entries.map(entry => inboxEntryInput(entry, actor.session));
-        const results = store.upsertInboxEntries(actor.actorKey, validatedEntries);
-        json(res, 201, { data: results });
+        error(res, 410, 'feature_retired', '收件箱写入已于 M4 退役');
         return;
       }
       if (pathname === '/canvas/inbox/batch-action' && method === 'POST') {
-        const body = await readJson(req);
-        if (!Array.isArray(body.entryIds) || !body.entryIds.length) throw new TypeError('entryIds must be a non-empty array');
-        const action = string(body.action, 'action');
-        if (!['accept', 'add_to_topics', 'defer', 'ignore', 'reopen'].includes(action)) throw new TypeError('action is invalid');
-        const targetWorkspaceIds = Array.isArray(body.targetWorkspaceIds) ? body.targetWorkspaceIds.map(String) : [];
-        const result = store.batchActionInbox(actor.actorKey, {
-          entryIds: body.entryIds.map(String),
-          action,
-          targetWorkspaceIds
-        });
-        json(res, 200, { data: result });
+        error(res, 410, 'feature_retired', '收件箱批量操作已于 M4 退役；请使用文库主题归类接口');
         return;
       }
       if (pathname === '/canvas/imports/resolve' && method === 'POST') {
@@ -2897,6 +3001,32 @@ export function createCanvasHandler(store, {
         return;
       }
       if (pathname === '/canvas/inbox/classify' && method === 'POST') {
+        error(res, 410, 'feature_retired', '收件箱已于 M4 退役；AI 主题分类请使用 /canvas/native/documents/classify');
+        return;
+      }
+
+      if (pathname === '/canvas/inbox/generate-topics' && method === 'POST') {
+        error(res, 410, 'feature_retired', '收件箱已于 M4 退役；AI 主题提炼请使用 /canvas/native/classify/generate-topics');
+        return;
+      }
+
+      // --- M4 文库级 AI 主题分类与提炼（不依赖收件箱） ---
+      function nativeDocumentToClassificationEntry(doc) {
+        return {
+          id: doc.id,
+          itemKey: doc.id,
+          libraryType: 'native',
+          libraryId: 'local',
+          title: doc.title,
+          creators: doc.creators || [],
+          year: doc.year || null,
+          abstractNote: doc.abstract || '',
+          tags: [],
+          attachmentKey: doc.attachments?.[0]?.id || null
+        };
+      }
+
+      if (pathname === '/canvas/native/documents/classify' && method === 'POST') {
         const body = await readJson(req);
         if (body && (typeof body !== 'object' || Array.isArray(body))) {
           throw new TypeError('request body must be an object');
@@ -2906,234 +3036,64 @@ export function createCanvasHandler(store, {
           json(res, 200, { data: { classifications: {}, message: '暂无可用的研究主题，请先创建主题' } });
           return;
         }
-
         let targetEntries = [];
-        if (body?.entryIds !== undefined) {
-          if (!Array.isArray(body.entryIds) || body.entryIds.length > 100) {
-            throw new TypeError('entryIds must be an array of at most 100 items');
-          }
-          for (const id of body.entryIds) {
-            const entryId = string(id, 'entryIds.id', { max: 128 });
-            const entry = store.getInboxEntry(actor.actorKey, entryId);
-            if (entry) targetEntries.push(entry);
+        if (Array.isArray(body?.documentIds)) {
+          if (body.documentIds.length > 200) throw new TypeError('documentIds must contain at most 200 ids');
+          for (const id of body.documentIds) {
+            const doc = store.getDocument(actor.actorKey, string(id, 'documentIds.id', { max: 128 }));
+            if (doc) targetEntries.push(nativeDocumentToClassificationEntry(doc));
           }
         } else {
-          targetEntries = store.listInboxEntries(actor.actorKey, { state: 'new', limit: 20 });
+          targetEntries = store.listNativeLibraryDocuments(actor.actorKey, { limit: 50 })
+            .documents.map(nativeDocumentToClassificationEntry);
         }
-
         if (!targetEntries.length) {
           json(res, 200, { data: { classifications: {} } });
           return;
         }
-
         const privateConfig = store.getAiSettings(actor.actorKey);
-        const publicConfig = aiPublicConfig(privateConfig);
-        if (!publicConfig.configured) {
+        if (!aiPublicConfig(privateConfig).configured) {
           error(res, 503, 'ai_not_configured', 'AI 模型尚未配置');
           return;
         }
-
         try {
-          const systemPrompt = [
-            '你是专业学术研究助手。你的任务是根据用户的多个研究主题及其纳入/排除规则，评估给定的文献是否适合归入各主题。',
-            '只输出一个合法的 JSON 对象，不要 Markdown 代码块。',
-            'JSON 格式示例：',
-            '{"classifications": {',
-            '  "entry-id-1": [',
-            '    {"workspaceId": "ws-1", "workspaceName": "主题名称", "confidence": 0.92, "reason": "匹配纳入规则：聚焦于大模型逻辑推理机制"}',
-            '  ]',
-            '}, "documentMetadata": {',
-            '  "entry-id-1": {"cleanTitle": "【机构】规范中文标题（2025）", "institution": "机构", "reportTitle": "中文主标题", "subtitle": "", "year": "2025", "summary": "一句话中文摘要"}',
-            '}}',
-            '【规则】',
-            '1. confidence 为 0.0 到 1.0 之间的浮点数。若不符合主题或命中排除规则，置信度应低于 0.3；',
-            '2. reason 简述推荐或不推荐的核心理由（30字以内）；',
-            '3. 同一篇文献可同时推荐给多个符合的主题（多对多归类）；',
-            '4. 必须在同一次返回中为每篇文献生成 documentMetadata；cleanTitle 必须是准确、自然、可直接展示的简体中文名，保留机构与年份等关键辨识信息。'
-          ].join('\n');
-
-          const topicContexts = workspaces.map((w, idx) => `[主题 ${idx + 1}] ID: ${w.id}\n名称: ${w.name}\n研究问题: ${w.researchQuestion || '无'}\n纳入规则: ${w.inclusionRules || '无'}\n排除规则: ${w.exclusionRules || '无'}`).join('\n\n');
-          const docContexts = targetEntries.map(e => `[待分拣文献] ID: ${e.id}\n标题: ${e.title}\n作者: ${(e.creators || []).map(c => typeof c === 'string' ? c : (c.name || `${c.firstName || ''} ${c.lastName || ''}`)).join(', ')}\n年份: ${e.year || '未知'}\n摘要: ${(e.abstractNote || '').slice(0, 800)}\n标签: ${(e.tags || []).join(', ')}`).join('\n\n');
-
-          const aiResponse = await aiCompletion({
-            messages: [
-              { role: 'system', content: systemPrompt },
-              { role: 'user', content: `【候选研究主题】\n\n${topicContexts}\n\n【待分类文献列表】\n\n${docContexts}` }
-            ],
-            temperature: 0.2
-          }, privateConfig);
-
-          let parsed = parseAiJson(aiResponse);
-          if (!parsed || typeof parsed !== 'object') parsed = { classifications: {} };
-          const rawMap = parsed.classifications || parsed;
-          const classifications = {};
-
-          for (const entry of targetEntries) {
-            const list = Array.isArray(rawMap[entry.id])
-              ? rawMap[entry.id]
-              : (Array.isArray(rawMap[entry.itemKey])
-                ? rawMap[entry.itemKey]
-                : (Array.isArray(rawMap[entry.title]) ? rawMap[entry.title] : []));
-
-            classifications[entry.id] = list.map(item => {
-              const matchedWs = workspaces.find(w => w.id === item.workspaceId) || workspaces.find(w => w.name === item.workspaceName);
-              if (!matchedWs) return null;
-              const conf = typeof item.confidence === 'number' ? Math.max(0, Math.min(1, item.confidence)) : 0.5;
-              return {
-                workspaceId: matchedWs.id,
-                workspaceName: matchedWs.name,
-                confidence: conf,
-                reason: String(item.reason || '主题匹配').slice(0, 30)
-              };
-            }).filter(Boolean);
-          }
-
-          const documentMetas = saveClassificationDocumentMetas(store, actor.actorKey, targetEntries, parsed);
-          json(res, 200, { data: { classifications, documentMetas } });
+          const data = await runAiClassification({ store, actorKey: actor.actorKey, targetEntries, workspaces, privateConfig, aiCompletion });
+          json(res, 200, { data });
         } catch (aiErr) {
           error(res, aiErr?.name === 'AbortError' ? 504 : 502, 'ai_gateway_error', aiErr.message);
         }
         return;
       }
 
-      if (pathname === '/canvas/inbox/generate-topics' && method === 'POST') {
+      if (pathname === '/canvas/native/classify/generate-topics' && method === 'POST') {
         const body = await readJson(req);
         if (body && (typeof body !== 'object' || Array.isArray(body))) {
           throw new TypeError('request body must be an object');
         }
-
         let targetEntries = [];
-        if (body?.entryIds !== undefined) {
-          if (!Array.isArray(body.entryIds) || body.entryIds.length > 100) {
-            throw new TypeError('entryIds must be an array of at most 100 items');
-          }
-          for (const id of body.entryIds) {
-            const entryId = string(id, 'entryIds.id', { max: 128 });
-            const entry = store.getInboxEntry(actor.actorKey, entryId);
-            if (entry) targetEntries.push(entry);
+        if (Array.isArray(body?.documentIds)) {
+          if (body.documentIds.length > 200) throw new TypeError('documentIds must contain at most 200 ids');
+          for (const id of body.documentIds) {
+            const doc = store.getDocument(actor.actorKey, string(id, 'documentIds.id', { max: 128 }));
+            if (doc) targetEntries.push(nativeDocumentToClassificationEntry(doc));
           }
         } else {
-          targetEntries = store.listInboxEntries(actor.actorKey, { limit: 50 });
+          targetEntries = store.listNativeLibraryDocuments(actor.actorKey, { limit: 50 })
+            .documents.map(nativeDocumentToClassificationEntry);
         }
-
         if (!targetEntries.length) {
-          json(res, 200, { data: { createdWorkspaces: [], workspaces: store.listWorkspaces(actor.actorKey), classifications: {}, message: '文献库或收件箱暂无可供提炼的文献' } });
+          json(res, 200, { data: { createdWorkspaces: [], workspaces: store.listWorkspaces(actor.actorKey), classifications: {}, message: '文库中暂无可供提炼的文献' } });
           return;
         }
-
         const privateConfig = store.getAiSettings(actor.actorKey);
-        const publicConfig = aiPublicConfig(privateConfig);
-        if (!publicConfig.configured) {
+        if (!aiPublicConfig(privateConfig).configured) {
           error(res, 503, 'ai_not_configured', 'AI 模型尚未配置');
           return;
         }
-
-        const existingWorkspaces = store.listWorkspaces(actor.actorKey);
         const maxTopics = typeof body?.maxTopics === 'number' ? Math.max(2, Math.min(8, Math.floor(body.maxTopics))) : 5;
-
         try {
-          const systemPrompt = [
-            '你是资深学术研究与产业分析专家。请根据给定的文献列表，自动提炼并规划一套清晰、聚焦的研究主题体系（Topic Taxonomy）。',
-            '【关键原则】',
-            `1. 主题数量严格精炼：提炼 3 到 ${maxTopics} 个高层次、非重叠的核心研究方向，避免过多细碎主题；`,
-            '2. 若已有候选主题且语义契合，请优先复用或在其基础上扩展，避免创建重复主题；',
-            '3. 为每个主题提供：`name`（15字以内的凝练中文名称）、`researchQuestion`（核心研究问题）、`inclusionRules`（清晰的纳入规则）、`exclusionRules`（排除规则）；',
-            '4. 为每篇待分类文献推荐最契合的主题（可多对多），仅当极个别文献确实与主要主题完全无关时才设立兜底补充主题；',
-            '5. 在同一次返回中为每篇文献生成规范中文名与元数据，不要要求第二次模型调用；',
-            '6. 只输出合法的 JSON 对象，严禁 Markdown 代码块。',
-            'JSON 格式示例：',
-            '{',
-            '  "topics": [',
-            '    {',
-            '      "name": "具身智能与机器人控制",',
-            '      "researchQuestion": "端到端具身多模态模型在通用机器人控制与动作规划中的落地机制",',
-            '      "inclusionRules": "涉及机器人感知、决策、控制、动作生成及具身数据训练的文献",',
-            '      "exclusionRules": "纯软件大模型推理或传统非智能自动化"',
-            '    }',
-            '  ],',
-            '  "classifications": {',
-            '    "entry-id-1": [',
-            '      { "topicName": "具身智能与机器人控制", "confidence": 0.95, "reason": "聚焦端到端机器人动作生成" }',
-            '    ]',
-            '  },',
-            '  "documentMetadata": {',
-            '    "entry-id-1": { "cleanTitle": "【机构】规范中文标题（2025）", "institution": "机构", "reportTitle": "中文主标题", "subtitle": "", "year": "2025", "summary": "一句话中文摘要" }',
-            '  }',
-            '}'
-          ].join('\n');
-
-          const existingContext = existingWorkspaces.length
-            ? existingWorkspaces.map((w, idx) => `[已有主题 ${idx + 1}] 名称: ${w.name}\n研究问题: ${w.researchQuestion || '无'}\n纳入规则: ${w.inclusionRules || '无'}`).join('\n\n')
-            : '（当前尚无已有主题）';
-
-          const docContexts = targetEntries.map(e => `[文献] ID: ${e.id}\n标题: ${e.title}\n作者: ${(e.creators || []).map(c => typeof c === 'string' ? c : (c.name || `${c.firstName || ''} ${c.lastName || ''}`)).join(', ')}\n年份: ${e.year || '未知'}\n摘要: ${(e.abstractNote || '').slice(0, 500)}\n标签: ${(e.tags || []).join(', ')}`).join('\n\n');
-
-          const aiResponse = await aiCompletion({
-            messages: [
-              { role: 'system', content: systemPrompt },
-              { role: 'user', content: `【用户已有主题】\n\n${existingContext}\n\n【待分析与归类文献列表】\n\n${docContexts}` }
-            ],
-            temperature: 0.2
-          }, privateConfig);
-
-          let parsed = parseAiJson(aiResponse);
-          if (!parsed || typeof parsed !== 'object') parsed = { topics: [], classifications: {} };
-
-          const rawTopics = Array.isArray(parsed.topics) ? parsed.topics : [];
-          const rawClassifications = parsed.classifications || {};
-
-          const createdWorkspaces = [];
-          const allCurrentWorkspaces = [...existingWorkspaces];
-
-          for (const topic of rawTopics) {
-            const rawName = String(topic?.name || '').trim().slice(0, 100);
-            if (!rawName) continue;
-            const existing = allCurrentWorkspaces.find(w => w.name.toLowerCase() === rawName.toLowerCase());
-            if (existing) continue;
-
-            const ws = store.createWorkspace(actor.actorKey, {
-              name: rawName,
-              researchQuestion: String(topic.researchQuestion || '').slice(0, 500),
-              inclusionRules: String(topic.inclusionRules || '').slice(0, 500),
-              exclusionRules: String(topic.exclusionRules || '').slice(0, 500)
-            });
-            createdWorkspaces.push(ws);
-            allCurrentWorkspaces.push(ws);
-          }
-
-          const classifications = {};
-          for (const entry of targetEntries) {
-            const list = Array.isArray(rawClassifications[entry.id])
-              ? rawClassifications[entry.id]
-              : (Array.isArray(rawClassifications[entry.itemKey])
-                ? rawClassifications[entry.itemKey]
-                : (Array.isArray(rawClassifications[entry.title]) ? rawClassifications[entry.title] : []));
-
-            classifications[entry.id] = list.map(item => {
-              const topicName = String(item?.topicName || item?.workspaceName || '').trim().toLowerCase();
-              const wsId = item?.workspaceId;
-              const matchedWs = allCurrentWorkspaces.find(w => w.id === wsId) || allCurrentWorkspaces.find(w => w.name.toLowerCase() === topicName);
-              if (!matchedWs) return null;
-              const conf = typeof item.confidence === 'number' ? Math.max(0, Math.min(1, item.confidence)) : 0.85;
-              return {
-                workspaceId: matchedWs.id,
-                workspaceName: matchedWs.name,
-                confidence: conf,
-                reason: String(item.reason || '契合主题研究方向').slice(0, 30)
-              };
-            }).filter(Boolean);
-          }
-
-          const documentMetas = saveClassificationDocumentMetas(store, actor.actorKey, targetEntries, parsed);
-
-          json(res, 200, {
-            data: {
-              createdWorkspaces,
-              workspaces: store.listWorkspaces(actor.actorKey),
-              classifications,
-              documentMetas
-            }
-          });
+          const data = await runAiTopicGeneration({ store, actorKey: actor.actorKey, targetEntries, maxTopics, privateConfig, aiCompletion });
+          json(res, 200, { data });
         } catch (aiErr) {
           error(res, aiErr?.name === 'AbortError' ? 504 : 502, 'ai_gateway_error', aiErr.message);
         }
@@ -4080,120 +4040,20 @@ ${textSnippet.slice(0, 8000) || '无'}`;
       }
 
       match = /^\/canvas\/workspaces\/([0-9a-f-]+)\/collection-bindings$/.exec(pathname);
-      if (match && method === 'GET') {
-        const bindings = store.listCollectionBindings(actor.actorKey, match[1]);
-        json(res, 200, { data: bindings });
-        return;
-      }
-      if (match && method === 'POST') {
-        const body = await readJson(req);
-        const input = collectionBindingInput(body, actor.session);
-        const resource = store.addCollectionBinding(actor.actorKey, match[1], input);
-        json(res, 201, { data: resource }, { ETag: etag(resource.version) });
+      if (match) {
+        error(res, 410, 'feature_retired', 'Collection 绑定已于 M4 退役；主题成员关系请使用文库主题归类接口');
         return;
       }
 
       match = /^\/canvas\/collection-bindings\/([0-9a-f-]+)$/.exec(pathname);
-      if (match && method === 'GET') {
-        const resource = store.getCollectionBinding(actor.actorKey, match[1]);
-        if (!resource) throw new CanvasNotFoundError('collection binding not found');
-        json(res, 200, { data: resource }, { ETag: etag(resource.version) });
-        return;
-      }
-      if (match && ['PATCH', 'DELETE'].includes(method)) {
-        const version = versionFromIfMatch(req);
-        if (version === null) {
-          error(res, 428, 'precondition_required', 'A valid If-Match header is required');
-          return;
-        }
-        if (method === 'DELETE') {
-          store.removeCollectionBinding(actor.actorKey, match[1], version);
-          res.writeHead(204, { 'Cache-Control': 'no-store' });
-          res.end();
-          return;
-        }
-        const body = await readJson(req);
-        const changes = collectionBindingChanges(body);
-        const resource = store.updateCollectionBinding(actor.actorKey, match[1], version, changes);
-        json(res, 200, { data: resource }, { ETag: etag(resource.version) });
+      if (match) {
+        error(res, 410, 'feature_retired', 'Collection 绑定已于 M4 退役');
         return;
       }
 
       match = /^\/canvas\/collection-bindings\/([0-9a-f-]+)\/sync$/.exec(pathname);
-      if (match && method === 'POST') {
-        const binding = store.getCollectionBinding(actor.actorKey, match[1]);
-        if (!binding) throw new CanvasNotFoundError('collection binding not found');
-
-        if (binding.libraryType === 'native') {
-          error(res, 400, 'unsupported', 'Collection bindings are not supported for native library');
-          return;
-        }
-
-        const prefix = binding.libraryType === 'group' ? 'groups' : 'users';
-        const basePath = `/${prefix}/${encodeURIComponent(binding.libraryId)}/collections/${encodeURIComponent(binding.collectionKey)}/items`;
-        const since = binding.lastLibraryVersion ? Number(binding.lastLibraryVersion) : undefined;
-
-        let scannedCount = 0;
-        let addedToTopic = 0;
-        let fetchResult;
-        try {
-          fetchResult = await fetchAllUpstreamItems(fetchAltero, actor.session, basePath, {
-            since,
-            limitPerPage: 100,
-            onPage: async (itemsChunk) => {
-              const enrichedChunk = await mapWithConcurrency(itemsChunk, 6, item => resolveItemAttachment(fetchAltero, actor.session, binding.libraryType, binding.libraryId, item));
-              const entries = enrichedChunk
-                .map(item => normalizeZoteroItemToInboxEntry(item, binding.libraryType, binding.libraryId))
-                .filter(Boolean);
-              scannedCount += entries.length;
-              if (entries.length) {
-                store.transaction(() => {
-                  const upserted = store.upsertInboxEntries(actor.actorKey, entries);
-                  if (binding.mode === 'inbound') {
-                    for (const entry of upserted) {
-                      store.addTopicDocument(actor.actorKey, binding.workspaceId, {
-                        libraryType: entry.libraryType,
-                        libraryId: entry.libraryId,
-                        itemKey: entry.itemKey,
-                        attachmentKey: entry.attachmentKey,
-                        status: 'inbox',
-                        origin: 'collection_sync',
-                        itemVersion: entry.itemVersion,
-                        attachmentVersion: entry.attachmentVersion
-                      });
-                      store.syncTopicDocumentAttachment(actor.actorKey, binding.workspaceId, {
-                        libraryType: entry.libraryType,
-                        libraryId: entry.libraryId,
-                        itemKey: entry.itemKey,
-                        attachmentKey: entry.attachmentKey,
-                        attachmentVersion: entry.attachmentVersion
-                      });
-                      addedToTopic += 1;
-                    }
-                  }
-                });
-              }
-            }
-          });
-        } catch (upstreamErr) {
-          error(res, 502, 'upstream_error', `Collection sync failed: ${upstreamErr.message}`);
-          return;
-        }
-
-        const lastVersion = fetchResult.lastModifiedVersion || binding.lastLibraryVersion || 0;
-        const updatedBinding = store.updateCollectionBinding(actor.actorKey, binding.id, binding.version, {
-          lastLibraryVersion: lastVersion,
-          lastSyncedAt: new Date().toISOString()
-        });
-
-        json(res, 200, {
-          data: {
-            binding: updatedBinding,
-            syncedCount: scannedCount,
-            addedToTopicCount: addedToTopic,
-            lastLibraryVersion: lastVersion
-          }
-        });
+      if (match) {
+        error(res, 410, 'feature_retired', 'Collection 同步已于 M4 退役；文库内容请使用原始文件扫描');
         return;
       }
 

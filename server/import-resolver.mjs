@@ -736,6 +736,52 @@ export function findDuplicateCandidates(store, actorKey, metadata) {
     }
   }
 
+  // 2b. [M4] Check native library documents (primary identity store since the
+  // inbox retirement; inbox_entries remain as a deprecated read-only source).
+  if (targetDoi || (targetNormTitle && targetNormTitle.length >= 4)) {
+    let docRows = [];
+    if (targetDoi) {
+      docRows = store.db.prepare(`
+        SELECT * FROM documents
+        WHERE owner_key = ? AND deleted_at IS NULL AND doi IS NOT NULL AND LOWER(doi) = ?
+        LIMIT 20
+      `).all(actorKey, targetDoi);
+    }
+    if (!docRows.length && targetNormTitle && targetNormTitle.length >= 4) {
+      const keywords = (metadata.title || '').split(/[\s:：,，.。;；/\\()（）[\]【】]+/).filter(w => w.length >= 3).slice(0, 5);
+      if (keywords.length) {
+        const clauses = keywords.map(() => 'title LIKE ?').join(' OR ');
+        docRows = store.db.prepare(`
+          SELECT * FROM documents
+          WHERE owner_key = ? AND deleted_at IS NULL AND (${clauses})
+          ORDER BY updated_at DESC
+          LIMIT 50
+        `).all(actorKey, ...keywords.map(k => `%${k}%`));
+      }
+    }
+    for (const doc of docRows) {
+      const docNormTitle = normalizeTitle(doc.title);
+      const isTitleMatch = docNormTitle === targetNormTitle
+        || (docNormTitle.length >= 6 && targetNormTitle.length >= 6 && (docNormTitle.includes(targetNormTitle) || targetNormTitle.includes(docNormTitle)));
+      if ((targetDoi && doc.doi && doc.doi.toLowerCase().trim() === targetDoi) || isTitleMatch) {
+        if (!seenIds.has(doc.id)) {
+          seenIds.add(doc.id);
+          candidates.push({
+            id: doc.id,
+            itemKey: doc.id,
+            title: doc.title,
+            cleanTitle: doc.title,
+            year: doc.year,
+            doi: doc.doi || null,
+            state: 'accepted',
+            matchReason: doc.doi && targetDoi && doc.doi.toLowerCase().trim() === targetDoi ? `DOI 匹配 (${targetDoi})` : '标题高度相似',
+            targetType: 'document'
+          });
+        }
+      }
+    }
+  }
+
   // 3. Also check document_metas
   if (targetDoi) {
     const metaDoiRows = store.db.prepare(`

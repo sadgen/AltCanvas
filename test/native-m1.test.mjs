@@ -831,7 +831,7 @@ try {
   assert.equal(mapRes2.payload.data.cached, true, 'Second call must hit cache');
   assert.equal(aiCallCount, 2, 'Reused analysis must not make any additional AI calls');
 
-  // 12. Altero scan on native library returns clean response
+  // 12. [M4] Altero/inbox scan is retired: must answer 410 Gone
   const scanRes = await call(mockAiHandler, '/canvas/inbox/scan', {
     method: 'POST',
     cookie: newCookie,
@@ -840,8 +840,8 @@ try {
       libraryId: 'local'
     }
   });
-  assert.equal(scanRes.statusCode, 200);
-  assert.equal(scanRes.payload.data.scanned, 0);
+  assert.equal(scanRes.statusCode, 410, 'inbox scan must be retired with 410');
+  assert.equal(scanRes.payload.error.code, 'feature_retired');
 
   // 13. Proxy isolation in local mode & Zero Altero fetch call guarantee
   let upstreamFetchCount = 0;

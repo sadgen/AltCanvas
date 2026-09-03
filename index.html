@@ -155,7 +155,6 @@
       #settings-modal { align-items: flex-end; padding: 0; }
       #settings-panel { max-width: none; max-height: min(92dvh, 46rem); overflow-y: auto; border-radius: 1rem 1rem 0 0; padding-bottom: max(1.25rem, env(safe-area-inset-bottom)); }
       #settings-modal input { min-height: 44px; font-size: 16px; }
-      #inbox-modal { align-items: flex-end; padding: 0; }
       #inbox-panel { height: min(92dvh, 46rem); max-height: 92dvh; border-radius: 1rem 1rem 0 0; padding: .9rem; }
       #toast-container { left: 1rem; right: 1rem; bottom: calc(4.5rem + env(safe-area-inset-bottom)); }
       #toast-container > div { width: 100%; }
@@ -201,12 +200,6 @@
     <!-- Right Controls: Inbox, View Toggles, Auth & Settings -->
     <div class="flex items-center gap-2 text-xs">
       <!-- Research Inbox Trigger -->
-      <button id="btn-open-inbox" type="button" class="px-2.5 py-1 bg-indigo-950/80 hover:bg-indigo-900 text-indigo-300 border border-indigo-700/60 rounded transition flex items-center gap-1.5 shadow-sm" title="打开研究收件箱 (查看与批量归类 Altero 新增报告)">
-        <svg class="w-3.5 h-3.5 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4"></path></svg>
-        <span>收件箱</span>
-        <span id="inbox-unread-badge" class="px-1.5 py-0.2 bg-indigo-600 text-white rounded-full text-[10px] font-bold hidden">0</span>
-      </button>
-
       <!-- Panes Maximize/Expand Toggle -->
       <button id="btn-toggle-canvas-max" type="button" class="mobile-hide px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded border border-slate-700 flex items-center gap-1 transition" title="切换画板全屏或三栏分栏布局">
         <svg id="icon-canvas-maximize" class="w-3.5 h-3.5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path></svg>
@@ -248,6 +241,7 @@
         <div class="flex gap-1 p-1 rounded-lg bg-slate-900/80" role="tablist" aria-label="文献导航方式">
           <button id="btn-library-view-all" type="button" role="tab" aria-selected="true" aria-controls="library-all-panel" class="library-view-tab flex-1 px-2.5 py-1.5 rounded bg-blue-600 text-white text-xs font-medium transition">文库</button>
           <button id="btn-library-view-topics" type="button" role="tab" aria-selected="false" aria-controls="library-topics-panel" class="library-view-tab flex-1 px-2.5 py-1.5 rounded text-slate-400 hover:text-slate-200 text-xs font-medium transition">主题分类</button>
+          <button id="btn-library-view-files" type="button" role="tab" aria-selected="false" aria-controls="library-files-panel" class="library-view-tab flex-1 px-2.5 py-1.5 rounded text-slate-400 hover:text-slate-200 text-xs font-medium transition">原始文件</button>
         </div>
       </div>
 
@@ -260,6 +254,16 @@
             研究文库
           </span>
           <button id="btn-refresh" class="text-slate-400 hover:text-slate-200 text-xs px-2 py-0.5 rounded bg-slate-900 hover:bg-slate-800 border border-slate-800 transition">刷新</button>
+        </div>
+
+        <!-- M4 library view filters -->
+        <div id="library-filter-chips" class="flex gap-1 overflow-x-auto pb-1 text-[11px] custom-scrollbar">
+          <button data-lib-filter="all" class="lib-filter-chip px-2.5 py-1 rounded bg-blue-600 text-white whitespace-nowrap transition">全部</button>
+          <button data-lib-filter="unclassified" class="lib-filter-chip px-2.5 py-1 rounded bg-slate-900 text-slate-400 hover:text-slate-200 whitespace-nowrap transition">未分类</button>
+          <button data-lib-filter="no-pdf" class="lib-filter-chip px-2.5 py-1 rounded bg-slate-900 text-slate-400 hover:text-slate-200 whitespace-nowrap transition">无 PDF</button>
+          <button data-lib-filter="file-missing" class="lib-filter-chip px-2.5 py-1 rounded bg-slate-900 text-slate-400 hover:text-slate-200 whitespace-nowrap transition">文件缺失</button>
+          <button data-lib-filter="trash" class="lib-filter-chip px-2.5 py-1 rounded bg-slate-900 text-slate-400 hover:text-slate-200 whitespace-nowrap transition">回收站</button>
+          <button id="btn-library-ai-classify" type="button" class="px-2.5 py-1 rounded bg-purple-950/70 text-purple-300 border border-purple-800/60 hover:bg-purple-900/70 whitespace-nowrap transition" title="AI 提炼主题体系并推荐归类（可直接采纳）">✨ AI 主题归类</button>
         </div>
 
         <!-- Collection Filter Tabs -->
@@ -289,6 +293,25 @@
       </div>
       <div id="topic-library-items" class="hidden flex-1 overflow-y-auto custom-scrollbar p-2 space-y-1">
         <div class="text-center text-slate-500 py-12 text-xs">请选择研究主题</div>
+      </div>
+
+      <!-- M4: 原始文件（真实磁盘目录）视图 -->
+      <div id="library-files-panel" class="hidden p-3 border-b border-slate-800 space-y-2">
+        <div class="flex items-center justify-between gap-2">
+          <label for="source-files-root-select" class="text-xs font-semibold text-emerald-300 whitespace-nowrap">授权根目录</label>
+          <button id="btn-source-rescan" type="button" class="text-[11px] px-2 py-0.5 rounded bg-emerald-950/60 text-emerald-300 border border-emerald-800/60 hover:bg-emerald-900/60 transition">🔄 递归扫描</button>
+        </div>
+        <select id="source-files-root-select" class="w-full bg-slate-900 text-slate-200 border border-slate-700 rounded px-2 py-1.5 text-xs focus:outline-none focus:border-emerald-500" title="服务端配置的文库根目录">
+          <option value="">加载根目录中...</option>
+        </select>
+        <div class="flex items-center gap-1">
+          <button id="btn-source-up" type="button" class="px-2 py-1 rounded bg-slate-900 text-slate-400 hover:text-slate-200 border border-slate-800 text-[11px] transition">⬆ 上级</button>
+          <button id="btn-source-new-dir" type="button" class="px-2 py-1 rounded bg-slate-900 text-slate-400 hover:text-slate-200 border border-slate-800 text-[11px] transition">📁 新建目录</button>
+          <span id="source-files-path-label" class="flex-1 truncate text-[10px] font-mono text-slate-500" title="当前目录">/</span>
+        </div>
+      </div>
+      <div id="source-files-items" class="hidden flex-1 overflow-y-auto custom-scrollbar p-2 space-y-1">
+        <div class="text-center text-slate-500 py-12 text-xs">正在加载原始文件...</div>
       </div>
     </aside>
 
@@ -606,83 +629,6 @@
   </div>
 
   <!-- Research Inbox Modal -->
-  <div id="inbox-modal" role="dialog" aria-modal="true" aria-labelledby="inbox-title" class="fixed inset-0 bg-black/75 z-50 flex items-center justify-center p-4 hidden backdrop-blur-sm">
-    <div id="inbox-panel" class="bg-slate-900 border border-slate-800 rounded-xl max-w-3xl w-full p-5 space-y-3.5 shadow-2xl max-h-[90vh] flex flex-col">
-      <div class="flex items-center justify-between border-b border-slate-800 pb-3">
-        <div class="flex items-center gap-2">
-          <h3 id="inbox-title" class="text-sm font-semibold text-slate-100 flex items-center gap-2">
-            <svg class="w-4 h-4 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4"></path></svg>
-            研究收件箱 (Research Inbox)
-          </h3>
-          <span id="inbox-count-tag" class="text-[10px] px-2 py-0.5 rounded bg-indigo-950 text-indigo-300 border border-indigo-800 font-mono">0 条</span>
-        </div>
-        <div class="flex items-center gap-2">
-          <button id="btn-inbox-quick-import" type="button" class="px-2.5 py-1 bg-indigo-950/80 hover:bg-indigo-900 text-indigo-200 border border-indigo-700/60 rounded text-xs transition flex items-center gap-1.5 shadow-sm" title="通过 DOI / arXiv / 学术链接快速导入文献">
-            <span>📥 快速导入</span>
-          </button>
-          <button id="btn-inbox-generate-topics-ai" type="button" class="px-2.5 py-1 bg-purple-950/90 hover:bg-purple-900 text-purple-200 border border-purple-700 rounded text-xs transition flex items-center gap-1.5 shadow-sm" title="让 AI 根据研报自动提炼 3~6 个核心研究主题体系">
-            <span>✨ AI 提炼主题</span>
-          </button>
-          <button id="btn-inbox-classify-ai" type="button" class="px-2.5 py-1 bg-purple-950/80 hover:bg-purple-900 text-purple-200 border border-purple-700/60 rounded text-xs transition flex items-center gap-1.5 shadow-sm" title="让 AI 根据主题纳入/排除规则推荐分类">
-            <span>✨ AI 智能分类</span>
-          </button>
-          <button id="btn-inbox-scan-now" type="button" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded text-xs transition flex items-center gap-1.5" title="增量扫描 Altero 文库新条目">
-            <svg class="w-3.5 h-3.5 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
-            <span>增量扫描 Altero</span>
-          </button>
-          <button id="btn-close-inbox" type="button" aria-label="关闭" class="text-slate-500 hover:text-slate-300 text-lg leading-none">&times;</button>
-        </div>
-      </div>
-
-      <!-- Filters & Search Bar -->
-      <div class="flex flex-wrap items-center justify-between gap-2 text-xs">
-        <div class="flex items-center gap-1 bg-slate-950 p-0.5 rounded border border-slate-800" role="tablist">
-          <button type="button" class="inbox-state-tab px-2.5 py-1 rounded font-medium transition bg-indigo-600 text-white" data-state="new">待处理</button>
-          <button type="button" class="inbox-state-tab px-2.5 py-1 rounded font-medium transition text-slate-400 hover:text-slate-200" data-state="deferred">已暂缓</button>
-          <button type="button" class="inbox-state-tab px-2.5 py-1 rounded font-medium transition text-slate-400 hover:text-slate-200" data-state="accepted">已采纳</button>
-          <button type="button" class="inbox-state-tab px-2.5 py-1 rounded font-medium transition text-slate-400 hover:text-slate-200" data-state="ignored">已忽略</button>
-          <button type="button" class="inbox-state-tab px-2.5 py-1 rounded font-medium transition text-slate-400 hover:text-slate-200" data-state="all">全部</button>
-        </div>
-        <div class="flex items-center gap-2 flex-1 max-w-xs ml-auto">
-          <input id="input-inbox-search" type="search" placeholder="按标题、作者、年份或标签搜索…" class="w-full px-2.5 py-1 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:outline-none focus:border-indigo-500 text-xs">
-        </div>
-      </div>
-
-      <!-- Entries Table / Card List -->
-      <div id="inbox-scroll-region" class="flex-1 custom-scrollbar border border-slate-800 rounded bg-slate-950/50">
-        <div id="inbox-list-header" class="px-3 py-2 border-b border-slate-800 bg-slate-950 flex items-center justify-between text-[11px] text-slate-400 sticky top-0 z-10">
-          <label class="flex items-center gap-2 cursor-pointer select-none">
-            <input id="checkbox-inbox-select-all" type="checkbox" class="rounded border-slate-700 bg-slate-900 text-indigo-600 focus:ring-0">
-            <span>全选本页</span>
-          </label>
-          <span id="inbox-showing-count">显示 0 项</span>
-        </div>
-        <div id="inbox-items-container" class="divide-y divide-slate-800/60 p-1 space-y-1">
-          <div class="text-center text-slate-500 py-12 text-xs">收件箱暂无文献</div>
-        </div>
-      </div>
-
-      <!-- Bottom Batch Action Bar -->
-      <div class="flex items-center justify-between pt-2 border-t border-slate-800 text-xs">
-        <div class="text-slate-400">
-          已选择 <strong id="inbox-selected-count" class="text-indigo-400 font-mono">0</strong> 篇文献
-        </div>
-        <div class="flex items-center gap-2">
-          <button id="btn-inbox-accept-ai" type="button" disabled class="px-2.5 py-1.5 bg-purple-900/80 hover:bg-purple-800 text-purple-200 border border-purple-700/50 rounded text-xs transition disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1" title="一键采纳所有置信度≥70%的 AI 主题推荐">
-            <span>✨ 采纳 AI 建议</span>
-          </button>
-          <button id="btn-inbox-batch-reopen" type="button" disabled class="px-2.5 py-1.5 bg-blue-950 hover:bg-blue-900 text-blue-300 border border-blue-800 rounded transition disabled:opacity-40 disabled:cursor-not-allowed" title="重新放回待处理；不会移出已归入的主题">重新处理</button>
-          <button id="btn-inbox-batch-ignore" type="button" disabled class="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-rose-300 rounded transition disabled:opacity-40 disabled:cursor-not-allowed">忽略</button>
-          <button id="btn-inbox-batch-defer" type="button" disabled class="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded transition disabled:opacity-40 disabled:cursor-not-allowed">暂缓</button>
-          <button id="btn-inbox-batch-assign" type="button" disabled class="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded font-medium transition shadow-lg shadow-indigo-600/20 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1">
-            <span>批量归类至研究主题…</span>
-          </button>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Cross-Report Relations & Progressive Expansion Modal -->
   <div id="cross-report-modal" role="dialog" aria-modal="true" aria-labelledby="cross-report-title" class="fixed inset-0 bg-black/80 z-60 flex items-center justify-center p-4 hidden backdrop-blur-sm">
     <div id="cross-report-panel" class="bg-slate-900 border border-slate-800 rounded-xl max-w-2xl w-full p-5 space-y-4 shadow-2xl max-h-[85vh] flex flex-col">
       <div class="flex items-center justify-between border-b border-slate-800 pb-3">
@@ -721,41 +667,6 @@
   </div>
 
   <!-- Batch Topic Assignment Dialog -->
-  <div id="batch-topics-modal" role="dialog" aria-modal="true" aria-labelledby="batch-topics-title" class="fixed inset-0 bg-black/80 z-60 flex items-center justify-center p-4 hidden backdrop-blur-sm">
-    <div id="batch-topics-panel" class="bg-slate-900 border border-slate-800 rounded-xl max-w-md w-full p-5 space-y-4 shadow-2xl">
-      <div class="flex items-center justify-between border-b border-slate-800 pb-3">
-        <h3 id="batch-topics-title" class="text-sm font-semibold text-slate-100 flex items-center gap-2">
-          <svg class="w-4 h-4 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>
-          批量归类至研究主题
-        </h3>
-        <button id="btn-close-batch-topics" type="button" aria-label="关闭" class="text-slate-500 hover:text-slate-300 text-lg leading-none">&times;</button>
-      </div>
-
-      <div class="text-xs text-slate-400">
-        将选中的 <strong id="batch-assign-doc-count" class="text-indigo-300">0</strong> 篇文献加入以下研究主题（支持同时勾选多个主题，不复制原文件）：
-      </div>
-
-      <!-- Topics Selection List -->
-      <div id="batch-topics-list" class="max-h-48 overflow-y-auto custom-scrollbar p-2 bg-slate-950 border border-slate-800 rounded space-y-1.5">
-        <div class="text-center text-slate-500 py-4 text-xs">加载主题列表中…</div>
-      </div>
-
-      <!-- Inline Quick Create Topic -->
-      <div class="pt-2 border-t border-slate-800 flex items-center gap-2 text-xs">
-        <input id="input-new-topic-quick" type="text" placeholder="新建研究主题名称…" class="flex-1 px-2.5 py-1.5 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:outline-none focus:border-indigo-500">
-        <button id="btn-create-topic-quick" type="button" class="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded shrink-0">+ 新建主题</button>
-      </div>
-
-      <div class="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
-        <button id="btn-cancel-batch-topics" type="button" class="px-3.5 py-1.5 bg-transparent hover:bg-slate-800 text-slate-400 rounded text-xs transition">取消</button>
-        <button id="btn-confirm-batch-topics" type="button" class="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-xs font-medium transition shadow-lg shadow-indigo-600/20">
-          <span>确认归类</span>
-        </button>
-      </div>
-    </div>
-  </div>
-
-  <!-- Topic Settings, Collection Bindings, and Topic Documents Modal -->
   <div id="topic-settings-modal" role="dialog" aria-modal="true" aria-labelledby="topic-settings-title" class="fixed inset-0 bg-black/75 z-50 flex items-center justify-center p-4 hidden backdrop-blur-sm">
     <div id="topic-settings-panel" class="bg-slate-900 border border-slate-800 rounded-xl max-w-2xl w-full p-5 space-y-4 shadow-2xl max-h-[90vh] flex flex-col">
       <div class="flex items-center justify-between border-b border-slate-800 pb-3">
@@ -769,7 +680,6 @@
       <!-- Navigation Tabs -->
       <div class="flex items-center gap-1 bg-slate-950 p-0.5 rounded border border-slate-800 text-xs">
         <button type="button" class="topic-tab px-3 py-1.5 rounded font-medium transition bg-indigo-600 text-white" data-tab="meta">主题属性</button>
-        <button type="button" class="topic-tab px-3 py-1.5 rounded font-medium transition text-slate-400 hover:text-slate-200" data-tab="bindings">Collection 绑定</button>
         <button type="button" class="topic-tab px-3 py-1.5 rounded font-medium transition text-slate-400 hover:text-slate-200" data-tab="docs">主题文献管理</button>
       </div>
 
@@ -800,31 +710,6 @@
         <div class="flex items-center justify-between pt-2 border-t border-slate-800">
           <button id="btn-delete-topic" type="button" class="text-rose-400 hover:text-rose-300 text-xs">删除当前主题</button>
           <button id="btn-save-topic-meta" type="button" class="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-xs font-medium transition shadow-lg shadow-indigo-600/20">保存属性</button>
-        </div>
-      </div>
-
-      <!-- Tab 2: Collection Bindings -->
-      <div id="topic-tab-bindings" class="topic-tab-pane space-y-3.5 text-xs flex-1 overflow-y-auto custom-scrollbar pr-1 hidden">
-        <div class="p-3 bg-slate-950 border border-slate-800 rounded-lg space-y-2">
-          <div class="font-medium text-slate-200">绑定新的 Altero Collection</div>
-          <p class="text-slate-400 text-[11px]">绑定后，Altero 该集合中新增的文献将自动同步至本主题收件箱。</p>
-          <div class="flex flex-wrap items-center gap-2 pt-1">
-            <select id="select-bind-collection" class="flex-1 min-w-[160px] px-2.5 py-1.5 bg-slate-900 border border-slate-700 rounded text-slate-200 focus:outline-none focus:border-indigo-500 text-xs">
-              <option value="">正在读取 Collection 列表…</option>
-            </select>
-            <select id="select-bind-mode" class="px-2.5 py-1.5 bg-slate-900 border border-slate-700 rounded text-slate-200 focus:outline-none focus:border-indigo-500 text-xs">
-              <option value="inbound">单向自动纳入 (inbound)</option>
-              <option value="confirm_both">双向确认 (confirm_both)</option>
-            </select>
-            <button id="btn-submit-bind-collection" type="button" class="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-xs font-medium transition shrink-0">+ 绑定</button>
-          </div>
-        </div>
-
-        <div>
-          <div class="font-medium text-slate-300 mb-1.5">已绑定的 Collections</div>
-          <div id="topic-bindings-list" class="space-y-1.5 max-h-48 overflow-y-auto custom-scrollbar">
-            <div class="text-center text-slate-500 py-6 text-xs">暂无绑定的 Collection</div>
-          </div>
         </div>
       </div>
 
@@ -937,9 +822,72 @@
       <div class="flex items-center justify-between pt-2 border-t border-slate-800">
         <button id="btn-cancel-quick-import" type="button" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-xs transition">取消</button>
         <div class="flex items-center gap-2">
-          <button id="btn-quick-import-inbox-only" type="button" disabled class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded text-xs transition disabled:opacity-40 disabled:cursor-not-allowed">仅存入收件箱</button>
           <button id="btn-quick-import-topic" type="button" disabled class="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-xs font-medium transition shadow-md disabled:opacity-40 disabled:cursor-not-allowed">导入并加入当前主题</button>
         </div>
+      </div>
+      <div id="quick-import-directory-section" class="pt-3 border-t border-slate-800 space-y-2 hidden">
+        <div class="text-xs font-semibold text-emerald-300 flex items-center gap-1.5">📂 归档到文库目录（原始文件）</div>
+        <div class="grid grid-cols-2 gap-2">
+          <div>
+            <label for="quick-import-target-root" class="block text-[11px] text-slate-400 mb-1">目标根目录</label>
+            <select id="quick-import-target-root" class="w-full bg-slate-950 text-slate-200 border border-slate-800 rounded px-2 py-1.5 text-xs focus:outline-none focus:border-emerald-500">
+              <option value="">加载中...</option>
+            </select>
+          </div>
+          <div>
+            <label for="quick-import-target-dir" class="block text-[11px] text-slate-400 mb-1">目标子目录（相对路径）</label>
+            <input id="quick-import-target-dir" type="text" autocomplete="off" spellcheck="false"
+              class="w-full px-2 py-1.5 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:outline-none focus:border-emerald-500 font-mono text-xs"
+              placeholder="例如 papers/2024（可留空）" />
+          </div>
+        </div>
+        <div class="grid grid-cols-2 gap-2">
+          <div>
+            <label for="quick-import-filename" class="block text-[11px] text-slate-400 mb-1">原始文件名（留空则按标题生成）</label>
+            <input id="quick-import-filename" type="text" autocomplete="off" spellcheck="false"
+              class="w-full px-2 py-1.5 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:outline-none focus:border-emerald-500 font-mono text-xs"
+              placeholder="例如 report.pdf" />
+          </div>
+          <div>
+            <label for="quick-import-dir-topics" class="block text-[11px] text-slate-400 mb-1">归入主题（可多选）</label>
+            <select id="quick-import-dir-topics" multiple size="3"
+              class="w-full bg-slate-950 text-slate-200 border border-slate-800 rounded px-2 py-1 text-xs focus:outline-none focus:border-emerald-500">
+              <option value="">加载主题中...</option>
+            </select>
+          </div>
+        </div>
+        <div class="flex items-center justify-end">
+          <button id="btn-quick-import-directory" type="button" disabled
+            class="px-3.5 py-1.5 bg-emerald-700 hover:bg-emerald-600 text-white rounded text-xs font-medium transition shadow-md disabled:opacity-40 disabled:cursor-not-allowed">📥 解析并归档到目录</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- M4: 原始文件名对话框（重命名 / 移动 / 冲突改名重试） -->
+  <div id="file-name-modal" role="dialog" aria-modal="true" aria-labelledby="file-name-modal-title" class="fixed inset-0 bg-black/75 z-[60] flex items-center justify-center p-4 hidden backdrop-blur-sm">
+    <div class="bg-slate-900 border border-slate-800 rounded-xl max-w-md w-full p-5 space-y-3.5 shadow-2xl">
+      <div class="flex items-center justify-between">
+        <h3 id="file-name-modal-title" class="text-sm font-semibold text-slate-100">重命名原始文件</h3>
+        <button id="btn-close-file-name-modal" type="button" class="text-slate-400 hover:text-slate-200 text-lg leading-none" aria-label="关闭">&times;</button>
+      </div>
+      <p id="file-name-modal-hint" class="text-[11px] text-slate-400 leading-relaxed"></p>
+      <div>
+        <label for="file-name-modal-input" class="block text-slate-300 font-medium mb-1 text-xs">新的原始文件名（保持 .pdf 扩展名）</label>
+        <input id="file-name-modal-input" type="text" autocomplete="off" spellcheck="false"
+          class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:outline-none focus:border-indigo-500 font-mono text-xs"
+          placeholder="例如 report-2024.pdf" />
+      </div>
+      <div id="file-name-modal-extra" class="hidden">
+        <label for="file-name-modal-dir-input" class="block text-slate-300 font-medium mb-1 text-xs">目标目录（根目录下的相对路径，留空表示根目录）</label>
+        <input id="file-name-modal-dir-input" type="text" autocomplete="off" spellcheck="false"
+          class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:outline-none focus:border-indigo-500 font-mono text-xs"
+          placeholder="例如 papers/2024" />
+      </div>
+      <div id="file-name-modal-error" class="hidden p-2 rounded bg-rose-950/50 border border-rose-800/60 text-[11px] text-rose-300"></div>
+      <div class="flex items-center justify-end gap-2 pt-1">
+        <button id="btn-cancel-file-name-modal" type="button" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-xs transition">取消</button>
+        <button id="btn-confirm-file-name-modal" type="button" class="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-xs font-medium transition">确认</button>
       </div>
     </div>
   </div>
@@ -1406,22 +1354,10 @@
       };
       const isAltero = authMode === 'altero' || caps.externalLibrary;
 
-      // Upstream sync button in inbox
-      const btnScan = document.getElementById('btn-inbox-scan-now');
-      if (btnScan) {
-        btnScan.classList.toggle('hidden', !caps.upstreamSync);
-      }
-
       // Collections container in library pane
       const collectionsContainer = document.getElementById('collections-container');
       if (collectionsContainer) {
         collectionsContainer.classList.toggle('hidden', !caps.collections);
-      }
-
-      // Collection bindings tab in topic settings
-      const bindingsTab = document.querySelector('.topic-tab[data-tab="bindings"]');
-      if (bindingsTab) {
-        bindingsTab.classList.toggle('hidden', !caps.collections);
       }
 
       // Altero auth section toggle in login modal
@@ -1757,7 +1693,7 @@
       for (const meta of metas) {
         if (!meta?.itemKey) continue;
         documentMetas.set(docMetaKey(meta.libraryType, meta.libraryId, meta.itemKey), meta);
-        const entry = inboxEntries.find(candidate => candidate.itemKey === meta.itemKey
+        const entry = (typeof inboxEntries !== 'undefined' ? inboxEntries : []).find(candidate => candidate.itemKey === meta.itemKey
           && candidate.libraryType === meta.libraryType
           && String(candidate.libraryId) === String(meta.libraryId));
         if (entry) {
@@ -2076,6 +2012,23 @@
     });
     document.getElementById('btn-library-view-all')?.addEventListener('click', () => switchLibraryView('all'));
     document.getElementById('btn-library-view-topics')?.addEventListener('click', () => switchLibraryView('topics'));
+    document.getElementById('btn-library-view-files')?.addEventListener('click', () => switchLibraryView('files'));
+    document.getElementById('source-files-root-select')?.addEventListener('change', event => {
+      sourceFilesState.rootId = event.target.value || null;
+      loadSourceFiles('');
+    });
+    document.getElementById('btn-source-rescan')?.addEventListener('click', () => sourceScanFlow());
+    document.getElementById('btn-source-new-dir')?.addEventListener('click', () => sourceNewDirFlow());
+    document.getElementById('btn-source-up')?.addEventListener('click', () => {
+      const idx = sourceFilesState.path.lastIndexOf('/');
+      loadSourceFiles(idx > 0 ? sourceFilesState.path.slice(0, idx) : '');
+    });
+    document.querySelectorAll('.lib-filter-chip').forEach(chip => {
+      chip.addEventListener('click', () => applyLibraryFilter(chip.dataset.libFilter).catch(err => {
+        showToast(`文库筛选失败: ${errorMessage(err)}`, 'error');
+      }));
+    });
+    document.getElementById('btn-library-ai-classify')?.addEventListener('click', () => libraryAiClassifyFlow());
     document.getElementById('select-library-topic')?.addEventListener('change', async event => {
       const workspaceId = event.target.value;
       if (workspaceId && workspaceId !== canvasWorkspace?.id) await switchTopicWorkspace(workspaceId);
@@ -2089,48 +2042,15 @@
     });
     document.getElementById('btn-save-topic-meta')?.addEventListener('click', saveTopicMetadata);
     document.getElementById('btn-delete-topic')?.addEventListener('click', deleteCurrentTopic);
-    document.getElementById('btn-submit-bind-collection')?.addEventListener('click', submitAddCollectionBinding);
 
-    // Research Inbox & Batch Topic Bindings
-    document.getElementById('btn-open-inbox')?.addEventListener('click', openInboxModal);
-    document.getElementById('btn-close-inbox')?.addEventListener('click', closeInboxModal);
-    document.getElementById('btn-inbox-scan-now')?.addEventListener('click', scanAlteroInbox);
-    document.getElementById('btn-inbox-generate-topics-ai')?.addEventListener('click', generateTopicsWithAi);
-    document.getElementById('btn-inbox-classify-ai')?.addEventListener('click', classifyInboxWithAi);
-    document.getElementById('btn-inbox-accept-ai')?.addEventListener('click', acceptAllAiSuggestions);
-    document.querySelectorAll('.inbox-state-tab').forEach(btn => {
-      btn.addEventListener('click', () => {
-        currentInboxState = btn.dataset.state;
-        document.querySelectorAll('.inbox-state-tab').forEach(b => {
-          const isSelected = b.dataset.state === currentInboxState;
-          b.className = `inbox-state-tab px-2.5 py-1 rounded font-medium transition ${
-            isSelected ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-slate-200'
-          }`;
-        });
-        loadInboxEntries();
-      });
+    document.getElementById('btn-open-topic-settings')?.addEventListener('click', () => openTopicSettingsModal('meta'));
+    document.getElementById('btn-close-topic-settings')?.addEventListener('click', closeTopicSettingsModal);
+    document.querySelectorAll('.topic-tab').forEach(btn => {
+      btn.addEventListener('click', () => switchTopicSettingsTab(btn.dataset.tab));
     });
-    document.getElementById('input-inbox-search')?.addEventListener('input', renderInboxEntries);
-    document.getElementById('checkbox-inbox-select-all')?.addEventListener('change', e => {
-      if (e.target.checked) {
-        inboxEntries.forEach(entry => inboxSelectedIds.add(entry.id));
-      } else {
-        inboxSelectedIds.clear();
-      }
-      renderInboxEntries();
-    });
-    document.getElementById('btn-inbox-batch-assign')?.addEventListener('click', () => openBatchTopicsModal([...inboxSelectedIds]));
-    document.getElementById('btn-inbox-batch-reopen')?.addEventListener('click', () => executeInboxBatchAction('reopen'));
-    document.getElementById('btn-inbox-batch-defer')?.addEventListener('click', () => executeInboxBatchAction('defer'));
-    document.getElementById('btn-inbox-batch-ignore')?.addEventListener('click', () => executeInboxBatchAction('ignore'));
+    document.getElementById('btn-save-topic-meta')?.addEventListener('click', saveTopicMetadata);
+    document.getElementById('btn-delete-topic')?.addEventListener('click', deleteCurrentTopic);
 
-    document.getElementById('btn-close-batch-topics')?.addEventListener('click', closeBatchTopicsModal);
-    document.getElementById('btn-cancel-batch-topics')?.addEventListener('click', closeBatchTopicsModal);
-    document.getElementById('btn-create-topic-quick')?.addEventListener('click', quickCreateTopicInBatch);
-    document.getElementById('btn-confirm-batch-topics')?.addEventListener('click', confirmBatchTopicAssignment);
-    document.getElementById('input-new-topic-quick')?.addEventListener('keydown', e => {
-      if (e.key === 'Enter') quickCreateTopicInBatch();
-    });
 
     document.getElementById('btn-toggle-canvas-max')?.addEventListener('click', toggleCanvasMaximize);
     document.getElementById('btn-canvas-cross-report')?.addEventListener('click', () => openCrossReportRelationsModal());
@@ -2183,6 +2103,15 @@
         libraryType: 'native',
         libraryId: 'local',
         isNative: true,
+        sourceFile: doc.sourceFile ? {
+          id: doc.sourceFile.id,
+          status: doc.sourceFile.status,
+          relativePath: doc.sourceFile.relativePath,
+          filename: doc.sourceFile.filename,
+          rootId: doc.sourceFile.rootId,
+          version: doc.sourceFile.version
+        } : null,
+        topics: doc.topics || [],
         data: {
           key: doc.id,
           itemType: doc.itemType || 'journalArticle',
@@ -2503,7 +2432,9 @@
               <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
             </button>
           </div>
-          ${meta?.cleanTitle && rawName !== meta.cleanTitle ? `<div class="text-[10px] text-slate-500 truncate mt-0.5" title="${escapeHTML(rawName)}">${escapeHTML(rawName)}</div>` : ''}
+          ${item.isNative ? `<div class="text-[10px] text-slate-500 truncate mt-0.5" title="原始文件名（磁盘文件名）">📄 ${escapeHTML(item.sourceFile?.filename || '未入库 / 无原始文件')}</div>` : ''}
+          ${meta?.cleanTitle && rawName !== meta.cleanTitle && !item.isNative ? `<div class="text-[10px] text-slate-500 truncate mt-0.5" title="${escapeHTML(rawName)}">${escapeHTML(rawName)}</div>` : ''}
+          ${item.isNative && item.sourceFile && item.sourceFile.status !== 'active' ? `<div class="mt-1"><span class="px-1.5 py-0.2 rounded bg-amber-950/60 border border-amber-800/60 text-[10px] text-amber-300">${escapeHTML(M4_SOURCE_STATUS_LABELS[item.sourceFile.status] || item.sourceFile.status)}</span></div>` : ''}
           <div class="flex items-center justify-between mt-1.5 text-[11px] text-slate-500">
             <div class="flex items-center gap-1 overflow-hidden">
               <span class="px-1.5 py-0.2 rounded bg-slate-900 border border-slate-800 text-[10px] text-slate-400 flex-shrink-0">${escapeHTML(typeLabel)}</span>
@@ -2515,11 +2446,27 @@
               <span class="text-slate-500">${escapeHTML(item.key)}</span>
             </div>
           </div>
+          ${item.isNative && item.sourceFile ? `
+          <div class="flex flex-wrap gap-1 mt-1.5 native-item-actions">
+            <button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-slate-300 hover:text-slate-100" data-native-action="rename-original" title="重命名磁盘上的原始文件（文库文件名不变）">✏️ 原始文件</button>
+            <button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-slate-300 hover:text-slate-100" data-native-action="move" title="移动原始文件到其他目录">📂 移动</button>
+            ${item.sourceFile.status === 'trashed'
+              ? '<button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-emerald-300 hover:text-emerald-200" data-native-action="restore">♻️ 恢复</button>'
+              : '<button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-rose-300 hover:text-rose-200" data-native-action="trash">🗑 移入回收站</button>'}
+          </div>` : ''}
         `;
         div.onclick = (e) => {
           if (e.target.closest('.btn-item-edit-meta')) {
             e.stopPropagation();
             openDocMetaModal(item);
+            return;
+          }
+          const nativeActionBtn = e.target.closest('[data-native-action]');
+          if (nativeActionBtn && item.isNative) {
+            e.stopPropagation();
+            const lib = item.sourceFile || {};
+            const entry = { relativePath: lib.relativePath || '', name: lib.filename || '', library: lib };
+            handleSourceFileAction(nativeActionBtn.dataset.nativeAction, entry).catch(err => handleM4ConflictError(err, { entry, lib }));
             return;
           }
           openItem(item);
@@ -2534,21 +2481,561 @@
       }
     }
 
+    // ============================================================
+    // M4: 原始文件（真实磁盘目录）与文库文件名/原始文件名双名称管理
+    // ============================================================
+    const M4_SOURCE_STATUS_LABELS = {
+      active: '正常', duplicate: '重复未入库', missing: '缺失', unreadable: '损坏', trashed: '回收站'
+    };
+    const sourceFilesState = { roots: [], rootId: null, path: '', entries: [], meta: null, loading: false };
+    let libraryFilterState = 'all';
+
+    async function m4Fetch(path, options = {}) {
+      // Like canvasFetch, but keeps the full payload for non-2xx conflict data.
+      const headers = { Accept: 'application/json', ...(options.headers || {}) };
+      if (options.body !== undefined && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
+      const response = await fetch(`/canvas${path}`, {
+        ...options,
+        headers,
+        body: options.body === undefined || typeof options.body === 'string'
+          ? options.body : JSON.stringify(options.body)
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        const err = new Error(payload?.error?.message || `Canvas HTTP ${response.status}`);
+        err.status = response.status;
+        err.code = payload?.error?.code;
+        err.data = payload?.data || null;
+        throw err;
+      }
+      return payload;
+    }
+
+    function formatM4Bytes(sizeBytes) {
+      if (sizeBytes === null || sizeBytes === undefined) return '—';
+      if (sizeBytes < 1024) return `${sizeBytes} B`;
+      if (sizeBytes < 1024 * 1024) return `${(sizeBytes / 1024).toFixed(1)} KB`;
+      return `${(sizeBytes / 1024 / 1024).toFixed(1)} MB`;
+    }
+
+    function formatM4Time(modifiedAt) {
+      if (!modifiedAt) return '—';
+      try { return new Date(modifiedAt).toLocaleString('zh-CN', { hour12: false }); } catch { return '—'; }
+    }
+
+    async function fetchLibraryRoots(force = false) {
+      if (!force && sourceFilesState.roots.length) return sourceFilesState.roots;
+      const payload = await m4Fetch('/native/library-roots');
+      sourceFilesState.roots = Array.isArray(payload.data) ? payload.data : [];
+      return sourceFilesState.roots;
+    }
+
+    function renderSourceFilesRootSelect() {
+      const select = document.getElementById('source-files-root-select');
+      const quickRoot = document.getElementById('quick-import-target-root');
+      if (select) {
+        select.innerHTML = sourceFilesState.roots.length
+          ? sourceFilesState.roots.map(r => `<option value="${escapeHTML(r.id)}">${escapeHTML(r.displayName)}</option>`).join('')
+          : '<option value="">未配置 NATIVE_LIBRARY_ROOTS 根目录</option>';
+        if (sourceFilesState.rootId) select.value = sourceFilesState.rootId;
+      }
+      if (quickRoot) {
+        quickRoot.innerHTML = sourceFilesState.roots.length
+          ? sourceFilesState.roots.map(r => `<option value="${escapeHTML(r.id)}">${escapeHTML(r.displayName)}</option>`).join('')
+          : '<option value="">未配置文库根目录</option>';
+      }
+    }
+
+    async function loadSourceFiles(relativePath = sourceFilesState.path) {
+      const container = document.getElementById('source-files-items');
+      if (!container || sourceFilesState.loading) return;
+      if (!sourceFilesState.rootId) {
+        container.innerHTML = '<div class="text-center text-slate-500 py-12 text-xs">未配置文库根目录（服务端 NATIVE_LIBRARY_ROOTS）</div>';
+        return;
+      }
+      sourceFilesState.loading = true;
+      sourceFilesState.path = relativePath || '';
+      const pathLabel = document.getElementById('source-files-path-label');
+      if (pathLabel) pathLabel.textContent = '/' + (sourceFilesState.path || '');
+      try {
+        const params = new URLSearchParams({ limit: '200' });
+        if (sourceFilesState.path) params.set('path', sourceFilesState.path);
+        const payload = await m4Fetch(`/native/library-roots/${sourceFilesState.rootId}/tree?${params.toString()}`);
+        sourceFilesState.entries = payload.data || [];
+        sourceFilesState.meta = payload.meta || null;
+        renderSourceFilesEntries();
+      } catch (err) {
+        container.innerHTML = `<div class="text-center text-rose-400 py-10 text-xs">原始文件加载失败: ${escapeHTML(errorMessage(err))}</div>`;
+      } finally {
+        sourceFilesState.loading = false;
+      }
+    }
+
+    function renderSourceFilesEntries() {
+      const container = document.getElementById('source-files-items');
+      if (!container) return;
+      const entries = sourceFilesState.entries || [];
+      if (!entries.length) {
+        container.innerHTML = '<div class="text-center text-slate-500 py-10 text-xs">此目录为空（仅显示 PDF 与子目录）</div>';
+        return;
+      }
+      container.innerHTML = '';
+      for (const entry of entries) {
+        const div = document.createElement('div');
+        div.role = 'button';
+        div.tabIndex = 0;
+        div.className = 'w-full text-left p-2.5 rounded text-xs border bg-slate-950/40 hover:bg-slate-900 border-slate-900 hover:border-slate-800 text-slate-300 group relative';
+        const lib = entry.library || null;
+        const statusLabel = lib ? (M4_SOURCE_STATUS_LABELS[lib.status] || lib.status) : '';
+        const statusBadge = lib && lib.status !== 'active'
+          ? `<span class="px-1.5 py-0.2 rounded bg-amber-950/60 border border-amber-800/60 text-[10px] text-amber-300">${escapeHTML(statusLabel)}</span>`
+          : '';
+        const libTitle = lib?.documentTitle
+          ? `<div class="text-[10px] text-indigo-300/90 truncate mt-0.5" title="文库文件名">📚 ${escapeHTML(lib.documentTitle)}</div>`
+          : '<div class="text-[10px] text-slate-600 truncate mt-0.5">（未入库）</div>';
+        const actions = entry.type === 'pdf' ? `
+          <div class="flex flex-wrap gap-1 mt-1.5 source-actions">
+            ${lib?.attachmentId ? `<button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-blue-300 hover:text-blue-200" data-source-action="open">📖 打开</button>` : ''}
+            ${!lib?.documentId ? `<button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-emerald-300 hover:text-emerald-200" data-source-action="enroll">➕ 加入文库</button>` : ''}
+            <button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-slate-300 hover:text-slate-100" data-source-action="rename">✏️ 重命名</button>
+            <button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-slate-300 hover:text-slate-100" data-source-action="move">📂 移动</button>
+            ${lib?.status === 'trashed'
+              ? '<button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-emerald-300 hover:text-emerald-200" data-source-action="restore">♻️ 恢复</button>'
+              : '<button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-rose-300 hover:text-rose-200" data-source-action="trash">🗑 移入回收站</button>'}
+          </div>` : '';
+        div.innerHTML = `
+          <div class="flex items-start justify-between gap-1.5">
+            <div class="font-medium text-slate-200 truncate flex-1" title="${escapeHTML(entry.relativePath)}">${entry.type === 'directory' ? '📁' : '📄'} ${escapeHTML(entry.name)}</div>
+            ${statusBadge}
+          </div>
+          ${entry.type !== 'directory' ? libTitle : ''}
+          ${entry.type !== 'directory' ? `<div class="text-[10px] text-slate-500 mt-0.5 font-mono">${escapeHTML(formatM4Bytes(entry.sizeBytes))} · ${escapeHTML(formatM4Time(entry.modifiedAt))}</div>` : ''}
+          ${actions}
+        `;
+        div.onclick = (e) => {
+          const actionBtn = e.target.closest('[data-source-action]');
+          if (actionBtn) {
+            e.stopPropagation();
+            handleSourceFileAction(actionBtn.dataset.sourceAction, entry);
+            return;
+          }
+          if (entry.type === 'directory') {
+            loadSourceFiles(entry.relativePath);
+          }
+        };
+        div.onkeydown = (e) => {
+          if ((e.key === 'Enter' || e.key === ' ') && entry.type === 'directory') {
+            e.preventDefault();
+            loadSourceFiles(entry.relativePath);
+          }
+        };
+        container.appendChild(div);
+      }
+    }
+
+    // 统一 sourceFile 引用：树视图 binding 用 sourceFileId，文库条目用 id；
+    // 版本号缺失（树视图）时按需拉取最新值，保证 If-Match 永远基于最新状态。
+    async function resolveSourceFileRef(lib) {
+      const sourceFileId = lib.sourceFileId || lib.id;
+      if (!sourceFileId) throw new Error('该条目缺少原始文件引用');
+      let version = lib.version;
+      if (version === undefined || version === null) {
+        const current = await m4Fetch(`/native/source-files/${sourceFileId}`);
+        version = current?.data?.version ?? null;
+      }
+      return { sourceFileId, version };
+    }
+
+    async function handleSourceFileAction(action, entry) {
+      const lib = entry.library || {};
+      try {
+        if (action === 'open') {
+          if (lib.attachmentId) await openDocument({ libraryType: 'native', libraryId: 'local', key: lib.documentId, isNative: true });
+          else showToast('该文件尚未入库，无法打开', 'error');
+          return;
+        }
+        if (action === 'enroll') {
+          const payload = await m4Fetch(`/native/source-files/${lib.sourceFileId || lib.id}/enroll`, { method: 'POST' });
+          if (payload?.data?.document) showToast(`已加入文库：${payload.data.document.title}`, 'success');
+          await Promise.all([loadSourceFiles(), loadNativeLibrary().catch(() => {})]);
+          return;
+        }
+        if (action === 'rename') {
+          await sourceRenameFlow(entry, lib);
+          return;
+        }
+        if (action === 'move') {
+          await sourceMoveFlow(entry, lib);
+          return;
+        }
+        if (action === 'trash') {
+          const ref = await resolveSourceFileRef(lib);
+          const result = await promptM4FileName({
+            title: '移入回收站',
+            hint: `「${entry.relativePath}」将移动到受控回收区，可随时恢复。文库记录、主题与批注都会保留。`,
+            inputLabel: null,
+            confirmText: '移入回收站',
+            version: ref.version,
+            confirmAction: async (_payload, version) => {
+              const res = await m4Fetch(`/native/source-files/${ref.sourceFileId}`, {
+                method: 'DELETE', headers: { 'If-Match': `W/"${version}"` }
+              });
+              return res.data;
+            }
+          });
+          if (result) showToast('已移入回收站', 'success');
+          await Promise.all([loadSourceFiles(), loadNativeLibrary().catch(() => {})]);
+          return;
+        }
+        if (action === 'restore') {
+          await sourceRestoreFlow(entry, lib);
+          return;
+        }
+      } catch (err) {
+        handleM4ConflictError(err, { entry, lib });
+      }
+    }
+
+    async function sourceRenameFlow(entry, lib, presetName = '') {
+      const ref = await resolveSourceFileRef(lib);
+      const result = await promptM4FileName({
+        title: '重命名原始文件',
+        hint: `同目录重命名，扩展名保持 .pdf。文库文件名不受影响，系统不会自动生成“同名(2)”文件。`,
+        inputLabel: null,
+        presetValue: presetName || entry.name,
+        version: ref.version,
+        confirmText: '重命名',
+        confirmAction: async (payload, version) => {
+          const res = await m4Fetch(`/native/source-files/${ref.sourceFileId}/rename`, {
+            method: 'POST',
+            headers: { 'If-Match': `W/"${version}"` },
+            body: { filename: payload.filename }
+          });
+          return res.data;
+        }
+      });
+      if (result) {
+        showToast('原始文件已重命名', 'success');
+        await Promise.all([loadSourceFiles(), loadNativeLibrary().catch(() => {})]);
+      }
+    }
+
+    async function sourceMoveFlow(entry, lib) {
+      const ref = await resolveSourceFileRef(lib);
+      const result = await promptM4FileName({
+        title: '移动原始文件',
+        hint: '默认保持原文件名。目标目录已存在同名文件时会阻断：内容相同返回重复，不同则要求输入新的原始文件名。',
+        presetValue: entry.name,
+        showDirInput: true,
+        presetDir: '',
+        version: ref.version,
+        confirmText: '移动',
+        confirmAction: async (payload, version) => {
+          const res = await m4Fetch(`/native/source-files/${ref.sourceFileId}/move`, {
+            method: 'POST',
+            headers: { 'If-Match': `W/"${version}"` },
+            body: { targetDir: payload.dir, filename: payload.filename }
+          });
+          return res.data;
+        }
+      });
+      if (result) {
+        showToast('已移动到目标目录', 'success');
+        await Promise.all([loadSourceFiles(), loadNativeLibrary().catch(() => {})]);
+      }
+    }
+
+    async function sourceRestoreFlow(entry, lib) {
+      const ref = await resolveSourceFileRef(lib);
+      const version = ref.version;
+      const restored = await m4Fetch(`/native/source-files/${ref.sourceFileId}/restore`, {
+        method: 'POST', headers: { 'If-Match': `W/"${version}"` }, body: {}
+      }).catch(err => {
+        if (err.code === 'duplicate_content' || err.code === 'filename_conflict') {
+          return promptM4FileName({
+            title: err.code === 'filename_conflict' ? '原路径被不同内容占用' : '原路径已存在相同内容',
+            hint: err.code === 'filename_conflict'
+              ? '原路径已存在一个内容不同的同名文件，请输入新的原始文件名后重试恢复。'
+              : '原路径已存在内容相同的文件（内容重复，未加入文库）。如仍需恢复，请输入新的原始文件名。',
+            presetValue: entry.name,
+            version: version,
+            confirmText: '恢复到新文件名',
+            confirmAction: async (payload, v) => {
+              const res = await m4Fetch(`/native/source-files/${ref.sourceFileId}/restore`, {
+                method: 'POST', headers: { 'If-Match': `W/"${v}"` }, body: { filename: payload.filename }
+              });
+              return res.data;
+            }
+          });
+        }
+        throw err;
+      });
+      if (restored) {
+        showToast('已从回收站恢复', 'success');
+        await Promise.all([loadSourceFiles(), loadNativeLibrary().catch(() => {})]);
+      }
+    }
+
+    // 通用原始文件名对话框；confirmAction(payload, version) 返回真值表示成功。
+    function promptM4FileName({ title, hint = '', presetValue = '', showDirInput = false, presetDir = '', inputLabel = null, confirmText = '确认', version = null, confirmAction }) {
+      return new Promise(resolve => {
+        const modal = document.getElementById('file-name-modal');
+        const titleEl = document.getElementById('file-name-modal-title');
+        const hintEl = document.getElementById('file-name-modal-hint');
+        const input = document.getElementById('file-name-modal-input');
+        const inputLabelEl = inputLabelsCache();
+        const dirInput = document.getElementById('file-name-modal-dir-input');
+        const dirWrap = document.getElementById('file-name-modal-extra');
+        const errorEl = document.getElementById('file-name-modal-error');
+        const cancelBtn = document.getElementById('btn-cancel-file-name-modal');
+        const closeBtn = document.getElementById('btn-close-file-name-modal');
+        const confirmBtn = document.getElementById('btn-confirm-file-name-modal');
+
+        function inputLabelsCache() { return document.querySelector('label[for="file-name-modal-input"]'); }
+        titleEl.textContent = title;
+        hintEl.textContent = hint;
+        hintEl.classList.toggle('hidden', !hint);
+        input.value = presetValue || '';
+        if (inputLabelEl && inputLabel) inputLabelEl.textContent = inputLabel;
+        dirWrap.classList.toggle('hidden', !showDirInput);
+        dirInput.value = presetDir || '';
+        errorEl.classList.add('hidden');
+        modal.classList.remove('hidden');
+        input.focus();
+
+        const cleanup = () => {
+          modal.classList.add('hidden');
+          confirmBtn.onclick = null;
+          cancelBtn.onclick = null;
+          closeBtn.onclick = null;
+        };
+        const fail = (message) => {
+          errorEl.textContent = message;
+          errorEl.classList.remove('hidden');
+        };
+        const cancel = () => { cleanup(); resolve(null); };
+        cancelBtn.onclick = cancel;
+        closeBtn.onclick = cancel;
+        confirmBtn.onclick = async () => {
+          const filename = (input.value || '').trim();
+          if (inputLabel !== null && !filename) { fail('请输入原始文件名'); return; }
+          confirmBtn.disabled = true;
+          try {
+            const result = await confirmAction(
+              { filename, dir: showDirInput ? (dirInput.value || '').trim() : '' },
+              version
+            );
+            cleanup();
+            resolve(result || { ok: true });
+          } catch (err) {
+            if (err.code === 'filename_conflict') {
+              fail('目标位置已存在同名但内容不同的文件，请修改原始文件名后重试（系统不会自动覆盖或生成“(2)”）。');
+            } else if (err.code === 'duplicate_content') {
+              fail('目标位置已存在内容完全相同的文件（重复内容不重复加入）。');
+            } else if (err.code === 'version_conflict') {
+              fail('该文件刚被其他操作修改，请关闭后重试以获取最新状态。');
+            } else {
+              fail(errorMessage(err));
+            }
+          } finally {
+            confirmBtn.disabled = false;
+          }
+        };
+      });
+    }
+
+    function handleM4ConflictError(err, context = {}) {
+      if (err?.code === 'duplicate_content') {
+        showToast('相同 SHA-256 的内容已在文库中（重复内容不重复加入）', 'error');
+      } else if (err?.code === 'filename_conflict') {
+        showToast('目标位置已存在同名但内容不同的文件，请输入新的原始文件名', 'error');
+      } else {
+        showToast(`操作失败: ${errorMessage(err)}`, 'error');
+      }
+    }
+
+    async function sourceScanFlow() {
+      if (!sourceFilesState.rootId) return;
+      const btn = document.getElementById('btn-source-rescan');
+      if (btn) { btn.disabled = true; btn.textContent = '⏳ 扫描中...'; }
+      try {
+        const payload = await m4Fetch(`/native/library-roots/${sourceFilesState.rootId}/scan`, { method: 'POST' });
+        const operationId = payload?.data?.operationId;
+        if (operationId) {
+          for (let i = 0; i < 600; i++) {
+            const op = await m4Fetch(`/native/file-operations/${operationId}`).catch(() => null);
+            if (op?.data?.state && !['queued', 'running'].includes(op.data.state)) {
+              const report = op.data.state === 'completed' ? (op.data.payload?.report || null) : null;
+              if (op.data.state === 'failed') {
+                showToast('扫描失败：未推进检查点，文件状态未变更', 'error');
+              } else if (report) {
+                showToast(`扫描完成：新增 ${report.newDocuments ?? 0} · 重复 ${report.duplicates ?? 0} · 移动 ${report.moved ?? 0} · 缺失 ${report.missing ?? 0} · 恢复 ${report.restored ?? 0}`, 'success');
+              } else {
+                showToast('扫描完成', 'success');
+              }
+              break;
+            }
+            await new Promise(r => setTimeout(r, 500));
+          }
+        }
+        await Promise.all([loadSourceFiles(), loadNativeLibrary().catch(() => {})]);
+      } catch (err) {
+        if (err.code === 'library_root_unavailable') showToast('文库根目录当前不可用（离线或无权限），未做任何改动', 'error');
+        else showToast(`扫描失败: ${errorMessage(err)}`, 'error');
+      } finally {
+        if (btn) { btn.disabled = false; btn.textContent = '🔄 递归扫描'; }
+      }
+    }
+
+    async function sourceNewDirFlow() {
+      const name = window.prompt('新目录名称（当前目录下创建）');
+      if (!name) return;
+      try {
+        await m4Fetch(`/native/library-roots/${sourceFilesState.rootId}/directories`, {
+          method: 'POST', body: { path: sourceFilesState.path, name }
+        });
+        showToast(`目录「${name}」已创建`, 'success');
+        await loadSourceFiles();
+      } catch (err) {
+        showToast(`创建目录失败: ${errorMessage(err)}`, 'error');
+      }
+    }
+
+    function switchSourceFilesView(showing) {
+      document.getElementById('library-files-panel').classList.toggle('hidden', !showing);
+      document.getElementById('source-files-items').classList.toggle('hidden', !showing);
+    }
+
+    async function openLibraryFilesView() {
+      switchSourceFilesView(true);
+      try {
+        await fetchLibraryRoots(true);
+        renderSourceFilesRootSelect();
+        if (!sourceFilesState.rootId && sourceFilesState.roots.length) sourceFilesState.rootId = sourceFilesState.roots[0].id;
+        await loadSourceFiles(sourceFilesState.path || '');
+      } catch (err) {
+        showToast(`文库根目录加载失败: ${errorMessage(err)}`, 'error');
+      }
+    }
+
+    // --- M4 文库过滤器（全部/未分类/无 PDF/文件缺失/回收站） ---
+    const M4_FILTER_QUERY = {
+      all: '',
+      unclassified: 'unclassified=true',
+      'no-pdf': '',
+      'file-missing': 'fileStatus=missing',
+      trash: 'fileStatus=trashed'
+    };
+
+    async function applyLibraryFilter(filter) {
+      libraryFilterState = M4_FILTER_QUERY.hasOwnProperty(filter) ? filter : 'all';
+      document.querySelectorAll('.lib-filter-chip').forEach(chip => {
+        const active = chip.dataset.libFilter === libraryFilterState;
+        chip.className = `lib-filter-chip px-2.5 py-1 rounded whitespace-nowrap transition ${active ? 'bg-blue-600 text-white' : 'bg-slate-900 text-slate-400 hover:text-slate-200'}`;
+      });
+      if (libraryFilterState === 'all') {
+        await loadNativeLibrary().catch(err => renderNativeLibraryError(err));
+        return;
+      }
+      if (libraryFilterState === 'no-pdf') {
+        const filtered = allItems.filter(item => !(item.children || []).some(c => c.data?.contentType === 'application/pdf'));
+        renderFilteredNativeItems(filtered, '暂无无 PDF 的文献');
+        return;
+      }
+      const query = M4_FILTER_QUERY[libraryFilterState];
+      const payload = await m4Fetch(`/native/documents?${query}&limit=200`).catch(err => {
+        renderNativeLibraryError(err);
+        return null;
+      });
+      if (!payload) return;
+      const docs = payload.data || [];
+      const items = docs.map(doc => {
+        const item = nativeDocumentToLibraryItem(doc);
+        if (item) {
+          item.sourceFile = doc.sourceFile || null;
+          item.topics = doc.topics || [];
+        }
+        return item;
+      }).filter(Boolean);
+      renderFilteredNativeItems(items, '此筛选下暂无文献');
+    }
+
+    // M4: 文库级 AI 主题归类（提炼主题体系 + 高置信度建议一键采纳）
+    async function libraryAiClassifyFlow() {
+      const btn = document.getElementById('btn-library-ai-classify');
+      if (btn) { btn.disabled = true; btn.textContent = '⏳ AI 分析中...'; }
+      try {
+        const gen = await m4Fetch('/native/classify/generate-topics', { method: 'POST', body: {} });
+        const data = gen.data || {};
+        const created = (data.createdWorkspaces || []).length;
+        const suggestions = [];
+        for (const [documentId, list] of Object.entries(data.classifications || {})) {
+          for (const s of (list || [])) {
+            if (s && typeof s.confidence === 'number' && s.confidence >= 0.7) {
+              suggestions.push({ documentId, workspaceId: s.workspaceId });
+            }
+          }
+        }
+        let applied = 0;
+        if (suggestions.length) {
+          const byWorkspace = new Map();
+          for (const sug of suggestions) {
+            if (!byWorkspace.has(sug.workspaceId)) byWorkspace.set(sug.workspaceId, []);
+            byWorkspace.get(sug.workspaceId).push(sug.documentId);
+          }
+          for (const [workspaceId, documentIds] of byWorkspace) {
+            const res = await m4Fetch('/native/documents/batch-topics', {
+              method: 'POST', body: { documentIds, topicIds: [workspaceId] }
+            });
+            applied += (res.data || []).filter(r => r.ok).length;
+          }
+        }
+        showToast(`AI 完成：提炼 ${created} 个新主题，采纳 ${applied} 条高置信度归类建议`, 'success');
+        if (userWorkspaces) {
+          userWorkspaces = await canvasFetch('/workspaces').catch(() => userWorkspaces);
+        }
+        await applyLibraryFilter(libraryFilterState === 'all' ? 'all' : libraryFilterState).catch(() => {});
+      } catch (err) {
+        if (err.code === 'ai_not_configured') showToast('AI 模型尚未配置', 'error');
+        else showToast(`AI 主题归类失败: ${errorMessage(err)}`, 'error');
+      } finally {
+        if (btn) { btn.disabled = false; btn.textContent = '✨ AI 主题归类'; }
+      }
+    }
+
+    function renderFilteredNativeItems(items, emptyText) {
+      const container = document.getElementById('items-container');
+      container.innerHTML = '';
+      if (!items.length) {
+        container.innerHTML = `<div class="text-slate-500 text-center py-10 text-xs">${escapeHTML(emptyText)}</div>`;
+        return;
+      }
+      const originalState = allItems;
+      allItems = items;
+      try { renderItems(); } finally { allItems = originalState; }
+    }
+
+    // ============================================================
+
     function switchLibraryView(view) {
-      currentLibraryView = view === 'topics' ? 'topics' : 'all';
+      currentLibraryView = view === 'topics' ? 'topics' : (view === 'files' ? 'files' : 'all');
       const showingTopics = currentLibraryView === 'topics';
-      document.getElementById('library-all-panel').classList.toggle('hidden', showingTopics);
-      document.getElementById('items-container').classList.toggle('hidden', showingTopics);
+      const showingFiles = currentLibraryView === 'files';
+      document.getElementById('library-all-panel').classList.toggle('hidden', showingTopics || showingFiles);
+      document.getElementById('items-container').classList.toggle('hidden', showingTopics || showingFiles);
       document.getElementById('library-topics-panel').classList.toggle('hidden', !showingTopics);
       document.getElementById('topic-library-items').classList.toggle('hidden', !showingTopics);
+      switchSourceFilesView(showingFiles);
       document.querySelectorAll('.library-view-tab').forEach(button => {
-        const selected = button.id === (showingTopics ? 'btn-library-view-topics' : 'btn-library-view-all');
+        const selected = button.id === (showingFiles ? 'btn-library-view-files'
+          : showingTopics ? 'btn-library-view-topics' : 'btn-library-view-all');
         button.setAttribute('aria-selected', String(selected));
         button.className = `library-view-tab flex-1 px-2.5 py-1.5 rounded text-xs font-medium transition ${selected
-          ? (showingTopics ? 'bg-indigo-600 text-white' : 'bg-blue-600 text-white')
+          ? (showingFiles ? 'bg-emerald-600 text-white' : showingTopics ? 'bg-indigo-600 text-white' : 'bg-blue-600 text-white')
           : 'text-slate-400 hover:text-slate-200'}`;
       });
-      if (showingTopics) void loadTopicLibraryDocuments();
+      if (showingFiles) void openLibraryFilesView();
+      else if (showingTopics) void loadTopicLibraryDocuments();
     }
 
     async function resolveTopicLibraryPdf(doc) {
@@ -3713,10 +4200,7 @@
 
     let userWorkspaces = [];
     let currentTopicTab = 'meta';
-    let inboxEntries = [];
-    let inboxSelectedIds = new Set();
-    let currentInboxState = 'new';
-    let inboxScanInFlight = false;
+    // [M4] inbox state retired; no inbox variables are maintained anymore.
     let canvasMaximized = false;
 
     // --- Topic Workspaces & Management ---
@@ -3813,7 +4297,6 @@
         }`;
       });
       document.getElementById('topic-tab-meta').classList.toggle('hidden', tab !== 'meta');
-      document.getElementById('topic-tab-bindings').classList.toggle('hidden', tab !== 'bindings');
       document.getElementById('topic-tab-docs').classList.toggle('hidden', tab !== 'docs');
 
       if (tab === 'bindings') {
@@ -3868,168 +4351,6 @@
       } catch (err) {
         reportApplicationError('topics.delete', err);
         showToast(`删除主题失败: ${errorMessage(err)}`, 'error');
-      }
-    }
-
-    // --- Collection Bindings ---
-    async function loadTopicBindings() {
-      if (!canvasWorkspace) return;
-      const listContainer = document.getElementById('topic-bindings-list');
-      listContainer.innerHTML = '<div class="text-center text-slate-500 py-4 text-xs">加载绑定中…</div>';
-      try {
-        const bindings = await canvasFetch(`/workspaces/${canvasWorkspace.id}/collection-bindings`);
-        if (!bindings.length) {
-          listContainer.innerHTML = '<div class="text-center text-slate-500 py-6 text-xs">暂无绑定的 Collection</div>';
-          return;
-        }
-        listContainer.replaceChildren();
-        for (const b of bindings) {
-          const item = document.createElement('div');
-          item.className = 'p-2.5 rounded bg-slate-950/80 border border-slate-800 flex items-center justify-between gap-2 text-xs';
-          const syncedDate = b.lastSyncedAt ? new Date(b.lastSyncedAt).toLocaleString('zh-CN', { hour12: false }) : '从未同步';
-          item.innerHTML = `
-            <div class="min-w-0 flex-1">
-              <div class="font-medium text-slate-200 flex items-center gap-1.5">
-                <span>📁 Collection: <strong>${escapeHTML(b.collectionKey)}</strong></span>
-                <span class="text-[10px] px-1.5 py-0.2 rounded ${b.mode === 'inbound' ? 'bg-indigo-950 text-indigo-300 border border-indigo-800' : 'bg-purple-950 text-purple-300 border border-purple-800'} font-mono">${escapeHTML(b.mode)}</span>
-              </div>
-              <div class="text-[10px] text-slate-500 mt-0.5 font-mono">上次同步: ${escapeHTML(syncedDate)} · 版本: ${b.lastLibraryVersion ?? 'n/a'}</div>
-            </div>
-            <div class="flex items-center gap-1.5 shrink-0">
-              <button type="button" class="btn-sync-binding px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-indigo-300 text-[11px] transition">🔄 立即同步</button>
-              <button type="button" class="btn-remove-binding px-2 py-1 rounded bg-slate-900 hover:bg-rose-950 text-slate-400 hover:text-rose-300 text-[11px] transition">解绑</button>
-            </div>
-          `;
-          item.querySelector('.btn-sync-binding').onclick = () => syncCollectionBinding(b.id);
-          item.querySelector('.btn-remove-binding').onclick = () => removeCollectionBinding(b.id, b.version);
-          listContainer.appendChild(item);
-        }
-      } catch (err) {
-        reportApplicationError('topics.bindings-load', err);
-        listContainer.innerHTML = `<div class="text-rose-400 text-xs py-4 text-center">读取绑定失败: ${escapeHTML(err.message)}</div>`;
-      }
-    }
-
-    async function loadAlteroCollectionsForBinding() {
-      const select = document.getElementById('select-bind-collection');
-      if (!select) return;
-      select.innerHTML = '<option value="">正在读取 Altero 集合…</option>';
-      try {
-        const allCollections = [];
-        const seenKeys = new Set();
-        let start = 0;
-        const limit = 100;
-        const maxPages = 50;
-        let completed = false;
-
-        for (let page = 0; page < maxPages; page++) {
-          const res = await fetch(getApiUrl(`${libraryApiPrefix()}/collections?limit=${limit}&start=${start}`), { headers: getHeaders() });
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          const chunk = await res.json();
-          if (!Array.isArray(chunk)) throw new Error('Invalid collections response format');
-
-          const totalHeader = res.headers.get('Total-Results');
-          const total = totalHeader !== null && !isNaN(Number(totalHeader)) ? Number(totalHeader) : null;
-          const hasTotal = total !== null && Number.isFinite(total);
-
-          if (chunk.length === 0) {
-            if (hasTotal && start < total) {
-              throw new Error(`Premature end of collections stream: expected ${total}, got ${start}`);
-            }
-            completed = true;
-            break;
-          }
-
-          for (const col of chunk) {
-            const k = col?.key || col?.data?.key;
-            if (k) {
-              if (seenKeys.has(k)) {
-                throw new Error(`Duplicate collection key ${k} received at offset ${start}`);
-              }
-              seenKeys.add(k);
-            }
-            allCollections.push(col);
-          }
-
-          start += chunk.length;
-
-          if (hasTotal && start < total && chunk.length < limit) {
-            throw new Error(`Premature end of collections stream: expected ${total}, got ${start}`);
-          }
-
-          if (chunk.length < limit || (hasTotal && start >= total)) {
-            completed = true;
-            break;
-          }
-        }
-
-        if (!completed) {
-          throw new Error(`Collections count exceeded safety limit of ${maxPages} pages`);
-        }
-
-        select.replaceChildren();
-        if (!allCollections.length) {
-          select.innerHTML = '<option value="">(文库中暂无 Collection)</option>';
-          return;
-        }
-        for (const col of allCollections) {
-          const opt = document.createElement('option');
-          opt.value = col.key || col.data?.key;
-          opt.textContent = `${col.data?.name || col.key} (${col.key || col.data?.key})`;
-          select.appendChild(opt);
-        }
-      } catch (err) {
-        reportApplicationError('topics.collections-load', err);
-        select.innerHTML = `<option value="">(无法读取 Collection 列表: ${escapeHTML(err.message)})</option>`;
-      }
-    }
-
-    async function submitAddCollectionBinding() {
-      if (!canvasWorkspace) return;
-      const collectionKey = document.getElementById('select-bind-collection').value;
-      const mode = document.getElementById('select-bind-mode').value;
-      if (!collectionKey) return showToast('请选择要绑定的 Collection', 'error');
-
-      try {
-        await canvasFetch(`/workspaces/${canvasWorkspace.id}/collection-bindings`, {
-          method: 'POST',
-          body: { libraryType: 'user', libraryId: String(config.userId), collectionKey, mode }
-        });
-        showToast('Collection 绑定成功', 'success');
-        loadTopicBindings();
-      } catch (err) {
-        reportApplicationError('topics.bind-collection', err);
-        showToast(`绑定 Collection 失败: ${errorMessage(err)}`, 'error');
-      }
-    }
-
-    async function syncCollectionBinding(bindingId) {
-      try {
-        setCanvasSaveState('同步 Collection…');
-        const result = await canvasFetch(`/collection-bindings/${bindingId}/sync`, { method: 'POST' });
-        showToast(`Collection 同步完成（新增/更新 ${result?.syncedCount ?? 0} 篇文献）`, 'success');
-        loadTopicBindings();
-        loadTopicDocuments();
-        loadInboxEntries();
-        setCanvasSaveState('已同步', 'ok');
-      } catch (err) {
-        reportApplicationError('topics.sync-binding', err);
-        showToast(`同步失败: ${errorMessage(err)}`, 'error');
-      }
-    }
-
-    async function removeCollectionBinding(bindingId, version) {
-      if (!confirm('确认解除与该 Collection 的绑定？已加入主题的文献不会被删除。')) return;
-      try {
-        await canvasFetch(`/collection-bindings/${bindingId}`, {
-          method: 'DELETE',
-          headers: { 'If-Match': `W/"${version}"` }
-        });
-        showToast('已解除绑定', 'success');
-        loadTopicBindings();
-      } catch (err) {
-        reportApplicationError('topics.remove-binding', err);
-        showToast(`解绑失败: ${errorMessage(err)}`, 'error');
       }
     }
 
@@ -4126,547 +4447,6 @@
 
     let inboxGenerateTopicsInFlight = false;
 
-    async function openInboxEntryForReading(entry) {
-      if (!entry) return;
-      closeInboxModal();
-      const entryLibrary = normalizeLibraryContext(entry);
-
-      let targetItem = allItems.find(item =>
-        item.key === entry.itemKey &&
-        isSameLibrary(normalizeLibraryContext(item), entryLibrary)
-      );
-
-      if (!targetItem) {
-        if (entryLibrary.libraryType === 'native') {
-          try {
-            targetItem = await getNativeLibraryItem(entry.itemKey);
-          } catch (e) {
-            console.warn('Failed to fetch native inbox item directly:', e);
-          }
-        } else {
-          try {
-            const itemUrl = getApiUrl(`${libraryApiPrefix(entryLibrary)}/items/${encodeURIComponent(entry.itemKey)}`);
-            const res = await fetch(itemUrl, { headers: getHeaders() });
-            if (res.ok) {
-              targetItem = await res.json();
-            }
-          } catch (e) {
-            console.warn('Failed to fetch inbox item directly:', e);
-          }
-        }
-      }
-      if (targetItem) {
-        await openItem(targetItem, entryLibrary);
-      } else {
-        const isNative = entryLibrary.libraryType === 'native';
-        const fallbackItem = {
-          key: entry.itemKey,
-          libraryType: entryLibrary.libraryType,
-          libraryId: entryLibrary.libraryId,
-          isNative,
-          data: {
-            key: entry.itemKey,
-            title: entry.title,
-            itemType: 'journalArticle',
-            abstractNote: entry.abstractNote || ''
-          }
-        };
-        await openItem(fallbackItem, entryLibrary);
-      }
-    }
-
-    async function generateTopicsWithAi() {
-      if (inboxGenerateTopicsInFlight) return;
-      if (!aiConfig.configured) {
-        showToast('请先配置 AI 服务端点再进行主题提炼', 'info');
-        openSettingsModal();
-        return;
-      }
-      if (!inboxEntries.length) {
-        showToast('收件箱中暂无文献可供提炼主题', 'info');
-        return;
-      }
-
-      inboxGenerateTopicsInFlight = true;
-      const btn = document.getElementById('btn-inbox-generate-topics-ai');
-      const originalText = btn ? btn.innerHTML : '';
-      if (btn) {
-        btn.innerHTML = '<span class="w-3.5 h-3.5 border-2 border-purple-400 border-t-transparent rounded-full animate-spin"></span><span>AI 提炼中…</span>';
-        btn.disabled = true;
-      }
-
-      try {
-        const targetIds = inboxSelectedIds.size ? [...inboxSelectedIds] : inboxEntries.map(e => e.id);
-        const result = await canvasFetch('/inbox/generate-topics', {
-          method: 'POST',
-          body: { entryIds: targetIds, maxTopics: 5 }
-        });
-
-        const createdWorkspaces = result?.createdWorkspaces || [];
-        const classifications = result?.classifications || {};
-        const namedCount = rememberDocumentMetas(result?.documentMetas);
-
-        await loadTopicWorkspaces();
-
-        let recommendedCount = 0;
-        for (const [entryId, list] of Object.entries(classifications)) {
-          if (Array.isArray(list) && list.length) {
-            inboxAiClassifications.set(entryId, list);
-            recommendedCount++;
-          }
-        }
-
-        renderInboxEntries();
-        const acceptBtn = document.getElementById('btn-inbox-accept-ai');
-        if (acceptBtn) acceptBtn.disabled = recommendedCount === 0;
-
-        if (createdWorkspaces.length > 0) {
-          const names = createdWorkspaces.map(w => `「${w.name}」`).join('、');
-          showToast(`✨ AI 已创建 ${createdWorkspaces.length} 个核心主题：${names}，完成分类并生成 ${namedCount} 个中文名`, 'success');
-        } else {
-          showToast(`✨ 已为 ${recommendedCount} 篇文献匹配主题，并生成 ${namedCount} 个中文名`, 'success');
-        }
-      } catch (err) {
-        reportApplicationError('inbox.generate-topics', err);
-        showToast(`AI 提炼主题失败: ${errorMessage(err)}`, 'error');
-      } finally {
-        inboxGenerateTopicsInFlight = false;
-        if (btn) {
-          btn.innerHTML = originalText;
-          btn.disabled = false;
-        }
-      }
-    }
-
-    async function classifyInboxWithAi() {
-      if (inboxClassifyInFlight) return;
-      if (!aiConfig.configured) {
-        showToast('请先配置 AI 服务端点再进行智能分类', 'info');
-        openSettingsModal();
-        return;
-      }
-      if (!inboxEntries.length) {
-        showToast('收件箱中暂无文献可供分类', 'info');
-        return;
-      }
-      if (!userWorkspaces.length) {
-        showToast('尚未创建任何研究主题，已自动启动【AI 智能提炼主题体系】...', 'info');
-        await generateTopicsWithAi();
-        return;
-      }
-
-      inboxClassifyInFlight = true;
-      const btn = document.getElementById('btn-inbox-classify-ai');
-      const originalText = btn.innerHTML;
-      btn.innerHTML = '<span class="w-3.5 h-3.5 border-2 border-purple-400 border-t-transparent rounded-full animate-spin"></span><span>AI 分析中…</span>';
-      btn.disabled = true;
-
-      try {
-        const targetIds = inboxSelectedIds.size ? [...inboxSelectedIds] : inboxEntries.map(e => e.id);
-        const result = await canvasFetch('/inbox/classify', {
-          method: 'POST',
-          body: { entryIds: targetIds }
-        });
-
-        const classifications = result?.classifications || {};
-        const namedCount = rememberDocumentMetas(result?.documentMetas);
-        let recommendedCount = 0;
-        for (const [entryId, list] of Object.entries(classifications)) {
-          if (Array.isArray(list) && list.length) {
-            inboxAiClassifications.set(entryId, list);
-            recommendedCount++;
-          }
-        }
-
-        renderInboxEntries();
-        const acceptBtn = document.getElementById('btn-inbox-accept-ai');
-        if (acceptBtn) acceptBtn.disabled = recommendedCount === 0;
-
-        showToast(`AI 分类完成：${recommendedCount} 篇获得主题建议，${namedCount} 篇已生成中文名`, 'success');
-      } catch (err) {
-        reportApplicationError('inbox.classify', err);
-        showToast(`AI 分类失败: ${errorMessage(err)}`, 'error');
-      } finally {
-        inboxClassifyInFlight = false;
-        btn.innerHTML = originalText;
-        btn.disabled = false;
-      }
-    }
-
-    async function acceptAllAiSuggestions() {
-      if (!inboxAiClassifications.size) return;
-      const topicToEntries = new Map();
-
-      for (const [entryId, suggestions] of inboxAiClassifications) {
-        for (const s of suggestions) {
-          if (s.confidence >= 0.7 && s.workspaceId) {
-            const list = topicToEntries.get(s.workspaceId) || [];
-            list.push(entryId);
-            topicToEntries.set(s.workspaceId, list);
-          }
-        }
-      }
-
-      if (!topicToEntries.size) {
-        showToast('未找到高置信度 (≥70%) 的 AI 推荐项', 'info');
-        return;
-      }
-
-      let totalProcessed = 0;
-      let failedCount = 0;
-      const succeededEntryIds = new Set();
-
-      for (const [workspaceId, entryIds] of topicToEntries) {
-        try {
-          const res = await canvasFetch('/inbox/batch-action', {
-            method: 'POST',
-            body: { entryIds, action: 'accept', targetWorkspaceIds: [workspaceId] }
-          });
-          const count = res?.processed || entryIds.length;
-          totalProcessed += count;
-          for (const id of entryIds) {
-            const currentList = inboxAiClassifications.get(id) || [];
-            const remaining = currentList.filter(s => s.workspaceId !== workspaceId);
-            if (remaining.length) {
-              inboxAiClassifications.set(id, remaining);
-            } else {
-              inboxAiClassifications.delete(id);
-            }
-          }
-        } catch (e) {
-          failedCount++;
-          console.warn('Accept suggestion error for topic:', workspaceId, e);
-        }
-      }
-
-      document.getElementById('btn-inbox-accept-ai').disabled = inboxAiClassifications.size === 0;
-
-      if (failedCount > 0) {
-        showToast(`已采纳归类 ${totalProcessed} 项文献，${failedCount} 个主题处理失败`, 'error');
-      } else {
-        showToast(`已一键采纳 AI 建议并归类 ${totalProcessed} 项文献`, 'success');
-      }
-      await loadInboxEntries();
-      loadTopicDocuments();
-      if (typeof currentLibraryView !== 'undefined' && currentLibraryView === 'topics') await loadTopicLibraryDocuments();
-    }
-
-    async function loadInboxEntries(append = false) {
-      if (config.mode !== 'bff' || !config.user) return;
-      try {
-        const stateParam = currentInboxState === 'all' ? '' : `state=${currentInboxState}`;
-        const cursorParam = append && inboxNextCursor ? `cursor=${encodeURIComponent(inboxNextCursor)}` : '';
-        const query = [stateParam, cursorParam].filter(Boolean).join('&');
-        const url = `/inbox${query ? `?${query}` : ''}`;
-
-        const res = await canvasFetch(url, { includeMeta: true });
-        const newEntries = Array.isArray(res?.data) ? res.data : (Array.isArray(res) ? res : []);
-        const meta = res?.meta || {};
-
-        inboxNextCursor = meta.nextCursor || null;
-
-        if (append) {
-          inboxEntries.push(...newEntries);
-        } else {
-          inboxEntries = newEntries;
-          inboxSelectedIds.clear();
-        }
-
-        const unreadCount = meta.unreadCount !== undefined ? meta.unreadCount : (inboxEntries.filter(e => e.state === 'new').length);
-        const badge = document.getElementById('inbox-unread-badge');
-        badge.textContent = String(unreadCount);
-        badge.classList.toggle('hidden', unreadCount === 0);
-        document.getElementById('inbox-count-tag').textContent = `${meta.totalCount !== undefined ? meta.totalCount : inboxEntries.length} 条`;
-
-        renderInboxEntries();
-      } catch (err) {
-        reportApplicationError('inbox.load', err);
-      }
-    }
-
-    function renderInboxEntries() {
-      const container = document.getElementById('inbox-items-container');
-      const searchKeyword = (document.getElementById('input-inbox-search')?.value || '').trim().toLowerCase();
-      const countLabel = document.getElementById('inbox-showing-count');
-
-      const filtered = inboxEntries.filter(entry => {
-        if (!searchKeyword) return true;
-        const meta = documentMetas.get(docMetaKey(entry.libraryType, entry.libraryId, entry.itemKey));
-        const cleanTitle = (entry.cleanTitle || meta?.cleanTitle || '').toLowerCase();
-        const institution = (entry.institution || meta?.institution || '').toLowerCase();
-        const titleMatch = (entry.title || '').toLowerCase().includes(searchKeyword) || cleanTitle.includes(searchKeyword);
-        const institutionMatch = institution.includes(searchKeyword);
-        const tagMatch = (entry.tags || []).some(t => String(t).toLowerCase().includes(searchKeyword));
-        const authorMatch = (entry.creators || []).some(c => (typeof c === 'string' ? c : `${c.firstName || ''} ${c.lastName || ''} ${c.name || ''}`).toLowerCase().includes(searchKeyword));
-        const yearMatch = entry.year ? String(entry.year).includes(searchKeyword) : false;
-        return titleMatch || institutionMatch || tagMatch || authorMatch || yearMatch;
-      });
-
-      countLabel.textContent = `显示 ${filtered.length} 项`;
-      container.replaceChildren();
-
-      if (!filtered.length) {
-        const emptyDiv = document.createElement('div');
-        emptyDiv.className = 'text-center text-slate-500 py-12 text-xs';
-        emptyDiv.textContent = searchKeyword ? '当前页未匹配到文献' : '收件箱暂无文献';
-        container.appendChild(emptyDiv);
-      } else {
-        for (const entry of filtered) {
-          const item = document.createElement('div');
-          const isSelected = inboxSelectedIds.has(entry.id);
-          item.className = `p-3 rounded-lg border transition ${
-            isSelected ? 'bg-indigo-950/40 border-indigo-700/60' : 'bg-slate-900/80 border-slate-800/80 hover:border-slate-700'
-          } flex items-start gap-3 text-xs`;
-
-          const creatorStr = (entry.creators || []).slice(0, 3).map(c => {
-            if (typeof c === 'string') return c;
-            return c.name || `${c.lastName || ''} ${c.firstName || ''}`.trim();
-          }).filter(Boolean).join(', ') + ((entry.creators || []).length > 3 ? ' 等' : '');
-
-          const suggestions = inboxAiClassifications.get(entry.id) || [];
-          const aiSuggestionsHtml = suggestions.length ? `
-            <div class="flex items-center gap-1.5 flex-wrap pt-1">
-              ${suggestions.map(s => `
-                <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-purple-950/90 border border-purple-700 text-purple-200 text-[10px]" title="${escapeHTML(s.reason)}">
-                  <span>✨ 推荐: <strong>${escapeHTML(s.workspaceName)}</strong> (${Math.round(s.confidence * 100)}%)</span>
-                  <button type="button" class="btn-quick-accept-ai hover:text-emerald-300 text-purple-300 underline cursor-pointer font-medium" data-entry-id="${entry.id}" data-ws-id="${s.workspaceId}">采纳</button>
-                </span>
-              `).join('')}
-            </div>
-          ` : '';
-
-          const meta = documentMetas.get(docMetaKey(entry.libraryType, entry.libraryId, entry.itemKey));
-          const cleanTitle = entry.cleanTitle || meta?.cleanTitle;
-          const displayTitle = cleanTitle || entry.title || `条目 #${entry.itemKey}`;
-          const institution = entry.institution || meta?.institution;
-
-          item.innerHTML = `
-            <div class="pt-0.5">
-              <input type="checkbox" class="inbox-item-checkbox rounded border-slate-700 bg-slate-950 text-indigo-600 focus:ring-0 cursor-pointer" ${isSelected ? 'checked' : ''} data-entry-id="${entry.id}">
-            </div>
-            <div class="min-w-0 flex-1 space-y-1">
-              <div class="font-medium text-slate-200 text-sm leading-snug flex items-start justify-between gap-2">
-                <span class="btn-inbox-title-read hover:text-indigo-300 transition cursor-pointer font-medium" title="点击立即在中心区域打开此研报 PDF">${escapeHTML(displayTitle)}</span>
-                <span class="text-[10px] px-1.5 py-0.2 rounded font-mono shrink-0 ${
-                  entry.state === 'new' ? 'bg-blue-950 text-blue-300 border border-blue-800' :
-                  entry.state === 'accepted' ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' :
-                  entry.state === 'deferred' ? 'bg-amber-950 text-amber-300 border border-amber-800' : 'bg-slate-800 text-slate-400'
-                }">${escapeHTML(entry.state)}</span>
-              </div>
-              ${cleanTitle && entry.title && cleanTitle !== entry.title ? `<div class="text-[10px] text-slate-500 truncate" title="${escapeHTML(entry.title)}">${escapeHTML(entry.title)}</div>` : ''}
-              <div class="text-[11px] text-slate-400 flex items-center gap-2 flex-wrap">
-                ${institution ? `<span class="px-1.5 py-0.2 rounded bg-indigo-950/80 border border-indigo-800/80 text-indigo-300 text-[10px]">🏛️ ${escapeHTML(institution)}</span>` : ''}
-                ${creatorStr ? `<span>👤 ${escapeHTML(creatorStr)}</span>` : ''}
-                ${entry.year ? `<span>📅 ${entry.year}</span>` : ''}
-                <span class="font-mono text-slate-500">${escapeHTML(entry.libraryType)}:${escapeHTML(entry.libraryId)}#${escapeHTML(entry.itemKey)}</span>
-              </div>
-              ${entry.abstractNote ? `<p class="text-slate-400 text-[11px] line-clamp-2 leading-relaxed font-sans">${escapeHTML(entry.abstractNote)}</p>` : ''}
-              <div class="flex items-center gap-1.5 flex-wrap pt-1">
-                ${(entry.collectionKeys || []).map(k => `<span class="text-[9px] px-1.5 py-0.2 rounded bg-slate-950 border border-slate-800 text-slate-400">📁 ${escapeHTML(k)}</span>`).join('')}
-                ${(entry.tags || []).map(t => `<span class="text-[9px] px-1.5 py-0.2 rounded bg-indigo-950/60 border border-indigo-900/60 text-indigo-300">🏷️ ${escapeHTML(t)}</span>`).join('')}
-              </div>
-              ${aiSuggestionsHtml}
-            </div>
-            <div class="flex flex-col gap-1 shrink-0">
-              <button type="button" class="btn-entry-read px-2 py-1 bg-indigo-950/90 hover:bg-indigo-900 text-indigo-300 border border-indigo-800 rounded text-[11px] transition shadow-sm" title="立即在中心区域打开此研报 PDF">📖 阅读</button>
-              <button type="button" class="btn-entry-assign px-2 py-1 bg-indigo-600/80 hover:bg-indigo-600 text-white rounded text-[11px] transition shadow-sm" title="将该文献归类至指定主题">归类至主题</button>
-              ${entry.state === 'new' ? `
-                <button type="button" class="btn-entry-defer px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-[10px] transition">暂缓</button>
-                <button type="button" class="btn-entry-ignore px-2 py-1 bg-slate-900 hover:bg-slate-800 text-slate-500 hover:text-rose-300 rounded text-[10px] transition">忽略</button>
-              ` : `
-                <button type="button" class="btn-entry-reopen px-2 py-1 bg-blue-950 hover:bg-blue-900 text-blue-300 border border-blue-800 rounded text-[10px] transition" title="重新放回待处理；已归入的主题不会被移除">重新处理</button>
-              `}
-            </div>
-          `;
-
-          item.querySelector('.inbox-item-checkbox').onchange = (e) => {
-            if (e.target.checked) inboxSelectedIds.add(entry.id);
-            else inboxSelectedIds.delete(entry.id);
-            updateInboxSelectionUI();
-          };
-
-          item.querySelectorAll('.btn-quick-accept-ai').forEach(btn => {
-            btn.onclick = (e) => {
-              e.stopPropagation();
-              const wsId = btn.dataset.wsId;
-              const entryId = btn.dataset.entryId;
-              executeInboxBatchAction('accept', [wsId], [entryId]);
-            };
-          });
-
-          item.querySelector('.btn-inbox-title-read').onclick = () => openInboxEntryForReading(entry);
-          item.querySelector('.btn-entry-read').onclick = () => openInboxEntryForReading(entry);
-          item.querySelector('.btn-entry-assign').onclick = () => openBatchTopicsModal([entry.id]);
-          const deferButton = item.querySelector('.btn-entry-defer');
-          const ignoreButton = item.querySelector('.btn-entry-ignore');
-          const reopenButton = item.querySelector('.btn-entry-reopen');
-          if (deferButton) deferButton.onclick = () => executeInboxBatchAction('defer', [], [entry.id]);
-          if (ignoreButton) ignoreButton.onclick = () => executeInboxBatchAction('ignore', [], [entry.id]);
-          if (reopenButton) reopenButton.onclick = () => executeInboxBatchAction('reopen', [], [entry.id]);
-
-          container.appendChild(item);
-        }
-      }
-
-      if (inboxNextCursor) {
-        const loadMoreDiv = document.createElement('div');
-        loadMoreDiv.className = 'pt-2 pb-2 text-center';
-        const loadMoreBtn = document.createElement('button');
-        loadMoreBtn.type = 'button';
-        loadMoreBtn.className = 'px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-xs transition';
-        loadMoreBtn.textContent = '加载更多…';
-        loadMoreBtn.onclick = () => loadInboxEntries(true);
-        loadMoreDiv.appendChild(loadMoreBtn);
-        container.appendChild(loadMoreDiv);
-      }
-
-      updateInboxSelectionUI();
-    }
-
-    function updateInboxSelectionUI() {
-      const count = inboxSelectedIds.size;
-      document.getElementById('inbox-selected-count').textContent = String(count);
-      document.getElementById('btn-inbox-batch-assign').disabled = count === 0;
-      document.getElementById('btn-inbox-batch-defer').disabled = count === 0;
-      document.getElementById('btn-inbox-batch-ignore').disabled = count === 0;
-      const selectedEntries = inboxEntries.filter(entry => inboxSelectedIds.has(entry.id));
-      document.getElementById('btn-inbox-batch-reopen').disabled = !selectedEntries.some(entry => entry.state !== 'new');
-
-      const selectAllCheckbox = document.getElementById('checkbox-inbox-select-all');
-      if (selectAllCheckbox) {
-        selectAllCheckbox.checked = inboxEntries.length > 0 && inboxEntries.every(e => inboxSelectedIds.has(e.id));
-      }
-    }
-
-    function openInboxModal() {
-      document.getElementById('inbox-modal').classList.remove('hidden');
-      loadInboxEntries();
-    }
-
-    function closeInboxModal() {
-      document.getElementById('inbox-modal').classList.add('hidden');
-    }
-
-    async function scanAlteroInbox() {
-      if (inboxScanInFlight) return;
-      inboxScanInFlight = true;
-      const btn = document.getElementById('btn-inbox-scan-now');
-      const originalText = btn.innerHTML;
-      btn.innerHTML = '<span class="w-3.5 h-3.5 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin"></span><span>扫描中…</span>';
-      btn.disabled = true;
-
-      try {
-        const checkpointKey = `altcanvas.scanCheckpoint.${config.userId}`;
-        const lastCheckpoint = Number(localStorage.getItem(checkpointKey) || 0);
-        const body = lastCheckpoint > 0 ? { since: lastCheckpoint } : {};
-
-        const result = await canvasFetch('/inbox/scan', { method: 'POST', body });
-        if (result?.lastLibraryVersion && result.lastLibraryVersion > 0) {
-          localStorage.setItem(checkpointKey, String(result.lastLibraryVersion));
-        }
-
-        showToast(`增量扫描完成：发现 ${result?.scanned ?? 0} 篇文献，新增/更新 ${result?.upsertedCount ?? 0} 篇`, 'success');
-        await loadInboxEntries();
-      } catch (err) {
-        reportApplicationError('inbox.scan', err);
-        showToast(`扫描 Altero 失败: ${errorMessage(err)}`, 'error');
-      } finally {
-        inboxScanInFlight = false;
-        btn.innerHTML = originalText;
-        btn.disabled = false;
-      }
-    }
-
-    async function executeInboxBatchAction(action, targetWorkspaceIds = [], explicitEntryIds = null) {
-      const requestedEntryIds = explicitEntryIds || [...inboxSelectedIds];
-      const entryIds = action === 'reopen'
-        ? requestedEntryIds.filter(id => inboxEntries.some(entry => entry.id === id && entry.state !== 'new'))
-        : requestedEntryIds;
-      if (!entryIds.length) return;
-
-      try {
-        const result = await canvasFetch('/inbox/batch-action', {
-          method: 'POST',
-          body: { entryIds, action, targetWorkspaceIds }
-        });
-        const actionLabels = { accept: '归类至主题', defer: '暂缓', ignore: '忽略', reopen: '重新放回待处理' };
-        showToast(`已成功${actionLabels[action] || '处理'} ${result?.processed ?? entryIds.length} 篇文献`, 'success');
-        inboxSelectedIds.clear();
-        await loadInboxEntries();
-        if (action === 'accept') {
-          loadTopicDocuments();
-        }
-      } catch (err) {
-        reportApplicationError('inbox.batch-action', err);
-        showToast(`批量操作失败: ${errorMessage(err)}`, 'error');
-      }
-    }
-
-    // --- Batch Topics Modal ---
-    let pendingBatchAssignEntryIds = [];
-
-    function openBatchTopicsModal(entryIds) {
-      pendingBatchAssignEntryIds = entryIds;
-      const modal = document.getElementById('batch-topics-modal');
-      document.getElementById('batch-assign-doc-count').textContent = String(entryIds.length);
-      modal.classList.remove('hidden');
-      renderBatchTopicsList();
-    }
-
-    function closeBatchTopicsModal() {
-      document.getElementById('batch-topics-modal').classList.add('hidden');
-      pendingBatchAssignEntryIds = [];
-    }
-
-    function renderBatchTopicsList() {
-      const container = document.getElementById('batch-topics-list');
-      container.replaceChildren();
-
-      if (!userWorkspaces.length) {
-        container.innerHTML = '<div class="text-slate-500 py-4 text-center text-xs">暂无可用的研究主题</div>';
-        return;
-      }
-
-      for (const ws of userWorkspaces) {
-        const label = document.createElement('label');
-        label.className = 'flex items-center gap-2.5 p-2 rounded bg-slate-900 border border-slate-800 hover:border-indigo-600 cursor-pointer text-xs transition';
-        const isCurrent = canvasWorkspace?.id === ws.id;
-        label.innerHTML = `
-          <input type="checkbox" value="${ws.id}" class="batch-topic-checkbox rounded border-slate-700 bg-slate-950 text-indigo-600 focus:ring-0" ${isCurrent ? 'checked' : ''}>
-          <div class="min-w-0 flex-1">
-            <div class="font-medium text-slate-200">${escapeHTML(ws.name)}</div>
-            ${ws.description ? `<div class="text-[10px] text-slate-500 truncate">${escapeHTML(ws.description)}</div>` : ''}
-          </div>
-        `;
-        container.appendChild(label);
-      }
-    }
-
-    async function quickCreateTopicInBatch() {
-      const input = document.getElementById('input-new-topic-quick');
-      const name = input.value.trim();
-      if (!name) return showToast('请输入主题名称', 'error');
-
-      try {
-        const created = await canvasFetch('/workspaces', { method: 'POST', body: { name } });
-        userWorkspaces.push(created);
-        input.value = '';
-        renderBatchTopicsList();
-        renderTopicWorkspaceSelector();
-        showToast(`已创建主题「${name}」`, 'success');
-      } catch (err) {
-        reportApplicationError('topics.quick-create', err);
-        showToast(`创建主题失败: ${errorMessage(err)}`, 'error');
-      }
-    }
-
-    async function confirmBatchTopicAssignment() {
-      const selectedTopicIds = [...document.querySelectorAll('.batch-topic-checkbox:checked')].map(cb => cb.value);
-      if (!selectedTopicIds.length) return showToast('请至少选择一个目标研究主题', 'error');
-
-      await executeInboxBatchAction('accept', selectedTopicIds, pendingBatchAssignEntryIds);
-      closeBatchTopicsModal();
-    }
 
     // --- Panes Maximize Toggle ---
     function toggleCanvasMaximize() {
@@ -6639,6 +6419,7 @@
 
       modal.classList.remove('hidden');
       queryInput.focus();
+      void initQuickImportDirectorySection();
     }
 
     function closeQuickImportModal() {
@@ -6764,6 +6545,114 @@
         showToast(`导入失败: ${errorMessage(err)}`, 'error');
         btnInboxOnly.disabled = false;
         btnTopic.disabled = false;
+      }
+    }
+
+    // --- M4: 快速导入 → 归档到文库目录（原始文件） ---
+    async function initQuickImportDirectorySection() {
+      const section = document.getElementById('quick-import-directory-section');
+      if (!section) return;
+      section.classList.remove('hidden');
+      try {
+        await fetchLibraryRoots();
+        renderSourceFilesRootSelect();
+      } catch {}
+      const topicSelect = document.getElementById('quick-import-dir-topics');
+      if (topicSelect) {
+        const options = (userWorkspaces || [])
+          .map(w => `<option value="${escapeHTML(w.id)}">${escapeHTML(w.name || w.id)}</option>`).join('');
+        topicSelect.innerHTML = options || '<option value="">（暂无主题）</option>';
+      }
+      const btnDirectory = document.getElementById('btn-quick-import-directory');
+      if (btnDirectory) btnDirectory.disabled = !currentResolvedImport;
+    }
+
+    async function executeQuickDirectoryImport(confirmFuzzy = false, overrideFilename = null) {
+      if (!currentResolvedImport) return;
+      const rootId = document.getElementById('quick-import-target-root')?.value;
+      if (!rootId) {
+        showToast('未配置文库根目录（服务端 NATIVE_LIBRARY_ROOTS）', 'error');
+        return;
+      }
+      const targetDir = (document.getElementById('quick-import-target-dir')?.value || '').trim();
+      const filenameInput = (overrideFilename || document.getElementById('quick-import-filename')?.value || '').trim();
+      const topicIds = Array.from(document.getElementById('quick-import-dir-topics')?.selectedOptions || [])
+        .map(opt => opt.value).filter(Boolean);
+      const btnDirectory = document.getElementById('btn-quick-import-directory');
+      if (btnDirectory) { btnDirectory.disabled = true; btnDirectory.textContent = '⏳ 解析并归档中...'; }
+
+      try {
+        const res = await fetch('/canvas/native/source-files/import', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            resolved: currentResolvedImport,
+            rootId,
+            targetDir,
+            filename: filenameInput || undefined,
+            topicIds,
+            confirmFuzzy: confirmFuzzy || undefined
+          })
+        });
+        const result = await res.json().catch(() => null);
+
+        if (res.status === 409 && result.error?.code === 'duplicate_confirmation_required') {
+          const candidates = result.data?.candidates || [];
+          const detail = candidates.slice(0, 3).map(c => `《${c.title || c.documentId}》`).join('、');
+          if (window.confirm(`检测到高度相似文献：${detail}。是否确认导入为新文献？`)) {
+            resetQuickDirectoryButton();
+            return executeQuickDirectoryImport(true, overrideFilename);
+          }
+          showToast('已取消导入', 'info');
+          resetQuickDirectoryButton();
+          return;
+        }
+        if (res.status === 409 && result.error?.code === 'filename_conflict') {
+          resetQuickDirectoryButton();
+          const suggested = filenameInput || `${(currentResolvedImport?.title || 'document').slice(0, 60).replace(/[\\/:*?"<>|]/g, ' ').trim() || 'document'}.pdf`;
+          const retry = await promptM4FileName({
+            title: '目标目录已存在同名文件',
+            hint: '目标目录已存在同名但内容不同的文件，系统不会覆盖或自动生成“(2)”。请输入新的原始文件名后重试。',
+            presetValue: suggested,
+            confirmText: '重试导入',
+            version: null,
+            confirmAction: async (payload) => {
+              await executeQuickDirectoryImport(confirmFuzzy, payload.filename);
+              return { ok: true };
+            }
+          });
+          if (retry) closeQuickImportModal();
+          return;
+        }
+        if (res.status === 409 && result.error?.code === 'duplicate_content') {
+          const existing = result.data?.document;
+          showToast(existing
+            ? `相同 SHA-256 的内容已在文库中：《${existing.title || '未命名'}》，未重复加入`
+            : '相同 SHA-256 的内容已在文库中，未重复加入', 'error');
+          resetQuickDirectoryButton();
+          return;
+        }
+        if (!res.ok) {
+          throw new Error(result?.error?.message || `HTTP ${res.status}`);
+        }
+
+        const outcome = result.data?.outcome;
+        showToast(outcome === 'reused'
+          ? '已复用文库中的既有文献，并将 PDF 归档到目标目录'
+          : '已解析并归档到文库目录！', 'success');
+        closeQuickImportModal();
+        loadCollectionsAndLibrary();
+      } catch (err) {
+        showToast(`目录归档失败: ${errorMessage(err)}`, 'error');
+        resetQuickDirectoryButton();
+      }
+    }
+
+    function resetQuickDirectoryButton() {
+      const btnDirectory = document.getElementById('btn-quick-import-directory');
+      if (btnDirectory) {
+        btnDirectory.disabled = false;
+        btnDirectory.textContent = '📥 解析并归档到目录';
       }
     }
 
@@ -6970,8 +6859,8 @@
         resolveQuickImport();
       }
     });
-    document.getElementById('btn-quick-import-inbox-only')?.addEventListener('click', () => executeQuickImport(null));
     document.getElementById('btn-quick-import-topic')?.addEventListener('click', () => executeQuickImport(currentTopicWorkspaceId));
+    document.getElementById('btn-quick-import-directory')?.addEventListener('click', () => executeQuickDirectoryImport());
     document.getElementById('quick-import-modal')?.addEventListener('click', event => {
       if (event.target === event.currentTarget) closeQuickImportModal();
     });
@@ -7039,11 +6928,6 @@
         } else if (!document.getElementById('cross-report-modal').classList.contains('hidden')) {
           closeCrossReportRelationsModal();
           document.getElementById('btn-canvas-cross-report')?.focus();
-        } else if (!document.getElementById('inbox-modal').classList.contains('hidden')) {
-          closeInboxModal();
-          document.getElementById('btn-open-inbox')?.focus();
-        } else if (!document.getElementById('batch-topics-modal').classList.contains('hidden')) {
-          closeBatchTopicsModal();
         } else if (!document.getElementById('topic-settings-modal').classList.contains('hidden')) {
           closeTopicSettingsModal();
           document.getElementById('btn-open-topic-settings')?.focus();
