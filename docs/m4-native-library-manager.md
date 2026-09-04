@@ -132,7 +132,7 @@ M4 不提供覆盖不同内容文件的功能。
   -> 刷新原始文件和文库
 ```
 
-导入弹窗增加：目标根目录、目标子目录、原始文件名、文库文件名、主题多选。
+导入弹窗默认落点固定为当前启用的 Native 根目录下的 `网页导入` 子目录（前端明确展示保存位置），支持展开高级选项自定义目标子目录与原始文件名；主题多选直接写入 topic_documents。
 
 ## 5. Schema v13
 
@@ -173,11 +173,10 @@ missing_at, trashed_at, deleted_at
 
 增加 `source_file_id` 和 `storage_kind = managed_blob | source_file`。
 
-- 旧数据继续使用 managed_blob；
-- 新扫描/导入到真实目录的文件使用 source_file；
-- Reader、Range、全文分析统一通过附件读取抽象访问内容；
-- 前端不感知存储差异；
-- M4 不强制搬迁旧 Blob。
+- 所有成功取得 PDF 的网页导入（DOI/arXiv/URL/BibTeX/RIS/TS）统一默认归档到 `研究文库/网页导入/`，使用 source_file 存储并在“原始文件”中可见；
+- 无可下载 PDF 的导入仅创建 Native 文库文档，标记为“无 PDF”，不创建虚假的 source_file，不出现在原始文件视图中；
+- 既有 Blob-only 网页导入提供显式、幂等的一次性归档迁移（`server/blob-migration.mjs`），迁移后转为 source_file；本地上传的非网页 Blob 继续保持 managed_blob 兼容；
+- Reader、Range、批注、全文分析统一通过附件读取抽象访问内容，前端不感知存储差异。
 
 ### 5.4 `file_operations`
 

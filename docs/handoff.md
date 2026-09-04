@@ -1566,3 +1566,111 @@
 验证：`npm test` 10 套全部通过，`git diff --check` 干净，服务重启正常。
 M4 维持 CONDITIONAL PASS——按审计结论，本项补完后进入最后人工 UI 与
 日志验收（步骤见 M4 实施会话节）。
+
+---
+
+## 2026-09-04 会话（M4 终审整改：UI 回归根除 / 网页导入统一默认归档 / Blob-only 迁移 / 测试契约修正）
+
+### 一、两个 UI 回归修复（P1-1 与 P1-2）
+
+#### 1. P1-1：收件箱退役后 `initCanvasWorkspace` 残留 `loadInboxEntries`
+- **根因**：M4 退役收件箱后，`index.html` 中的 `initCanvasWorkspace()` 仍保留 `await loadInboxEntries()`，画板初始化直接报 `ReferenceError: loadInboxEntries is not defined`，导致登录后画板无法加载。
+- **修复**：
+  - 彻底删除 `initCanvasWorkspace()` 中的 `loadInboxEntries()` 调用；
+  - 清理 `index.html` 中全部残留的 `loadInboxEntries` 调用（包括快速导入成功后的刷新、Native PDF 上传成功后的刷新）；
+  - 不再重新声明空的兼容函数，彻底根除死代码；
+  - 登录初始化链严格保持：`loadAiConfig` → `initCanvasWorkspace` → `loadCollectionsAndLibrary` → `updateAuthUI`。
+
+#### 2. P1-2：快速导入仍操作已删除的 `btn-quick-import-inbox-only`
+- **根因**：收件箱退役时已从 DOM 中移除了 `btn-quick-import-inbox-only` 按钮，但 `openQuickImportModal()`、`resolveQuickImport()` 与 `executeQuickImport()` 仍读取该元素并设置 `.disabled`，弹窗打开即报 `TypeError: Cannot set properties of null (setting 'disabled')`。
+- **修复**：
+  - 从打开、解析、执行和异常恢复的全部路径中彻底清除 `btnInboxOnly`；
+  - 按钮语义严格收敛为：
+    - 未解析时：“导入并加入当前主题”与“解析并归档到目录”**全部保持禁用**；
+    - 解析成功后：当前有主题时启用“导入并加入当前主题”；存在可用根目录时启用“解析并归档到目录”；
+    - 解析失败后：两者均保持禁用；
+    - 执行期间禁用对应按钮，完成后恢复。
+
+### 二、统一网页导入 PDF 与“原始文件”模型
+
+#### 1. 产品规则与默认落点
+- 所有成功取得 PDF 的网页导入（DOI / arXiv / URL / BibTeX / RIS / Translation Server `pdfUrl`）**统一默认归档到**：
+  ```text
+  研究文库/
+  └── 网页导入/
+  ```
+- 成功获得 PDF 的导入必定产生 `source_files` 记录，并在“原始文件”视图中可见，彻底消除了“Blob-only 网页导入”与“目录归档”两套相互矛盾的用户生命周期；
+- 无可下载 PDF 的导入走 metadata-only 分支：创建 Native 文库文档、标记为“无 PDF”、**不创建虚假的 `source_file`**、不出现在原始文件列表中、允许稍后补充 PDF；
+- 部署无可用根目录且取得 PDF 时：明确拒绝并返回 422 `library_root_required`，绝不回退为 Blob-only 静默落盘。
+
+#### 2. 文件名派生与冲突规则（严格执行方案 3.3 优先级）
+- 优先级：
+  1. 下载器返回的受信任 HTTP `Content-Disposition` 文件名；
+  2. PDF URL 路径本身的有效文件名（以 `.pdf` 结尾）；
+  3. 文库标题清洗后的安全文件名；
+  4. 确定性回退名（`import-<sha16>.pdf`）。
+- 冲突：
+  - 相同 SHA-256：直接返回 409 `duplicate_content`，不复制文件、不建重复文档；
+  - 不同 SHA-256 同名：返回 409 `filename_conflict`，禁止覆盖、禁止自动追加 `(2)`，前端要求用户修改原始文件名重试；
+  - 前端支持展开高级选项自定义目标子目录与文件名；弹窗顶部明确展示默认保存位置（`保存位置：研究文库 / 网页导入`）。
+
+#### 3. 统一执行管线
+- 复用单套 M2 `executeNativeImportItem` 执行器（未复制第二套）：
+  - `/canvas/imports/native` 单篇与批量端点统一构造 `fileTarget`（默认目标子目录为 `网页导入`）；
+  - `fileTarget` 增加 metadata-only 分支（无 PDF 时创建纯元数据文档，多主题关联保真）；
+  - 退役旧版收件箱导入端点 `POST /canvas/imports`（返回 410）及其 retry 接口，启动恢复器将遗留的 `import_document` 任务直接标记 `failed`（`errorCode: 'feature_retired'`），防止执行写回已退役的 inbox_entries 表。
+
+### 三、已有 Blob-only 网页导入 PDF 迁移
+
+- 新建 `server/blob-migration.mjs` 模块与 `POST /canvas/native/migrations/blob-only-web-imports` 端点：
+  - 仅处理确实来自网页导入（记录了 `source_url` 或拥有 `external_refs`）且当前为 `managed_blob` 的附件；
+  - 默认归档到各根目录的 `网页导入` 目录；
+  - 严格遵守**不同内容文件名冲突绝不自动改名**的规则（直接记为 `conflict` 并保留原 Blob 可读，供用户手动解决）；
+  - 相同内容且未被认领的磁盘文件直接领养为该文档的 source_file；
+  - 独占式暂存复制（`copyFileSync` + `fsync` + `linkSync` + `unlinkSync`），DB 提交前绝不删除原 Blob（保持原 Blob 始终可读，清理全交由既有的 `recoverBlobConsistency` 引用计数回收）；
+  - DB 失败自动补偿删除本次新建的目录文件（双向无孤儿）；
+  - 迁移幂等，重复执行立即返回 `scanned: 0, migrated: 0`；
+  - 前端“原始文件”面板检测到存在待处理项时，在顶部渲染清晰的警示条与“一键归档”操作；
+  - 服务端启动时输出待归档统计日志：
+    ```text
+    [dev-server] 存在 N 个待归档的 Blob-only 网页导入 PDF（登录后在“原始文件”面板执行归档）
+    ```
+
+### 四、自动化测试契约修正（5.1–5.3）
+
+1. **5.1 登录初始化行为测试** (`test/canvas-ui.test.mjs`)：
+   - 运行环境**不定义 `loadInboxEntries`**；
+   - 直接通过生产 `initCanvasWorkspace` 函数断言无 `ReferenceError`；
+   - 断言画板、主题正常初始化；
+   - 断言收到的请求零 `/inbox`、零 `/api/`、零 Altero / OIDC / OAuth；
+   - 静态断言 `initCanvasWorkspace` 源码与整份 `index.html` 零 `loadInboxEntries`。
+2. **5.2 快速导入严格 DOM 契约测试** (`test/canvas-ui.test.mjs`)：
+   - 废除“对任意 ID 均返回非空对象”的宽松 mock，引入严格白名单 mock（未声明 ID 坚决返回 `null`）；
+   - `openQuickImportModal` 断言在严格 DOM 下不抛异常，且 `btn-quick-import-inbox-only` 为 null 时正常工作；
+   - `resolveQuickImport` 断言解析成功后按状态正确启用按钮、解析失败全部保持禁用；
+   - `executeQuickImport` 断言在严格 DOM 下正常工作，请求体零 inbox 字段，正确处理 409 `duplicate_content` 与确认弹窗；
+   - `executeQuickDirectoryImport` 断言空子目录发送 `undefined`（服务端默认 `网页导入`），正确处理 409 `filename_conflict` 唤起改名对话框。
+3. **5.3 网页导入默认归档与迁移测试** (`test/native-m4.test.mjs`)：
+   - 测试组 24：DOI / URL 带 PDF 默认落入 `网页导入/`，`source_files` 与附件可见，通过原文件 API 可列举与通过统一文件接口阅读；相同 SHA 返回 409 `duplicate_content` 零第二份落盘；不同 SHA 同名返回 409 `filename_conflict` 零写入；无 PDF 时创建纯元数据文档并标记 `hasPdf: false`；无根目录导入 PDF 时返回 422 `library_root_required`。
+   - 测试组 25：真实构造 2 篇 Blob-only 网页导入（`source_url` 与 `external_refs`）以及 1 篇非网页的本地上传 Blob；断言仅审计出 2 篇；运行迁移后附件切换为 `source_file`，原文件在 `网页导入/` 下可见，Range 读取正常；重复执行幂等（`scanned: 0`）；同名异内容记录为 `conflict` 且原 Blob 保持可读；DB 失败补偿删除已落盘文件。
+
+### 五、测试与服务验证
+
+- `npm test` 10 套全部通过（exit 0）：
+  1. `test/bff.test.mjs` - PASS
+  2. `test/bff-flow.test.mjs` - PASS
+  3. `test/ai-provider.test.mjs` - PASS
+  4. `test/canvas.test.mjs` - PASS
+  5. `test/canvas-ui.test.mjs` - PASS
+  6. `test/dev-logger.test.mjs` - PASS
+  7. `test/native-m1.test.mjs` - PASS
+  8. `test/translation-server.test.mjs` - PASS
+  9. `test/native-m4.test.mjs` - PASS
+  10. `test/deploy-config.test.mjs` - PASS
+- `git diff --check`：100% 干净，零空白行违规；
+- `systemctl --user restart altcanvas.service`：服务 active (running)，单一 worker，端口 8088 正常监听，`/` 返回 200，`/auth/session` 返回 200。
+
+### 六、当前状态
+
+- **M4 状态**：保持 **`M4 CONDITIONAL PASS`**，不自行宣布 PASS；
+- 待用户按终审 Prompt 第七节进行最短人工实机验收，由 Agent 复查日志确认无异常后最终关闭。
