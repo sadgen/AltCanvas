@@ -332,6 +332,19 @@ server.listen(PORT, '0.0.0.0', () => {
       }
     }
     if (canvasStore) {
+      try {
+        const pendingBlobOnly = canvasStore.db.prepare(`
+          SELECT COUNT(*) AS c FROM attachments a
+          JOIN documents d ON d.id = a.document_id AND d.deleted_at IS NULL
+          WHERE a.deleted_at IS NULL AND a.storage_kind = 'managed_blob'
+            AND (a.source_url IS NOT NULL OR EXISTS (SELECT 1 FROM external_refs er WHERE er.document_id = d.id))
+        `).get().c;
+        if (pendingBlobOnly > 0) {
+          console.log(`[dev-server] 存在 ${pendingBlobOnly} 个待归档的 Blob-only 网页导入 PDF（登录后在“原始文件”面板执行归档）`);
+        }
+      } catch {}
+    }
+    if (canvasStore) {
       import('../server/library-scanner.mjs').then(async ({ recoverInterruptedFileOperations }) => {
         const fileOpSummary = await recoverInterruptedFileOperations(canvasStore);
         if (fileOpSummary && (fileOpSummary.failed > 0 || fileOpSummary.scansReset > 0 || fileOpSummary.completed > 0 || fileOpSummary.rolledBack > 0)) {

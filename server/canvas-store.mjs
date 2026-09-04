@@ -3878,6 +3878,13 @@ export class CanvasStore {
     });
   }
 
+  getDocumentTitleById(actorKey, documentId) {
+    const row = this.db.prepare(
+      'SELECT title FROM documents WHERE id = ? AND owner_key = ? AND deleted_at IS NULL'
+    ).get(documentId, actorKey);
+    return row?.title || null;
+  }
+
   updateDocument(actorKey, documentId, expectedVersion, updates = {}) {
     const current = this.requireDocument(actorKey, documentId);
     if (expectedVersion !== undefined && expectedVersion !== null && current.version !== expectedVersion) {
@@ -5287,7 +5294,9 @@ export class CanvasStore {
     return { total, documents: rows.map(row => {
       const doc = documentRow(row);
       doc.topics = this.db.prepare(`
-        SELECT td.id AS topic_document_id, td.version AS topic_version, w.id AS workspace_id, w.name AS workspace_name
+        SELECT td.id AS topic_document_id, td.version AS topic_version,
+               td.attachment_key, td.attachment_version,
+               w.id AS workspace_id, w.name AS workspace_name
         FROM topic_documents td JOIN workspaces w ON w.id = td.workspace_id
         WHERE td.library_type = 'native' AND td.item_key = ? AND td.deleted_at IS NULL AND w.deleted_at IS NULL
         ORDER BY w.name ASC
@@ -5398,6 +5407,44 @@ export class CanvasStore {
       });
       return { sourceFile: updated, attachmentVersion: newAttachmentVersion, demoted: false };
     });
+  }
+
+  // --- M4 blob-only web-import migration ---
+  // Web imports (DOI/arXiv/URL/BibTeX/RIS/TS) that ran before archiving was
+  // mandatory left PDF attachments bound to the managed blob store only.
+  // This audit finds them: managed-blob PDF attachments whose document came
+  // from a web import (external_refs exist or the attachment recorded a
+  // source_url) and that are still blob-only.
+  listBlobOnlyWebImportAttachments(actorKey, { limit = 500 } = {}) {
+    return this.db.prepare(`
+      SELECT a.id AS attachment_id, a.document_id, a.blob_hash, a.original_filename,
+             a.source_url, a.size_bytes, d.title AS document_title
+      FROM attachments a
+      JOIN documents d ON d.id = a.document_id AND d.deleted_at IS NULL
+      WHERE d.owner_key = ? AND a.deleted_at IS NULL
+        AND a.storage_kind = 'managed_blob'
+        AND (
+          a.source_url IS NOT NULL
+          OR EXISTS (SELECT 1 FROM external_refs er WHERE er.document_id = d.id)
+        )
+      ORDER BY a.created_at ASC
+      LIMIT ?
+    `).all(actorKey, Math.max(1, Math.min(5000, limit)));
+  }
+
+  countBlobOnlyWebImports(actorKey) {
+    const row = this.db.prepare(`
+      SELECT COUNT(*) AS c
+      FROM attachments a
+      JOIN documents d ON d.id = a.document_id AND d.deleted_at IS NULL
+      WHERE d.owner_key = ? AND a.deleted_at IS NULL
+        AND a.storage_kind = 'managed_blob'
+        AND (
+          a.source_url IS NOT NULL
+          OR EXISTS (SELECT 1 FROM external_refs er WHERE er.document_id = d.id)
+        )
+    `).get(actorKey);
+    return row?.c || 0;
   }
 
   // M4 import landing: identical identity/dedupe chain to importNativeDocument
@@ -5543,7 +5590,9 @@ export class CanvasStore {
         document: this.getDocument(actorKey, document.id),
         sourceFile: this.getSourceFile(actorKey, sourceFile.id),
         attachment,
-        topicDocuments
+        topicDocuments,
+        // Backwards-compatible alias for single-topic callers.
+        topicDocument: topicDocuments[0] || null
       };
     });
   }

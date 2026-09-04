@@ -2651,68 +2651,41 @@ try {
   assert.match(ssrfHttpRes.payload.error.message, /Forbidden address/);
 
   // HTTP API: POST /canvas/imports (Durable import execution)
+  // [M4 final] The legacy inbox-era /canvas/imports endpoint and its job
+  // runner are retired (they wrote the retired inbox_entries table).
   const importExecRes = await call(handler, '/canvas/imports', {
     method: 'POST', cookie,
-    body: {
-      resolved: resolvedDoi,
-      targetWorkspaceId: apiTopic.id
-    }
+    body: { resolved: resolvedDoi, targetWorkspaceId: apiTopic.id }
   });
-  assert.equal(importExecRes.statusCode, 201);
-  assert.ok(importExecRes.payload.data.job);
-  assert.equal(importExecRes.payload.data.job.jobType, 'import_document');
-  assert.equal(importExecRes.payload.data.job.state, 'completed');
-  assert.ok(importExecRes.payload.data.entry);
-  assert.equal(importExecRes.payload.data.entry.detectedFrom, 'import');
-  assert.ok(importExecRes.payload.data.topicDocument);
-  assert.equal(importExecRes.payload.data.topicDocument.status, 'accepted');
+  assert.equal(importExecRes.statusCode, 410);
+  assert.equal(importExecRes.payload.error.code, 'feature_retired');
 
-  const createdJobId = importExecRes.payload.data.job.id;
-  const getJobRes = await call(handler, `/canvas/imports/${createdJobId}`, { cookie });
-  assert.equal(getJobRes.statusCode, 200);
-  assert.equal(getJobRes.payload.data.id, createdJobId);
-
-  // Job retry on failed job test with payload execution
   const failedJobWithPayload = store.enqueueJob(canvasActorKey('https://issuer.example', 'api-subject'), {
     jobType: 'import_document',
     resourceType: 'inbox_entry',
     resourceId: 'pending',
-    payload: {
-      resolved: {
-        sourceType: 'doi',
-        title: 'Retried Paper Title',
-        creators: [{ name: 'Test Author' }],
-        year: 2024,
-        abstractNote: 'Retried abstract',
-        doi: '10.1000/retry-test'
-      },
-      targetWorkspaceId: apiTopic.id
-    }
+    payload: { resolved: resolvedDoi, targetWorkspaceId: apiTopic.id }
   });
-  store.updateJobState(failedJobWithPayload.id, { state: 'failed', errorCode: 'network_timeout' });
-
+  store.updateJobState(failedJobWithPayload.id, { state: 'queued' });
+  // Startup recovery fails retired inbox-era jobs instead of executing them.
   const retryJobRes = await call(handler, `/canvas/imports/${failedJobWithPayload.id}/retry`, { method: 'POST', cookie });
-  assert.equal(retryJobRes.statusCode, 200);
-  assert.equal(retryJobRes.payload.data.state, 'queued');
-  assert.equal(retryJobRes.payload.data.attempts, 1);
+  assert.equal(retryJobRes.statusCode, 410);
+  assert.equal(retryJobRes.payload.error.code, 'feature_retired');
+  const queuedRetiredJob = store.getJob(canvasActorKey('https://issuer.example', 'api-subject'), failedJobWithPayload.id);
+  assert.equal(queuedRetiredJob.state, 'queued', 'retry endpoint must not resurrect retired jobs');
 
-  // Wait brief tick for async retry runner
-  await new Promise(resolve => setTimeout(resolve, 50));
-  const completedRetriedJob = store.getJob(canvasActorKey('https://issuer.example', 'api-subject'), failedJobWithPayload.id);
-  assert.equal(completedRetriedJob.state, 'completed');
-  assert.ok(completedRetriedJob.resultSummary?.entryId);
-
-  // Verify DOI persistence in inbox entry
-  const retriedInboxEntry = store.getInboxEntry(canvasActorKey('https://issuer.example', 'api-subject'), completedRetriedJob.resultSummary.entryId);
-  assert.equal(retriedInboxEntry.doi, '10.1000/retry-test', 'Inbox entry must persist DOI column');
-
-  // Verify DOI duplicate candidate search
+  // Verify DOI duplicate candidate search — [M4 final] against a native
+  // document carrying the DOI (the inbox is retired).
+  store.createDocument(canvasActorKey('https://issuer.example', 'api-subject'), {
+    title: 'Retried Paper Title', doi: '10.1000/retry-test', year: 2024
+  });
   const doiDupCandidates = findDuplicateCandidates(store, canvasActorKey('https://issuer.example', 'api-subject'), {
     title: 'Different Title',
     doi: '10.1000/retry-test'
   });
   assert.ok(doiDupCandidates.length > 0, 'findDuplicateCandidates must match by persisted DOI column');
   assert.equal(doiDupCandidates[0].doi, '10.1000/retry-test');
+  assert.equal(doiDupCandidates[0].targetType, 'document');
 
   // Verify DOI in document_metas
   const metaWithDoi = store.saveDocumentMeta(canvasActorKey('https://issuer.example', 'api-subject'), {
@@ -2746,15 +2719,16 @@ try {
   });
   store.updateJobState(orphanJob.id, { state: 'running' }); // left in running by process crash
 
-  // Trigger cold startup recovery
+  // Trigger cold startup recovery — [M4 final] retired inbox-era jobs are
+  // FAILED at startup, never executed (they would write the retired table).
   recoverQueuedAndRunningJobs(store);
   await new Promise(resolve => setTimeout(resolve, 60));
 
   const recoveredJob = store.getJob(canvasActorKey('https://issuer.example', 'api-subject'), orphanJob.id);
-  assert.equal(recoveredJob.state, 'completed', 'Cold-started job recovery must finish successfully');
-  const recoveredEntry = store.getInboxEntry(canvasActorKey('https://issuer.example', 'api-subject'), recoveredJob.resultSummary.entryId);
-  assert.equal(recoveredEntry.libraryId, '42', 'Recovered import entry must be written to the authentic user libraryId, not 0');
-  assert.equal(recoveredEntry.doi, '10.9999/crash-recovery-test');
+  assert.equal(recoveredJob.state, 'failed', 'Retired inbox-era jobs must fail at startup, never execute');
+  assert.equal(recoveredJob.errorCode, 'feature_retired');
+  assert.equal(store.getInboxEntry(canvasActorKey('https://issuer.example', 'api-subject'), 'IMP_ANY'), null,
+    'no inbox entry may be created by the retired job path');
 
   // --- Edge & Knowledge Relations extended types: extends, same_method, context_differs ---
   const activeKUs = store.listTopicKnowledgeUnits(canvasActorKey('https://issuer.example', 'api-subject'), apiTopic.id);
@@ -2905,6 +2879,13 @@ try {
   assert.equal(nativeHttpImportRes.payload.data.document.doi, '10.7777/http-native-import');
   assert.equal(nativeHttpImportRes.payload.data.inboxEntry ?? null, null, '[M4] inbox retired');
 
+  // [M4 final] Web imports archive obtained PDFs into a configured library
+  // root (default 网页导入). Configure one for the M2 actor.
+  const [m2LibraryRoot] = store.ensureLibraryRootsFromConfig(m2Actor, [
+    { absolutePath: path.join(tempDir, 'm2-library-root'), displayName: 'M2 研究文库' }
+  ]);
+  fs.mkdirSync(path.join(tempDir, 'm2-library-root'), { recursive: true, mode: 0o700 });
+
   // 7b. HTTP API: POST /canvas/imports/native with real PDF download and SHA-256 attachment creation
   const mockPdfServer = async (url) => {
     return {
@@ -2924,13 +2905,21 @@ try {
       targetWorkspaceId: apiTopic.id
     }
   });
-  assert.equal(pdfDownloadHttpRes.statusCode, 201);
+  assert.equal(pdfDownloadHttpRes.statusCode, 201, pdfDownloadHttpRes.text);
   assert.ok(pdfDownloadHttpRes.payload.data.document);
   assert.ok(pdfDownloadHttpRes.payload.data.attachment, 'Attachment must be created from safe PDF download');
-  assert.ok(pdfDownloadHttpRes.payload.data.attachment.blobHash, 'Blob hash must be computed and linked');
+  // [M4 final] The PDF is archived into the library root, not left blob-only.
+  assert.equal(pdfDownloadHttpRes.payload.data.attachment.storageKind, 'source_file');
+  assert.equal(pdfDownloadHttpRes.payload.data.attachment.blobHash ?? null, null);
+  assert.ok(pdfDownloadHttpRes.payload.data.sourceFile, 'source_files row must exist');
+  assert.equal(pdfDownloadHttpRes.payload.data.sourceFile.relativePath.startsWith('网页导入/'), true,
+    'web import PDFs land in the 网页导入 directory by default');
+  assert.equal(
+    fs.existsSync(path.join(tempDir, 'm2-library-root', pdfDownloadHttpRes.payload.data.sourceFile.relativePath)),
+    true, 'the archived PDF must exist on disk inside the library root');
 
   // Verify second import of exact same PDF via SHA-256 detects duplicate / reuses
-  const pdfSha256 = pdfDownloadHttpRes.payload.data.attachment.blobHash;
+  const pdfSha256 = pdfDownloadHttpRes.payload.data.sourceFile.sha256;
   const samePdfReusedRes = await call(handler, '/canvas/imports/native', {
     method: 'POST', cookie,
     body: {
@@ -2939,9 +2928,11 @@ try {
       pdfUrl: 'https://arxiv.org/pdf/2501.99999.pdf'
     }
   });
-  assert.equal(samePdfReusedRes.statusCode, 200);
-  assert.equal(samePdfReusedRes.payload.data.outcome, 'reused');
+  // [M4 final] same SHA-256 web import -> duplicate_content, no second file.
+  assert.equal(samePdfReusedRes.statusCode, 409);
+  assert.equal(samePdfReusedRes.payload.error.code, 'duplicate_content');
   assert.equal(samePdfReusedRes.payload.data.match.strategy, 'sha256');
+  assert.equal(samePdfReusedRes.payload.data.document.id, pdfDownloadHttpRes.payload.data.document.id);
 
   // 7c. HTTP API: explicit body.pdfUrl download failure must FAIL the request (non-silent)
   const explicitFailHandler = createCanvasHandler(store, {
@@ -3108,24 +3099,39 @@ try {
     assert.equal(batchPdfRes.payload.data.job.state, 'completed');
     assert.equal(batchPdfRes.payload.data.job.completedCount, 1);
     const batchItem = batchPdfRes.payload.data.job.report.items[0];
-    assert.equal(batchItem.ok, true);
     // The mock downloader returns the same PDF bytes as the earlier single-import test,
     // so the SHA-256 tier must engage: a sha256 match is only possible when the batch
     // pipeline actually downloaded and hashed the PDF attachment.
     assert.equal(batchItem.matchStrategy, 'sha256', 'Batch item must go through the PDF download + hash pipeline');
+    // [M4 final] The duplicate lands as a recorded duplicate_content item —
+    // a resolved dedupe decision, not a failure.
+    assert.equal(batchItem.ok, true);
+    assert.equal(batchItem.outcome, 'duplicate_content', 'same PDF bytes must hit the SHA-256 duplicate gate (never a second file)');
     const batchDoc = store.getDocument(m2Actor, batchItem.documentId);
     assert.ok(batchDoc, 'Batch report must reference the matched document');
-    assert.ok(batchDoc.attachments.length >= 1, 'Matched document must carry the real attachment');
-    assert.ok(batchDoc.attachments.some(a => a.blobHash), 'Attachment must be linked to a content-addressed blob');
+    assert.ok(batchDoc.attachments.some(a => a.storageKind === 'source_file'),
+      'the matched document already carries the archived source_file attachment');
+    // No second file: the 网页导入 archive contains exactly the earlier PDF.
+    const archiveDir = path.join(tempDir, 'm2-library-root', '网页导入');
+    assert.equal(fs.readdirSync(archiveDir).length, 1, 'reuse must not place a second file');
+    assert.equal(batchPdfRes.payload.data.job.failedCount, 0);
   }
 
-  // 9f. Compensation direction 1: file promotion failure -> no DB writes, request fails
+  // 9f. [M4 final] Compensation direction 1: placement refusal (symlinked
+  // target parent) -> request fails, no DB writes, nothing on disk.
   {
-    const promoteFailHandler = createCanvasHandler(store, {
+    // The M2 root's 网页导入 parent is replaced by a symlink to an outside dir;
+    // any import attempt must be refused before a single byte moves.
+    fs.mkdirSync(path.join(tempDir, 'm2-library-root'), { recursive: true });
+    const archiveParent = path.join(tempDir, 'm2-library-root', '网页导入');
+    if (fs.existsSync(archiveParent)) fs.rmSync(archiveParent, { recursive: true, force: true });
+    const outsideDir9f = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m2-9f-out-'));
+    fs.symlinkSync(outsideDir9f, archiveParent);
+    const refusalHandler = createCanvasHandler(store, {
       downloadPdfFn: async (url, targetDir) => {
         fs.mkdirSync(targetDir, { recursive: true, mode: 0o700 });
-        const tempFilePath = path.join(targetDir, 'promote-fail.tmp');
-        const content = Buffer.from('%PDF-1.7 promote-fail');
+        const tempFilePath = path.join(targetDir, `refuse-${Math.random().toString(36).slice(2, 8)}.tmp`);
+        const content = Buffer.from(`%PDF-1.7 placement-refusal-${Date.now()}`);
         fs.writeFileSync(tempFilePath, content, { mode: 0o600 });
         return {
           tempFilePath,
@@ -3133,26 +3139,31 @@ try {
           sizeBytes: content.length,
           mimeType: 'application/pdf'
         };
-      },
-      promoteBlobFn: () => { throw new Error('disk full (simulated)'); }
+      }
     });
-    const promoteFailRes = await call(promoteFailHandler, '/canvas/imports/native', {
+    const symlinkImportRes = await call(refusalHandler, '/canvas/imports/native', {
       method: 'POST', cookie,
-      body: { sourceType: 'manual', title: 'Promote Failure Paper', pdfUrl: 'https://example.org/fail.pdf' }
+      body: {
+        sourceType: 'manual',
+        title: 'Placement Refusal Paper',
+        pdfUrl: 'https://example.org/refuse-unique-content.pdf'
+      }
     });
-    assert.equal(promoteFailRes.statusCode, 500, 'Promotion failure must fail the request');
-    assert.equal(promoteFailRes.payload.error.code, 'blob_persist_failed');
-    assert.equal(store.listDocuments(m2Actor, { search: 'Promote Failure Paper' }).length, 0,
-      'No document row may exist after promotion failure');
-    const tmpLeftover = fs.readdirSync(path.join(store.getBlobStorageDir(), 'tmp')).filter(f => f.startsWith('promote-fail'));
-    assert.equal(tmpLeftover.length, 0, 'Temp file must be cleaned after promotion failure');
+    assert.equal(symlinkImportRes.statusCode, 400, 'Placement refusal must fail the request: ' + symlinkImportRes.text);
+    assert.equal(symlinkImportRes.payload.error.code, 'symlink_rejected');
+    assert.equal(store.listDocuments(m2Actor, { search: 'Placement Refusal Paper' }).length, 0,
+      'No document row may exist after placement refusal');
+    assert.equal(fs.readdirSync(outsideDir9f).length, 0, 'Nothing may be written through the symlink');
+    fs.unlinkSync(archiveParent);
+    fs.rmSync(outsideDir9f, { recursive: true, force: true });
   }
 
-  // 9g. Compensation direction 2: DB write failure -> promoted file is removed
+  // 9g. [M4 final] Compensation direction 2: DB write failure -> the placed
+  // directory file is removed (双向无孤儿 for the source_file model).
   {
     const failingStore = new Proxy(store, {
       get(target, prop) {
-        if (prop === 'importNativeDocument') {
+        if (prop === 'importNativeDocumentToSourceFile') {
           return () => { throw new Error('simulated DB transaction failure'); };
         }
         const value = target[prop];
@@ -3179,9 +3190,11 @@ try {
     });
     assert.equal(dbFailRes.statusCode, 500, 'DB failure must surface as 500');
     const dbFailHash = crypto.createHash('sha256').update(Buffer.from('%PDF-1.7 db-fail')).digest('hex');
-    const blobPath = store.resolveBlobPath(dbFailHash, '.pdf');
-    assert.ok(!fs.existsSync(blobPath), 'Promoted blob file must be removed after DB write failure');
+    const archivedFile = path.join(tempDir, 'm2-library-root', '网页导入', 'DB-Failure-Paper.pdf');
+    assert.ok(!fs.existsSync(archivedFile), 'Placed archive file must be removed after DB write failure');
     assert.equal(store.getBlob(dbFailHash), null, 'No blob row may remain after DB write failure');
+    assert.equal(store.getSourceFileByPath(m2Actor, m2LibraryRoot.id, '网页导入/DB-Failure-Paper.pdf'), null,
+      'No source_files row may remain after DB write failure');
   }
 
   // 9h. Startup blob/DB consistency recovery (isolated data directory):
@@ -3529,7 +3542,9 @@ try {
     downloadPdfFn: async (url, targetDir) => {
       fs.mkdirSync(targetDir, { recursive: true, mode: 0o700 });
       const tempFilePath = path.join(targetDir, `ts-mock-${crypto.randomBytes(6).toString('hex')}.tmp`);
-      const content = Buffer.from('%PDF-1.7 ts-download\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF');
+      // Unique bytes per download: each scenario represents a different
+      // document; the identical-content duplicate gate has dedicated tests.
+      const content = Buffer.from(`%PDF-1.7 ts-download-${crypto.randomBytes(8).toString('hex')}`);
       fs.writeFileSync(tempFilePath, content, { mode: 0o600 });
       return {
         tempFilePath,
@@ -3575,17 +3590,29 @@ try {
   assert.equal(bibtexImportHttpRes.payload.data.inboxEntry ?? null, null, '[M4] inbox retired');
   assert.ok(bibtexImportHttpRes.payload.data.topicDocument);
 
-  // 17. Idempotent re-import of identical BibTeX input reuses existing document
+  // 17. [M4 final] Re-import with a fresh PDF version: the DOI metadata
+  // matches, but the NEW bytes hit the same target filename as the first
+  // archive (different SHA) -> 409 filename_conflict; the original file and
+  // its document identity stay untouched until the user renames and retries.
   const bibtexReimportRes = await call(tsHandler, '/canvas/imports/native', {
     method: 'POST', cookie,
     body: {
       input: '@article{vaswani2017, title={Attention Is All You Need}}'
     }
   });
-  assert.equal(bibtexReimportRes.statusCode, 200);
-  assert.equal(bibtexReimportRes.payload.data.outcome, 'reused');
-  assert.equal(bibtexReimportRes.payload.data.match.strategy, 'sha256', 'Exact same PDF content matches by priority 1 (SHA-256)');
-  assert.equal(bibtexReimportRes.payload.data.document.id, bibtexImportHttpRes.payload.data.document.id);
+  assert.equal(bibtexReimportRes.statusCode, 409, bibtexReimportRes.text);
+  assert.equal(bibtexReimportRes.payload.error.code, 'filename_conflict');
+  assert.equal(bibtexReimportRes.payload.data.targetPath, '网页导入/1706.03762.pdf');
+  assert.equal(store.getSourceFileByPath(
+    canvasActorKey('https://issuer.example', 'api-subject'),
+    m2LibraryRoot.id,
+    bibtexImportHttpRes.payload.data.sourceFile.relativePath
+  ).documentId, bibtexImportHttpRes.payload.data.document.id,
+    'the first archived file remains bound to its document');
+  assert.equal(
+    fs.readFileSync(path.join(tempDir, 'm2-library-root', bibtexImportHttpRes.payload.data.sourceFile.relativePath))
+      .equals(fs.readFileSync(path.join(tempDir, 'm2-library-root', bibtexImportHttpRes.payload.data.sourceFile.relativePath))),
+    true);
 
   // 18. M3.2 Batch pipeline with mixed inputs (BibTeX parsed by TS + native DOI + invalid format + >2KB input)
   const longBibtexComment = '% '.repeat(2000) + '\n@article{vaswani2017, title={BibTeX Paper in Batch}}';
@@ -3605,21 +3632,29 @@ try {
   assert.equal(mixedBatchRes.statusCode, 201);
   assert.equal(mixedBatchRes.payload.data.job.state, 'completed_with_errors');
   assert.equal(mixedBatchRes.payload.data.job.totalCount, 3);
-  assert.equal(mixedBatchRes.payload.data.job.completedCount, 2);
-  assert.equal(mixedBatchRes.payload.data.job.failedCount, 1);
-  assert.equal(mixedBatchRes.payload.data.job.report.items[0].ok, true);
+  // [M4 final] Item 1 hits the same PDF URL as test 17 with different bytes:
+  // the 网页导入 archive already holds 1706.03762.pdf, so it records a
+  // filename_conflict instead of silently overwriting or inventing "(2)".
+  assert.equal(mixedBatchRes.payload.data.job.completedCount, 1);
+  assert.equal(mixedBatchRes.payload.data.job.failedCount, 2);
+  assert.equal(mixedBatchRes.payload.data.job.report.items[0].ok, false);
+  assert.equal(mixedBatchRes.payload.data.job.report.items[0].errorCode, 'filename_conflict');
   assert.equal(mixedBatchRes.payload.data.job.report.items[1].ok, true);
   assert.equal(mixedBatchRes.payload.data.job.report.items[2].ok, false);
   assert.equal(mixedBatchRes.payload.data.job.report.items[2].errorCode, 'unsupported_import_input');
 
-  // 19. M3.2 Single import: >2KB input accepted (1 MiB support)
+  // 19. M3.2 Single import: >2KB input accepted (1 MiB support). The fresh
+  // PDF bytes hit the same target filename (1706.03762.pdf) as test 17 ->
+  // 409 filename_conflict, proving the 1 MiB path reaches the conflict rule
+  // instead of failing on length.
   const singleLongInputRes = await call(tsHandler, '/canvas/imports/native', {
     method: 'POST', cookie,
     body: {
       input: '% ' + 'x'.repeat(4000) + '\n@article{vaswani2017, title={Long Input Paper}}'
     }
   });
-  assert.equal(singleLongInputRes.statusCode, 200, 'Reused or imported without 400 length error');
+  assert.equal(singleLongInputRes.statusCode, 409, singleLongInputRes.text);
+  assert.equal(singleLongInputRes.payload.error.code, 'filename_conflict');
 
   // 20. M3.2 ISBN flow: DTO persistence to document record and dedup reuse by ISBN
   const isbnImportRes = await call(tsHandler, '/canvas/imports/native', {
@@ -3798,13 +3833,14 @@ try {
   assert.equal(resolveUnsupportedRes.statusCode, 400);
   assert.equal(resolveUnsupportedRes.payload.error.code, 'unsupported_import_input');
 
-  // 25. Legacy /canvas/imports entry must also forward authoritative resolver statuses
+  // 25. [M4 final] The legacy /canvas/imports entry is retired outright, so
+  // it answers 410 before any resolver input handling.
   const legacyImportsTimeoutRes = await call(tsHandler, '/canvas/imports', {
     method: 'POST', cookie,
     body: { input: 'TIMEOUT_ERROR' }
   });
-  assert.equal(legacyImportsTimeoutRes.statusCode, 504);
-  assert.equal(legacyImportsTimeoutRes.payload.error.code, 'total_timeout');
+  assert.equal(legacyImportsTimeoutRes.statusCode, 410);
+  assert.equal(legacyImportsTimeoutRes.payload.error.code, 'feature_retired');
 
   const clearedAiConfigResponse = await call(handler, '/canvas/ai/config', { method: 'DELETE', cookie });
   assert.equal(clearedAiConfigResponse.statusCode, 200);

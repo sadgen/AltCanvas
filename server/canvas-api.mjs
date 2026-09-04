@@ -20,6 +20,7 @@ import { getAiPublicConfig, requestAiCompletion, validateAiEndpoint } from './ai
 import { resolveImportInput, findDuplicateCandidates, safeDownloadPdfFile } from './import-resolver.mjs';
 import { NativePathError, openFileInsideRoot, normalizeRelativePath, normalizeFilename, listDirectoryPage, ensureDirectoryInsideRoot } from './native-fs.mjs';
 import { scanLibraryRoot, LibraryScanError } from './library-scanner.mjs';
+import { runBlobOnlyWebImportMigration } from './blob-migration.mjs';
 import {
   FileOpError,
   probeTargetPath,
@@ -399,80 +400,8 @@ function saveClassificationDocumentMetas(store, actorKey, entries, parsed) {
   return saved;
 }
 
-async function executeImportJob(store, actorKey, job, session = null) {
-  if (!job || job.jobType !== 'import_document') return null;
-  store.updateJobState(job.id, { state: 'running', startedAt: new Date().toISOString() });
-
-  try {
-    const payload = job.payload || {};
-    let resolved = payload.resolved;
-    if (!resolved && (payload.input || payload.url || payload.identifier)) {
-      resolved = await resolveImportInput(payload.input || payload.url || payload.identifier);
-    }
-    if (!resolved) {
-      throw new Error('No import metadata could be resolved');
-    }
-
-    const deterministicHash = crypto.createHash('sha256').update(job.id).digest('hex').slice(0, 10).toUpperCase();
-    const itemKey = payload.itemKey || job.resultSummary?.itemKey || `IMP_${deterministicHash}`;
-    const tags = [resolved.sourceType, resolved.doi ? 'doi' : '', resolved.arxivId ? 'arxiv' : ''].filter(Boolean);
-
-    const libraryType = payload.libraryType || (session ? 'user' : null);
-    const libraryId = payload.libraryId || (session ? String(session.userId) : null);
-    if (!libraryType || !libraryId) {
-      throw new Error('Import job is missing libraryType/libraryId context');
-    }
-
-    const entryInput = {
-      libraryType,
-      libraryId,
-      itemKey,
-      detectedFrom: 'import',
-      title: string(resolved.title || '未命名导入文献', 'title', { max: 500 }),
-      creators: Array.isArray(resolved.creators) ? resolved.creators : [],
-      year: resolved.year ? Number(resolved.year) : null,
-      abstractNote: string(resolved.abstractNote || '', 'abstractNote', { max: 20_000 }),
-      tags,
-      doi: resolved.doi ? String(resolved.doi).trim() : null
-    };
-
-    const upserted = store.upsertInboxEntries(actorKey, [entryInput]);
-    const entry = upserted[0];
-
-    let topicDocument = null;
-    if (payload.targetWorkspaceId && entry) {
-      topicDocument = store.addTopicDocument(actorKey, payload.targetWorkspaceId, {
-        libraryType: entry.libraryType,
-        libraryId: entry.libraryId,
-        itemKey: entry.itemKey,
-        status: 'accepted',
-        origin: 'canvas_import'
-      });
-    }
-
-    const updatedJob = store.updateJobState(job.id, {
-      state: 'completed',
-      finishedAt: new Date().toISOString(),
-      errorCode: null,
-      resultSummary: {
-        entryId: entry?.id,
-        itemKey,
-        targetWorkspaceId: payload.targetWorkspaceId || null,
-        topicDocumentId: topicDocument?.id || null
-      }
-    });
-
-    return { job: updatedJob, entry, topicDocument };
-  } catch (err) {
-    const failedJob = store.updateJobState(job.id, {
-      state: 'failed',
-      finishedAt: new Date().toISOString(),
-      errorCode: 'import_failed',
-      resultSummary: { error: err.message }
-    });
-    return { job: failedJob, error: err.message };
-  }
-}
+// [M4] executeImportJob (inbox-era import job runner) was removed with
+// the inbox; queued leftovers are failed by recoverQueuedAndRunningJobs.
 
 export function recoverQueuedAndRunningJobs(store) {
   if (!store?.db) return;
@@ -484,8 +413,11 @@ export function recoverQueuedAndRunningJobs(store) {
       const actorKey = rawJob.owner_key;
       const job = store.getJob(actorKey, rawJob.id);
       if (job && job.jobType === 'import_document' && job.payload) {
-        setImmediate(() => {
-          executeImportJob(store, actorKey, job).catch(() => {});
+        // [M4] The inbox-era import job writes the retired inbox_entries table;
+        // queued/running leftovers are failed at startup, never executed.
+        store.updateJobState(job.id, {
+          state: 'failed',
+          errorCode: 'feature_retired'
         });
       }
     }
@@ -1413,12 +1345,59 @@ async function runAiTopicGeneration({ store, actorKey, targetEntries, maxTopics 
   };
 }
 
+const WEB_IMPORT_DEFAULT_DIR = '网页导入';
+
+// Sanitizes a candidate web-import original filename: strips separators,
+// control characters and NUL, collapses whitespace, enforces the .pdf
+// extension and a bounded length. Never invents "(2)" suffixes.
+function sanitizeWebImportFilename(raw, fallbackStem) {
+  let candidate = String(raw || '')
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/[\\/:*?"<>|]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^\.+/, '')
+    .slice(0, 120)
+    .trim();
+  if (!candidate) candidate = String(fallbackStem || 'import');
+  if (!candidate.toLowerCase().endsWith('.pdf')) candidate += '.pdf';
+  if (candidate.length < 5) candidate = `${candidate.replace(/\.pdf$/i, '') || 'import'}.pdf`;
+  return candidate;
+}
+
+// Original-filename candidates for web imports, in product priority order:
+// 1. trusted Content-Disposition name (when the downloader surfaced one);
+// 2. the PDF URL path's own filename;
+// 3. a sanitized library title;
+// 4. a deterministic content-hash fallback.
+function deriveWebImportFilename({ download, pdfUrl, title, sha256 }) {
+  const dispositionName = download && typeof download.filename === 'string' ? download.filename.trim() : '';
+  if (dispositionName) {
+    return sanitizeWebImportFilename(dispositionName, 'import');
+  }
+  if (pdfUrl) {
+    try {
+      const urlPath = decodeURIComponent(new URL(pdfUrl).pathname);
+      const base = urlPath.split('/').filter(Boolean).pop() || '';
+      if (base.toLowerCase().endsWith('.pdf')) {
+        return sanitizeWebImportFilename(base, 'import');
+      }
+    } catch {}
+  }
+  const titleStem = String(title || '').replace(/\.pdf$/i, '').trim();
+  if (titleStem) {
+    return sanitizeWebImportFilename(`${titleStem.slice(0, 80)}.pdf`, 'import');
+  }
+  return sanitizeWebImportFilename(`import-${String(sha256 || '').slice(0, 16)}.pdf`, 'import');
+}
+
 async function executeNativeImportItem(store, actorKey, normalized, {
   downloadPdfFn,
   promoteBlobFn = defaultPromoteBlob,
   fallbackTargetWorkspaceId = null,
   translationServerFn = null,
-  fileTarget = null
+  fileTarget = null,
+  webImportArchive = false
 }) {
   let resolved = normalized.resolved;
   if (!resolved && normalized.input) {
@@ -1471,6 +1450,7 @@ async function executeNativeImportItem(store, actorKey, normalized, {
   let warning = null;
   let attachment = null;
   let tempFilePath = null;
+  let downloadDispositionName = null;
   const explicitPdfUrl = normalized.pdfUrl && normalized.pdfUrl.trim() ? normalized.pdfUrl.trim() : null;
   const pdfUrl = explicitPdfUrl || meta.pdfUrl;
 
@@ -1479,6 +1459,7 @@ async function executeNativeImportItem(store, actorKey, normalized, {
       const tempDir = path.join(store.getBlobStorageDir(), 'tmp');
       const downloadResult = await downloadPdfFn(pdfUrl, tempDir);
       tempFilePath = downloadResult.tempFilePath;
+      downloadDispositionName = typeof downloadResult.filename === 'string' ? downloadResult.filename : null;
       attachment = {
         sha256: downloadResult.sha256,
         sizeBytes: downloadResult.sizeBytes,
@@ -1497,6 +1478,15 @@ async function executeNativeImportItem(store, actorKey, normalized, {
       warning = `PDF 附件下载失败，已降级为仅元数据导入: ${downloadErr.message}`;
       attachment = null;
       tempFilePath = null;
+    }
+    if (attachment && webImportArchive && !fileTarget) {
+      // [M4] Web imports that obtained a PDF must be archived into the
+      // library roots, never left as a blob-only document.
+      try { if (tempFilePath && fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath); } catch {}
+      const err = new Error('未配置可用的文库根目录（NATIVE_LIBRARY_ROOTS），无法归档网页导入的 PDF');
+      err.status = 422;
+      err.code = 'library_root_required';
+      throw err;
     }
   }
 
@@ -1558,8 +1548,17 @@ async function executeNativeImportItem(store, actorKey, normalized, {
   let filePlacement = null;
   if (fileTarget) {
     if (attachment && tempFilePath) {
-      const targetRelativePath = fileTarget.targetDir
-        ? `${fileTarget.targetDir}/${fileTarget.filename}`
+      if (!fileTarget.filename && attachment) {
+        fileTarget.filename = deriveWebImportFilename({
+          download: { filename: downloadDispositionName },
+          pdfUrl: pdfUrl,
+          title,
+          sha256: attachment.sha256
+        });
+      }
+      const archiveDir = fileTarget.targetDir || WEB_IMPORT_DEFAULT_DIR;
+      const targetRelativePath = archiveDir
+        ? `${archiveDir}/${fileTarget.filename}`
         : fileTarget.filename;
       const conflict = await probeTargetPath(store, actorKey, fileTarget.root, targetRelativePath, attachment.sha256);
       if (conflict) {
@@ -1573,7 +1572,7 @@ async function executeNativeImportItem(store, actorKey, normalized, {
         operationType: 'file.import',
         sourcePath: tempFilePath,
         targetPath: `${fileTarget.root.absolutePath}/${targetRelativePath}`,
-        payload: { rootId: fileTarget.root.id, targetDir: fileTarget.targetDir, filename: fileTarget.filename }
+        payload: { rootId: fileTarget.root.id, targetDir: archiveDir, filename: fileTarget.filename }
       });
       store.startFileOperation(operation.id);
       try {
@@ -1604,6 +1603,7 @@ async function executeNativeImportItem(store, actorKey, normalized, {
         rootAbsolutePath: fileTarget.root.absolutePath,
         relativePath: targetRelativePath,
         filename: fileTarget.filename,
+        archiveDir,
         sha256: attachment.sha256,
         sizeBytes: attachment.sizeBytes,
         modifiedAt: Math.round(fs.statSync(path.join(fileTarget.root.absolutePath, targetRelativePath)).mtimeMs)
@@ -1625,12 +1625,35 @@ async function executeNativeImportItem(store, actorKey, normalized, {
 
   // Phase 3: transactional database write.
   if (fileTarget && !filePlacement) {
-    // A directory import without a downloadable PDF would create a library
-    // identity with no original file — refuse instead of degrading silently.
-    const err = new Error('目录导入需要取得 PDF 文件；PDF 下载失败时不会创建文档');
-    err.status = 422;
-    err.code = 'import_requires_pdf';
-    throw err;
+    // Metadata-only web import: no downloadable PDF -> create the Native
+    // document (marked 无 PDF) WITHOUT fabricating a source_file. It never
+    // appears in the original-files view and may gain a PDF later.
+    const metadataResult = store.importNativeDocument(actorKey, {
+      sourceType: meta.sourceType,
+      title,
+      abstract,
+      creators,
+      year,
+      doi,
+      url,
+      isbn,
+      arxivId,
+      externalRefs,
+      attachment: null,
+      targetWorkspaceId: (fileTarget.topicIds && fileTarget.topicIds[0]) || targetWorkspaceId,
+      forceNew: normalized.forceNew,
+      confirmFuzzy: normalized.confirmFuzzy
+    });
+    if (metadataResult.outcome === 'created' || metadataResult.outcome === 'reused') {
+      const extraTopics = (fileTarget.topicIds || []).slice(metadataResult.topicDocument ? 1 : 0);
+      for (const workspaceId of extraTopics) {
+        try {
+          store.addDocumentTopics(actorKey, metadataResult.document.id, [workspaceId], { origin: 'canvas_import' });
+        } catch {}
+      }
+    }
+    const metadataWarning = `${warning ? warning + '；' : ''}未取得 PDF，已创建无 PDF 的元数据文档（可稍后补充 PDF）`;
+    return { result: { ...metadataResult, hasPdf: false }, warning: metadataWarning };
   }
   let result;
   try {
@@ -1722,6 +1745,25 @@ export { defaultPromoteBlob };
 // Exported so external parse adapters (e.g. the M3 Translation Server layer) can be
 // contract-tested against the exact import-item normalizer used by the executor.
 export { normalizeNativeImportItem };
+
+// Resolves the archive target for web imports (DOI/arXiv/URL/BibTeX/RIS/TS):
+// an explicit rootId wins; otherwise the FIRST configured library root is the
+// deterministic default. An omitted/empty targetDir defaults to 网页导入 per
+// the M4 product rule. Returns null when the deployment has no active root —
+// callers then refuse to archive PDFs as blobs (metadata-only still allowed).
+function resolveWebImportFileTarget(store, actorKey, body = {}) {
+  const rawTargetDir = body.targetDir === undefined || body.targetDir === null ? '' : String(body.targetDir).trim();
+  const targetDir = rawTargetDir ? normalizeRelativePath(rawTargetDir) : WEB_IMPORT_DEFAULT_DIR;
+  const rawFilename = body.filename === undefined || body.filename === null ? '' : String(body.filename).trim();
+  const filename = rawFilename ? normalizeFilename(rawFilename, { requirePdf: true }) : undefined;
+  if (body.rootId) {
+    const root = store.requireLibraryRoot(actorKey, string(body.rootId, 'rootId', { max: 128 }));
+    return { root, targetDir, filename };
+  }
+  const roots = store.listLibraryRoots(actorKey);
+  if (!roots.length) return null;
+  return { root: roots[0], targetDir, filename };
+}
 
 export function createCanvasHandler(store, {
   aiCompletion = requestAiCompletion,
@@ -1822,6 +1864,44 @@ export function createCanvasHandler(store, {
       }
 
       // --- M2 Unified Native Import Pipeline ---
+      // --- M4 blob-only web-import migration ---
+      match = /^\/canvas\/native\/migrations\/blob-only-web-imports$/.exec(pathname);
+      if (match && method === 'GET') {
+        const pending = store.countBlobOnlyWebImports(actor.actorKey);
+        let lastReport = null;
+        const lastOp = store.db.prepare(`
+          SELECT payload_json, completed_at FROM file_operations
+          WHERE owner_key = ? AND operation_type = 'library.reconcile'
+            AND payload_json LIKE '%blob-only-web-import-migration%'
+          ORDER BY created_at DESC LIMIT 1
+        `).get(actor.actorKey);
+        if (lastOp) {
+          try { lastReport = { ...JSON.parse(lastOp.payload_json), completedAt: lastOp.completed_at }; } catch {}
+        }
+        json(res, 200, { data: { pending, lastReport } });
+        return;
+      }
+      if (match && method === 'POST') {
+        const body = await readJson(req, MAX_IMPORT_BODY_BYTES);
+        if (body && (typeof body !== 'object' || Array.isArray(body))) {
+          throw new TypeError('request body must be an object');
+        }
+        try {
+          const result = await runBlobOnlyWebImportMigration(store, actor.actorKey, {
+            rootId: body?.rootId || null,
+            targetDir: typeof body?.targetDir === 'string' && body.targetDir.trim() ? body.targetDir : undefined
+          });
+          json(res, 200, { data: result });
+        } catch (err) {
+          if (err.status === 422) {
+            error(res, 422, err.code || 'library_root_required', err.message);
+            return;
+          }
+          throw err;
+        }
+        return;
+      }
+
       if (pathname === '/canvas/imports/native' && method === 'POST') {
         const body = await readJson(req, MAX_IMPORT_BODY_BYTES);
         if (!body || typeof body !== 'object' || Array.isArray(body)) {
@@ -1842,12 +1922,30 @@ export function createCanvasHandler(store, {
           normalized.confirmFuzzy = Boolean(body.confirmFuzzy);
         }
 
+        // [M4] Web imports that obtain a PDF are always archived into the
+        // library roots (default 网页导入); blob-only web imports are gone.
+        // The requested topic rides on the fileTarget so the placement path
+        // binds topic_documents to the archived source_file.
+        const webImportTopicIds = normalized.targetWorkspaceId ? [normalized.targetWorkspaceId] : [];
+        let webImportFileTarget = null;
+        if (body.rootId !== undefined || body.targetDir !== undefined || body.filename !== undefined) {
+          webImportFileTarget = resolveWebImportFileTarget(store, actor.actorKey, body);
+          if (webImportFileTarget) webImportFileTarget.topicIds = webImportTopicIds;
+        } else {
+          const roots = store.listLibraryRoots(actor.actorKey);
+          webImportFileTarget = roots.length
+            ? { root: roots[0], targetDir: WEB_IMPORT_DEFAULT_DIR, filename: undefined, topicIds: webImportTopicIds }
+            : null;
+        }
+
         let outcome;
         try {
           outcome = await executeNativeImportItem(store, actor.actorKey, normalized, {
             downloadPdfFn,
             promoteBlobFn,
-            translationServerFn
+            translationServerFn,
+            fileTarget: webImportFileTarget,
+            webImportArchive: true
           });
         } catch (execErr) {
           if (execErr.code === 'pdf_download_failed' || execErr.code === 'blob_persist_failed') {
@@ -1880,6 +1978,31 @@ export function createCanvasHandler(store, {
           });
           return;
         }
+        if (result.outcome === 'duplicate_content') {
+          json(res, 409, {
+            error: { code: 'duplicate_content', message: '相同 SHA-256 的内容已在文库中，未重复导入' },
+            data: {
+              outcome: result.outcome,
+              document: result.document || null,
+              sourceFile: result.sourceFile || null,
+              match: result.match || null,
+              warning: warning || undefined
+            }
+          });
+          return;
+        }
+        if (result.outcome === 'filename_conflict') {
+          json(res, 409, {
+            error: { code: 'filename_conflict', message: '目标目录已存在同名但内容不同的文件，请修改原始文件名后重试' },
+            data: {
+              outcome: result.outcome,
+              targetPath: result.targetPath || null,
+              existingSha256: result.existingSha256 || null,
+              warning: warning || undefined
+            }
+          });
+          return;
+        }
 
         json(res, result.outcome === 'reused' ? 200 : 201, {
           data: warning ? { ...result, warning } : result
@@ -1906,6 +2029,8 @@ export function createCanvasHandler(store, {
           ? string(body.targetWorkspaceId, 'targetWorkspaceId', { max: 128 })
           : null;
         const batchConfirmFuzzy = Boolean(body.confirmFuzzy);
+        // [M4] Batch web imports archive PDFs into the library roots too.
+        const batchFileTarget = resolveWebImportFileTarget(store, actor.actorKey, body);
 
         const batchJob = store.createImportJob(actor.actorKey, {
           sourceType: string(body.sourceType || 'batch', 'sourceType', { max: 32 }),
@@ -1932,7 +2057,9 @@ export function createCanvasHandler(store, {
               downloadPdfFn,
               promoteBlobFn,
               fallbackTargetWorkspaceId: targetWorkspaceId,
-              translationServerFn
+              translationServerFn,
+              fileTarget: batchFileTarget,
+              webImportArchive: true
             });
             if (result.outcome === 'requires_confirmation') {
               store.appendImportJobItemReport(actor.actorKey, batchJob.id, {
@@ -1949,6 +2076,29 @@ export function createCanvasHandler(store, {
                 outcome: 'identity_conflict',
                 error: 'Multiple exact identities resolve to different documents; manual resolution required',
                 conflicts: result.conflicts
+              });
+            } else if (result.outcome === 'duplicate_content') {
+              // A resolved dedupe decision, not a failure: the content already
+              // lives in the library, nothing was imported.
+              store.appendImportJobItemReport(actor.actorKey, batchJob.id, {
+                ok: true,
+                title: result.document?.title || fallbackTitle,
+                documentId: result.document?.id || null,
+                outcome: result.outcome,
+                matchStrategy: result.match?.strategy || null,
+                warning: warning || undefined
+              });
+            } else if (result.outcome === 'filename_conflict') {
+              // Different content claimed the target filename: recorded as a
+              // failed item for the user to resolve with a new original name.
+              store.appendImportJobItemReport(actor.actorKey, batchJob.id, {
+                ok: false,
+                title: fallbackTitle,
+                outcome: result.outcome,
+                error: '目标目录已存在同名但内容不同的文件，请修改原始文件名后重试',
+                errorCode: 'filename_conflict',
+                targetPath: result.targetPath || null,
+                warning: warning || undefined
               });
             } else {
               store.appendImportJobItemReport(actor.actorKey, batchJob.id, {
@@ -2150,7 +2300,8 @@ export function createCanvasHandler(store, {
           throw new TypeError('rootId is required');
         }
         const root = store.requireLibraryRoot(actor.actorKey, body.rootId);
-        const targetDir = body.targetDir ? normalizeRelativePath(body.targetDir) : '';
+        const rawTargetDir = typeof body.targetDir === 'string' ? body.targetDir.trim() : '';
+        const targetDir = rawTargetDir ? normalizeRelativePath(rawTargetDir) : WEB_IMPORT_DEFAULT_DIR;
         let filename = body.filename ? normalizeFilename(body.filename, { requirePdf: true }) : null;
 
         if (!filename) {
@@ -2629,82 +2780,20 @@ export function createCanvasHandler(store, {
         return;
       }
       if (pathname === '/canvas/imports' && method === 'POST') {
-        const body = await readJson(req, MAX_IMPORT_BODY_BYTES);
-        if (!body || typeof body !== 'object' || Array.isArray(body)) {
-          throw new TypeError('request body must be an object');
-        }
-
-        let resolved = body.resolved;
-        if (!resolved) {
-          const rawInput = string(body.input, 'input', { min: 1, max: 1024 * 1024 });
-          try {
-            resolved = await resolveImportInput(rawInput, { translationServerFn });
-          } catch (err) {
-            const status = Number.isInteger(err.status) ? err.status : 400;
-            error(res, status, err.code || 'resolve_error', `Failed to resolve input: ${err.message}`);
-            return;
-          }
-        }
-
-        const targetWorkspaceId = body.targetWorkspaceId ? string(body.targetWorkspaceId, 'targetWorkspaceId', { max: 128 }) : null;
-        if (targetWorkspaceId) {
-          store.requireWorkspace(actor.actorKey, targetWorkspaceId);
-        }
-
-        const importJob = store.enqueueJob(actor.actorKey, {
-          jobType: 'import_document',
-          resourceType: 'inbox_entry',
-          resourceId: 'pending',
-          payload: {
-            input: body.input,
-            url: body.url,
-            identifier: body.identifier,
-            resolved,
-            targetWorkspaceId: targetWorkspaceId || null,
-            autoAccept: Boolean(body.autoAccept),
-            libraryType: 'user',
-            libraryId: String(actor.session.userId)
-          }
-        });
-
-        const execResult = await executeImportJob(store, actor.actorKey, importJob, actor.session);
-        if (execResult.error && !execResult.entry) {
-          json(res, 500, { error: { code: 'import_failed', message: execResult.error }, data: { job: execResult.job } });
-          return;
-        }
-
-        json(res, 201, {
-          data: {
-            job: execResult.job,
-            entry: execResult.entry,
-            topicDocument: execResult.topicDocument
-          }
-        });
+        error(res, 410, 'feature_retired', '旧版收件箱导入任务已于 M4 退役；请使用 /canvas/imports/native');
         return;
       }
+
       match = /^\/canvas\/imports\/([0-9a-f-]+)\/retry$/.exec(pathname);
       if (match && method === 'POST') {
         const job = store.getJob(actor.actorKey, match[1]);
         if (!job || job.jobType !== 'import_document') {
           throw new CanvasNotFoundError('Import job not found');
         }
-        if (job.state !== 'failed') {
-          json(res, 200, { data: job, message: 'Job is not in failed state' });
-          return;
-        }
-        const retried = store.updateJobState(job.id, {
-          state: 'queued',
-          errorCode: null,
-          incrementAttempts: true
-        });
-        if (job.payload) {
-          setImmediate(() => {
-            executeImportJob(store, actor.actorKey, retried, actor.session).catch(() => {});
-          });
-        }
-        json(res, 200, { data: retried });
+        error(res, 410, 'feature_retired', '旧版收件箱导入任务已于 M4 退役');
         return;
       }
+
       match = /^\/canvas\/imports\/([0-9a-f-]+)$/.exec(pathname);
       if (match && method === 'GET') {
         const job = store.getJob(actor.actorKey, match[1]);

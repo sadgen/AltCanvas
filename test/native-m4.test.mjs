@@ -2369,6 +2369,317 @@ async function testRecoveryRollbackContentIdentity() {
   }
 }
 
+
+// ============================================================
+// 24. M4 final: web imports (DOI/arXiv/URL/BibTeX/RIS/TS) with a obtained
+//     PDF always archive into 网页导入/ under the first configured root;
+//     metadata-only imports create a 无 PDF document without a fake
+//     source_file; blob-only web imports are impossible at the HTTP layer.
+// ============================================================
+async function testWebImportDefaultArchiving() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-web-store-'));
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-web-root-'));
+  const store = new CanvasStore(path.join(tempDir, 'canvas.sqlite'));
+  const actor = canvasActorKey('local', 'm4-web');
+  const session = createSession({
+    userId: 'm4-web-1', subject: 'm4-web', authMode: 'local',
+    username: 'web', role: 'admin', actorKey: actor
+  });
+  const cookie = `altcanvas_session=${session.id}`;
+  const workspace = store.createWorkspace(actor, { name: '网页导入主题' });
+
+  const pdfByUrl = new Map();
+  let downloadCounter = 0;
+  const fakeDownloadPdf = async (pdfUrl, tempDirForDownload) => {
+    const bytes = pdfByUrl.get(pdfUrl);
+    if (!bytes) {
+      const err = new Error('not found');
+      err.status = 404;
+      throw err;
+    }
+    downloadCounter += 1;
+    fs.mkdirSync(tempDirForDownload, { recursive: true, mode: 0o700 });
+    const tempFilePath = path.join(tempDirForDownload, `dl-${downloadCounter}.pdf`);
+    fs.writeFileSync(tempFilePath, bytes);
+    return { tempFilePath, sha256: sha256Of(bytes), sizeBytes: bytes.length, mimeType: 'application/pdf' };
+  };
+  const handler = createCanvasHandler(store, { downloadPdfFn: fakeDownloadPdf });
+
+  try {
+    const [root] = store.ensureLibraryRootsFromConfig(actor, [{ absolutePath: rootDir, displayName: '研究文库' }]);
+
+    // 24.1 DOI import with a PDF lands in 网页导入/ as a source_file archive.
+    // Case A: URL ends in a .pdf segment -> candidate 2 (URL basename) wins.
+    pdfByUrl.set('https://doi.org/10.9999/web-doi.pdf', makePdfBytes('web-doi-pdf'));
+    let res = await call(handler, '/canvas/imports/native', {
+      method: 'POST', cookie,
+      body: {
+        sourceType: 'doi', title: '网页导入 DOI 论文', doi: '10.9999/web-doi',
+        pdfUrl: 'https://doi.org/10.9999/web-doi.pdf',
+        targetWorkspaceId: workspace.id
+      }
+    });
+    assert.equal(res.statusCode, 201, res.text);
+    assert.equal(res.payload.data.outcome, 'created');
+    assert.equal(res.payload.data.attachment.storageKind, 'source_file');
+    assert.equal(res.payload.data.sourceFile.relativePath, '网页导入/web-doi.pdf',
+      'candidate 2 (URL basename) outranks the title per rule 3.3');
+    assert.equal(fs.existsSync(path.join(rootDir, '网页导入', 'web-doi.pdf')), true);
+
+    // Case B: URL has no .pdf basename -> candidate 3 (library title) wins.
+    pdfByUrl.set('https://example.org/download-query?doc=456', makePdfBytes('title-derived-pdf'));
+    let resTitle = await call(handler, '/canvas/imports/native', {
+      method: 'POST', cookie,
+      body: {
+        sourceType: 'doi', title: '纯标题派生文件名论文', doi: '10.9999/title-derived',
+        pdfUrl: 'https://example.org/download-query?doc=456'
+      }
+    });
+    assert.equal(resTitle.statusCode, 201, resTitle.text + ' | payload=' + JSON.stringify(resTitle.payload));
+    assert.equal(resTitle.payload.data.sourceFile.relativePath, '网页导入/纯标题派生文件名论文.pdf',
+      'candidate 3 (sanitized library title) applies when URL has no .pdf basename');
+    assert.equal(fs.existsSync(path.join(rootDir, '网页导入', '纯标题派生文件名论文.pdf')), true);
+    // Topic binding points at the active attachment id/version.
+    const boundTopic = store.listNativeLibraryDocuments(actor, { topicId: workspace.id })
+      .documents.find(d => d.id === res.payload.data.document.id);
+    assert.ok(boundTopic);
+    assert.equal(boundTopic.sourceFile.id, res.payload.data.sourceFile.id);
+    const bindingRow = boundTopic.topics[0];
+    assert.equal(bindingRow.attachment_version, res.payload.data.attachment.version);
+
+    // The archive is visible through the original-files API and openable.
+    const treeRes = await call(handler, `/canvas/native/library-roots/${root.id}/tree?path=${encodeURIComponent('网页导入')}`, { cookie });
+    assert.equal(treeRes.statusCode, 200);
+    const treeEntry = treeRes.payload.data.find(e => e.name === 'web-doi.pdf');
+    assert.ok(treeEntry && treeEntry.library && treeEntry.library.documentId === res.payload.data.document.id);
+    const fileRes = await call(handler, `/canvas/native/attachments/${res.payload.data.attachment.id}/file`, { cookie });
+    assert.equal(fileRes.statusCode, 200);
+    assert.equal(fileRes.buffer.equals(makePdfBytes('web-doi-pdf')), true);
+
+    // 24.2 Same SHA import (different DOI metadata): reused/duplicate_content,
+    // no second file in the archive directory.
+    res = await call(handler, '/canvas/imports/native', {
+      method: 'POST', cookie,
+      body: {
+        sourceType: 'doi', title: '同内容另一元数据', doi: '10.9999/web-doi-2',
+        pdfUrl: 'https://doi.org/10.9999/web-doi.pdf'
+      }
+    });
+    assert.equal(res.statusCode, 409);
+    assert.equal(res.payload.error.code, 'duplicate_content');
+    assert.equal(res.payload.data.document.id, res.payload.data ? res.payload.data.document.id : null, 'sanity');
+    assert.equal(fs.readdirSync(path.join(rootDir, '网页导入')).length, 2, 'no second file for identical content (2 files from Case A + Case B)');
+
+    // 24.3 Different SHA, same derived filename -> 409 filename_conflict.
+    // The URL path basename is web-doi.pdf which matches 24.1's filename, but
+    // carries different bytes.
+    pdfByUrl.set('https://arxiv.org/pdf/web-doi.pdf', makePdfBytes('conflicting-web-pdf'));
+    res = await call(handler, '/canvas/imports/native', {
+      method: 'POST', cookie,
+      body: {
+        sourceType: 'arxiv', title: '冲突论文标题', arxivId: '2501.88888',
+        pdfUrl: 'https://arxiv.org/pdf/web-doi.pdf'
+      }
+    });
+    assert.equal(res.statusCode, 409);
+    assert.equal(res.payload.error.code, 'filename_conflict');
+    assert.equal(fs.readdirSync(path.join(rootDir, '网页导入')).length, 2, 'conflict must not write anything');
+
+    // 24.4 Metadata-only (no pdfUrl anywhere): document created WITHOUT any
+    // source_file / attachment; marked 无 PDF via hasPdf:false.
+    res = await call(handler, '/canvas/imports/native', {
+      method: 'POST', cookie,
+      body: { sourceType: 'doi', title: '仅元数据无 PDF 论文', doi: '10.9999/meta-only' }
+    });
+    assert.equal(res.statusCode, 201, res.text);
+    assert.equal(res.payload.data.outcome, 'created');
+    assert.equal(res.payload.data.hasPdf, false);
+    assert.equal(res.payload.data.attachment ?? null, null);
+    const metaDocId = res.payload.data.document.id;
+    const metaDoc = store.getDocument(actor, metaDocId);
+    assert.equal(metaDoc.attachments.length, 0, 'metadata-only import must not fabricate an attachment');
+    assert.equal(store.getSourceFileByPath(actor, root.id, '网页导入/仅元数据无-PDF-论文.pdf'), null);
+
+    // 24.5 Explicit rootId + custom targetDir still work (advanced UI path).
+    fs.mkdirSync(path.join(rootDir, '自定义'), { recursive: true, mode: 0o700 });
+    pdfByUrl.set('https://example.org/custom-dir.pdf', makePdfBytes('custom-dir-pdf'));
+    res = await call(handler, '/canvas/native/source-files/import', {
+      method: 'POST', cookie,
+      body: {
+        resolved: { sourceType: 'url', title: '自定义目录导入', url: 'https://example.org/custom-dir.pdf', pdfUrl: 'https://example.org/custom-dir.pdf' },
+        rootId: root.id, targetDir: '自定义', filename: 'custom.pdf'
+      }
+    });
+    assert.equal(res.statusCode, 201, res.text);
+    assert.equal(res.payload.data.sourceFile.relativePath, '自定义/custom.pdf');
+
+    // 24.6 No root configured at all: a PDF import must fail with
+    // library_root_required instead of silently creating a blob-only document.
+    const otherActor = canvasActorKey('local', 'm4-web-noroot');
+    const otherSession = createSession({
+      userId: 'm4-web-2', subject: 'm4-web-noroot', authMode: 'local',
+      username: 'web2', role: 'admin', actorKey: otherActor
+    });
+    const otherCookie = `altcanvas_session=${otherSession.id}`;
+    const otherHandler = createCanvasHandler(store, { downloadPdfFn: fakeDownloadPdf });
+    pdfByUrl.set('https://example.org/noroot.pdf', makePdfBytes('noroot-pdf'));
+    res = await call(otherHandler, '/canvas/imports/native', {
+      method: 'POST', cookie: otherCookie,
+      body: { sourceType: 'url', title: '无根导入', pdfUrl: 'https://example.org/noroot.pdf' }
+    });
+    assert.equal(res.statusCode, 422);
+    assert.equal(res.payload.error.code, 'library_root_required');
+    assert.equal(store.listDocuments(otherActor, {}).length, 0, 'no document for the refused import');
+
+    console.log('✅ M4 web import default archiving: 网页导入 landing, source_files visibility, dedupe, conflicts, metadata-only, no-root refusal passed');
+  } finally {
+    try { store.close(); } catch {}
+    fs.rmSync(tempDir, { recursive: true, force: true });
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+}
+
+// ============================================================
+// 25. M4 final: existing blob-only web-import PDFs migrate into 网页导入/
+//     idempotently, with reuse, conflict recording and DB-failure compensation.
+// ============================================================
+async function testBlobOnlyWebImportMigration() {
+  const { runBlobOnlyWebImportMigration } = await import('../server/blob-migration.mjs');
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-mig-store-'));
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-mig-root-'));
+  const store = new CanvasStore(path.join(tempDir, 'canvas.sqlite'));
+  const actor = canvasActorKey('local', 'm4-mig');
+  try {
+    const [root] = store.ensureLibraryRootsFromConfig(actor, [{ absolutePath: rootDir, displayName: '迁移文库' }]);
+
+    const makeBlobLegacyImport = (title, pdfBytes, { sourceUrl = 'https://arxiv.org/pdf/legacy.pdf', doi = null } = {}) => {
+      const sha256 = sha256Of(pdfBytes);
+      const blobPath = store.resolveBlobPath(sha256, '.pdf');
+      fs.mkdirSync(path.dirname(blobPath), { recursive: true, mode: 0o700 });
+      fs.writeFileSync(blobPath, pdfBytes, { mode: 0o600 });
+      const relPath = path.relative(store.getBlobStorageDir(), blobPath);
+      store.upsertBlob({ sha256, relativePath: relPath, sizeBytes: pdfBytes.length, mimeType: 'application/pdf' });
+      const document = store.createDocument(actor, { title });
+      if (doi) {
+        store.db.prepare('UPDATE documents SET doi = ? WHERE id = ?').run(doi, document.id);
+      }
+      const attachmentId = crypto.randomUUID();
+      const timestamp = new Date().toISOString();
+      store.db.prepare(`
+        INSERT INTO attachments
+          (id, document_id, blob_hash, mime_type, original_filename, title, source_url, size_bytes,
+           storage_kind, version, created_at, updated_at)
+        VALUES (?, ?, ?, 'application/pdf', ?, ?, ?, ?, 'managed_blob', 1, ?, ?)
+      `).run(attachmentId, document.id, sha256, `${title}.pdf`, title, sourceUrl, pdfBytes.length, timestamp, timestamp);
+      return { document, attachmentId, sha256 };
+    };
+
+    // 25.1 Two genuine blob-only web imports (source_url present + external_refs).
+    const legacy1 = makeBlobLegacyImport('Legacy Web Paper A', makePdfBytes('legacy-A'));
+    const legacy2 = makeBlobLegacyImport('Legacy Web Paper B', makePdfBytes('legacy-B'), { sourceUrl: null, doi: '10.5555/legacy-b' });
+    store.createExternalRef(actor, legacy2.document.id, { provider: 'doi', externalItemId: '10.5555/legacy-b' });
+    // A native UPLOAD-style attachment (no source_url, no external_refs) must be
+    // left alone by the migration.
+    const uploadKeep = makeBlobLegacyImport('Uploaded Keep Me', makePdfBytes('uploaded-keep'));
+    store.db.prepare('UPDATE attachments SET source_url = NULL WHERE id = ?').run(uploadKeep.attachmentId);
+    store.db.prepare('DELETE FROM external_refs WHERE document_id = ?').run(uploadKeep.document.id);
+
+    const auditedCount = store.countBlobOnlyWebImports(actor);
+    const auditedList = store.listBlobOnlyWebImportAttachments(actor);
+    assert.equal(auditedCount, 2, 'audit must count exactly the two web imports');
+
+    const result = await runBlobOnlyWebImportMigration(store, actor, {});
+    assert.equal(result.report.scanned, 2);
+    assert.equal(result.report.migrated, 2);
+    assert.equal(result.report.conflicts, 0);
+    assert.equal(result.report.failed, 0);
+
+    for (const legacy of [legacy1, legacy2]) {
+      const doc = store.getDocument(actor, legacy.document.id);
+      assert.equal(doc.attachments.length, 1);
+      const activeAtt = doc.attachments[0];
+      assert.equal(activeAtt.storageKind, 'source_file');
+      assert.equal(activeAtt.blobHash ?? null, null);
+      const content = store.getAttachmentContent(actor, activeAtt.id);
+      assert.equal(content.kind, 'source_file');
+      const diskPath = path.join(content.sourceFile.rootAbsolutePath, content.sourceFile.relativePath);
+      assert.equal(fs.existsSync(diskPath), true, 'migrated file must exist in the library root');
+      assert.equal(fs.readFileSync(diskPath).toString().includes('legacy'), true);
+    }
+    // Archived under 网页导入/ with derived names.
+    assert.equal(fs.existsSync(path.join(rootDir, '网页导入', 'Legacy Web Paper A.pdf')), true);
+    assert.equal(fs.existsSync(path.join(rootDir, '网页导入', 'Legacy Web Paper B.pdf')), true);
+    // The uploaded (non-web) blob attachment is untouched.
+    assert.equal(store.getAttachment(actor, uploadKeep.attachmentId).storageKind, 'managed_blob');
+
+    // Range reads keep working through the unified endpoint.
+    const session = createSession({
+      userId: 'm4-mig-1', subject: 'm4-mig', authMode: 'local',
+      username: 'mig', role: 'admin', actorKey: actor
+    });
+    const cookie = `altcanvas_session=${session.id}`;
+    const handler = createCanvasHandler(store);
+    const legacy1ActiveAtt = store.getDocument(actor, legacy1.document.id).attachments[0];
+    const rangeRes = await call(handler, `/canvas/native/attachments/${legacy1ActiveAtt.id}/file`, {
+      cookie, headers: { range: 'bytes=0-7' }
+    });
+    assert.equal(rangeRes.statusCode, 206);
+    assert.equal(rangeRes.buffer.toString('ascii').startsWith('%PDF-1.4'), true);
+
+    // 25.2 Idempotent re-run: pending count is 0, nothing changes.
+    assert.equal(store.countBlobOnlyWebImports(actor), 0);
+    const rerun = await runBlobOnlyWebImportMigration(store, actor, {});
+    assert.equal(rerun.report.scanned, 0);
+    assert.equal(rerun.report.migrated, 0);
+
+    // 25.3 Conflict: a different-content file already owns the target name ->
+    // recorded as conflict, original blob stays readable, DB untouched.
+    const legacy3Bytes = makePdfBytes('legacy-C');
+    const legacy3 = makeBlobLegacyImport('Legacy Web Paper A', legacy3Bytes);
+    // Same original filename as legacy1 -> target name collides with a
+    // DIFFERENT content file already in the archive.
+    const conflictRun = await runBlobOnlyWebImportMigration(store, actor, {});
+    assert.equal(conflictRun.report.conflicts, 1, 'same-name different-content must be recorded as a conflict');
+    assert.equal(conflictRun.report.migrated, 0);
+    assert.equal(store.getAttachment(actor, legacy3.attachmentId).storageKind, 'managed_blob',
+      'conflicted attachment must stay on blob storage for the user to resolve');
+    const rangeStill = await call(handler, `/canvas/native/attachments/${legacy3.attachmentId}/file`, { cookie });
+    assert.equal(rangeStill.statusCode, 200, 'conflicted attachment remains readable from the blob');
+
+    // 25.4 DB-failure compensation: importNativeDocumentToSourceFile refuses ->
+    // the placed file is removed and the blob stays readable (双向无孤儿).
+    const legacy4Bytes = makePdfBytes('legacy-D');
+    const legacy4 = makeBlobLegacyImport('Legacy Web Paper D', legacy4Bytes);
+    const failingStore = new Proxy(store, {
+      get(target, prop) {
+        if (prop === 'createSourceFileAttachment') {
+          return () => { throw new Error('simulated DB failure during migration'); };
+        }
+        const value = target[prop];
+        return typeof value === 'function' ? value.bind(target) : value;
+      }
+    });
+    const failedRun = await runBlobOnlyWebImportMigration(failingStore, actor, {});
+    assert.equal(failedRun.report.failed >= 1, true);
+    assert.equal(store.getAttachment(actor, legacy4.attachmentId).storageKind, 'managed_blob',
+      'DB failure must leave the attachment on blob storage');
+    const content4 = store.getAttachmentContent(actor, legacy4.attachmentId);
+    assert.equal(content4.kind, 'managed_blob');
+    assert.equal(fs.existsSync(content4.filePath), true, 'blob stays readable after failed migration');
+
+    console.log('✅ M4 blob-only web-import migration: audit, archival, reuse, conflict recording, idempotent re-run, DB-failure compensation passed');
+  } finally {
+    try { store.close(); } catch {}
+    fs.rmSync(tempDir, { recursive: true, force: true });
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+}
+
+async function testM4FinalRemediation() {
+  await testWebImportDefaultArchiving();
+  await testBlobOnlyWebImportMigration();
+}
+
 try {
   await main();
   await testV12Migration();
@@ -2378,6 +2689,7 @@ try {
   await testM4Audit2Fixes();
   await testM4Audit3Fixes();
   await testRecoveryRollbackContentIdentity();
+  await testM4FinalRemediation();
   process.exit(0);
 } catch (err) {
   console.error('❌ Native M4 test failure:', err);

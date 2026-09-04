@@ -205,6 +205,7 @@ export async function safeDownloadPdfFile(url, targetDir, {
   let redirectsCount = 0;
   let totalBytes = 0;
   let firstChunk = null;
+  let contentDispositionName = null;
 
   const cleanup = () => {
     try { writeStream.destroy(); } catch {}
@@ -235,6 +236,20 @@ export async function safeDownloadPdfFile(url, targetDir, {
       }
 
       const statusCode = res.status || res.statusCode || 200;
+      // Trusted filename hint for the M4 archive filename chain (candidate 1).
+      const disposition = (res.headers && typeof res.headers.get === 'function')
+        ? res.headers.get('content-disposition')
+        : (res.headers?.['content-disposition'] || null);
+      if (disposition && !contentDispositionName) {
+        const utf8Match = /filename\*=UTF-8''([^;]+)/i.exec(disposition);
+        const plainMatch = /filename="?([^";]+)"?/i.exec(disposition);
+        const extracted = utf8Match
+          ? (() => { try { return decodeURIComponent(utf8Match[1].trim()); } catch { return utf8Match[1].trim(); } })()
+          : (plainMatch ? plainMatch[1].trim() : '');
+        if (extracted.toLowerCase().endsWith('.pdf')) {
+          contentDispositionName = extracted;
+        }
+      }
       if ([301, 302, 303, 307, 308].includes(statusCode)) {
         redirectsCount++;
         if (redirectsCount > maxRedirects) throw new Error(`Too many redirects (limit: ${maxRedirects})`);
@@ -303,7 +318,8 @@ export async function safeDownloadPdfFile(url, targetDir, {
       tempFilePath,
       sha256,
       sizeBytes: stat.size,
-      mimeType: 'application/pdf'
+      mimeType: 'application/pdf',
+      filename: contentDispositionName
     };
   } catch (err) {
     cleanup();
