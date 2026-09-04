@@ -65,7 +65,9 @@ export function extractArxivId(input) {
   return match ? (match[1] || match[2]) : null;
 }
 
-function requestWithPinnedIp(parsedUrl, pinnedAddress, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
+// Exported for the real-dial regression test: the pinned-IP dialer is the one
+// place a custom dns lookup callback meets Node's autoSelectFamily machinery.
+export function requestWithPinnedIp(parsedUrl, pinnedAddress, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
   return new Promise((resolve, reject) => {
     const isHttps = parsedUrl.protocol === 'https:';
     const requester = isHttps ? https.request : http.request;
@@ -83,11 +85,25 @@ function requestWithPinnedIp(parsedUrl, pinnedAddress, options = {}, timeoutMs =
       path: `${parsedUrl.pathname}${parsedUrl.search}`,
       method: options.method || 'GET',
       headers,
+      // Node ≥20 enables autoSelectFamily (Happy Eyeballs), which drives the
+      // custom lookup with all:true and expects cb(null, [{address, family}, …]).
+      // The previous single-address callback shape made Node read .address off
+      // a string and fail with ERR_INVALID_IP_ADDRESS(undefined) on every real
+      // DNS dial (found by UI acceptance; injected transports never hit it).
+      // Serve BOTH callback shapes from the single validated record.
       lookup: (h, opt, cb) => {
-        if (pinnedAddress?.address) {
-          cb(null, pinnedAddress.address, pinnedAddress.family || 4);
+        if (!pinnedAddress?.address) {
+          // DNS pinning invariant: no request may dial a host we did not
+          // verify. Never fall back to the hostname (that would both bypass
+          // the pin and hand Node a non-IP address).
+          cb(new Error(`DNS pinning failed: no validated address for ${h}`));
+          return;
+        }
+        const record = { address: pinnedAddress.address, family: pinnedAddress.family || 4 };
+        if (opt?.all) {
+          cb(null, [record]);
         } else {
-          cb(null, h, 4);
+          cb(null, record.address, record.family);
         }
       },
       servername: parsedUrl.hostname

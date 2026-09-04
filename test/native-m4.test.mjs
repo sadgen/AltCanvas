@@ -2,6 +2,7 @@ import assert from 'assert/strict';
 import crypto from 'crypto';
 import { EventEmitter } from 'events';
 import fs from 'fs';
+import http from 'node:http';
 import os from 'os';
 import path from 'path';
 import { DatabaseSync } from 'node:sqlite';
@@ -4009,6 +4010,53 @@ async function testM4SourceFileVersionEndpoint() {
   }
 }
 
+// ============================================================
+// 32. M4 Audit 9 (UI acceptance finding #2): Node ≥20 autoSelectFamily
+//     (Happy Eyeballs) drives custom dns lookups with all:true and expects
+//     a record ARRAY in the callback. The pinned-IP dialer used the
+//     single-address shape, so every REAL DNS dial died with
+//     ERR_INVALID_IP_ADDRESS(undefined) — invisible to the suites that
+//     inject transportFn. Pins a genuine dial through the custom lookup
+//     plus the no-pin hard-fail invariant (never dial an unpinned host).
+// ============================================================
+async function testM4PinnedIpRealDial() {
+  const { requestWithPinnedIp } = await import('../server/import-resolver.mjs');
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end('pinned-dial-ok');
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const port = server.address().port;
+    // 32.1 A real dial through the custom lookup callback (dual mode). The
+    // host must be a HOSTNAME — Node skips custom lookups entirely for IP
+    // literals, so only a hostname exercises the autoSelectFamily path.
+    const res = await requestWithPinnedIp(
+      new URL(`http://altcanvas-real-dial.invalid:${port}/x`),
+      { address: '127.0.0.1', family: 4 },
+      {}, 5000
+    );
+    const text = await new Promise((resolve, reject) => {
+      let data = '';
+      res.on('data', c => { data += c; });
+      res.on('end', () => resolve(data));
+      res.on('error', reject);
+    });
+    assert.equal(text, 'pinned-dial-ok',
+      'the pinned dial must complete through the all:true lookup callback shape');
+    // 32.2 No validated address → hard fail; never a hostname fallback that
+    // would both bypass DNS pinning and hand Node a non-IP address. A distinct
+    // hostname keeps the default keep-alive agent from reusing 32.1's pooled
+    // socket (reused sockets skip the lookup entirely).
+    await assert.rejects(
+      requestWithPinnedIp(new URL(`http://altcanvas-pin-guard.invalid:${port}/x`), null, {}, 5000),
+      /DNS pinning failed/
+    );
+  } finally {
+    server.close();
+  }
+}
+
 async function testM4FinalRemediation() {
   await testWebImportDefaultArchiving();
   await testBlobOnlyWebImportMigration();
@@ -4018,6 +4066,7 @@ async function testM4FinalRemediation() {
   await testM4AuditSixIdentityDivergenceAndCompensation();
   await testM4AuditNineMigrationCrashJournal();
   await testM4SourceFileVersionEndpoint();
+  await testM4PinnedIpRealDial();
 }
 
 try {
