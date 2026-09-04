@@ -1607,8 +1607,14 @@ async function executeNativeImportItem(store, actorKey, normalized, {
       cleanupTemp();
 
       const legacyAtt = (blobHolder.attachments || []).find(a => a.blobHash === attachment.sha256) || blobHolder.attachments?.[0];
+      let promotion = null;
+      let updatedDoc = null;
       try {
-        const promotion = store.promoteBlobAttachmentToSourceFile(actorKey, {
+        // SINGLE commit boundary: the in-place promotion, the metadata
+        // backfill and the topic bindings commit atomically. A failure inside
+        // the transaction rolls back EVERYTHING — the placed file is then
+        // referenced by no DB row, so the catch below may safely remove it.
+        const committed = store.promoteBlobAttachmentAndBackfill(actorKey, {
           attachmentId: legacyAtt.id,
           documentId: blobHolder.id,
           rootId: effectiveFileTarget.root.id,
@@ -1617,25 +1623,11 @@ async function executeNativeImportItem(store, actorKey, normalized, {
           sha256: attachment.sha256,
           sizeBytes: attachment.sizeBytes || targetStat.size,
           modifiedAt: Math.round(targetStat.mtimeMs)
-        });
-
-        const updatedDoc = store.backfillDocumentAndTopics(actorKey, blobHolder.id, {
+        }, {
           doi, isbn, url, abstract, year, creators, topicIds: allTopicIds
         });
-
-        store.completeFileOperation(operation.id);
-
-        return {
-          result: {
-            outcome: 'reused',
-            match: { strategy: 'sha256', documentId: blobHolder.id },
-            document: updatedDoc,
-            sourceFile: promotion.sourceFile,
-            attachment: promotion.attachment,
-            promotedFromBlob: true
-          },
-          warning
-        };
+        promotion = committed.promotion;
+        updatedDoc = committed.document;
       } catch (promoteErr) {
         if (promoteErr.code === 'promotion_target_diverged') {
           // A concurrent request archived this attachment under a DIFFERENT
@@ -1687,6 +1679,8 @@ async function executeNativeImportItem(store, actorKey, normalized, {
           };
         }
         if (placedOnDisk) {
+          // The transaction rolled back (or never committed): the placed file
+          // is referenced by no DB row, so verified compensation is safe here.
           try {
             await safeUnlinkWithExpectedSha(effectiveFileTarget.root.absolutePath, targetRelativePath, attachment.sha256);
             store.markFileOperationRolledBack(operation.id);
@@ -1698,6 +1692,29 @@ async function executeNativeImportItem(store, actorKey, normalized, {
         }
         throw promoteErr;
       }
+
+      // The transaction is COMMITTED: the PDF is referenced by a live
+      // source_files row. From this point bookkeeping failures must NEVER
+      // delete the file. If the operation completion itself fails, the entry
+      // stays resumable and startup recovery settles it to completed from the
+      // committed row plus the disk facts (reconcileImport's dbRow branch).
+      try {
+        store.completeFileOperation(operation.id);
+      } catch (opErr) {
+        // Intentionally left running for recoverInterruptedFileOperations.
+      }
+
+      return {
+        result: {
+          outcome: 'reused',
+          match: { strategy: 'sha256', documentId: blobHolder.id },
+          document: updatedDoc,
+          sourceFile: promotion.sourceFile,
+          attachment: promotion.attachment,
+          promotedFromBlob: true
+        },
+        warning
+      };
     }
   }
 

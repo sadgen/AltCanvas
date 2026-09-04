@@ -1905,3 +1905,37 @@ M4 维持 CONDITIONAL PASS——按审计结论，本项补完后进入最后人
 - `git diff --check`：100% 干净；
 - 服务重启验证通过（active/running，端口 8088 正常）；
 - 里程碑状态：严格保持 **`M4 CONDITIONAL PASS`**，等待最终复审与人工实机验收。
+
+---
+
+## 2026-09-04 会话（M4 八轮终审加固：自动归档提升收敛为单一提交边界，根除"提交后回填失败误删已引用 PDF"的反向撕裂）
+
+### 一、整改背景与根因修复
+
+第八轮审计通过独立注入"提升成功、元数据回填失败"发现一个新的 P1 事务边界缺陷：自动归档路径先由 `promoteBlobAttachmentToSourceFile()` 在独立事务中提交 attachment/source_file 变更并递减 Blob 引用，随后才调用 `backfillDocumentAndTopics()`；回填一旦失败进入统一 catch，catch 用 `safeUnlinkWithExpectedSha` 删除了**已经被数据库正式引用**的 PDF，并把操作错误地标记为 `rolled_back`——attachment 已永久切换 source_file、source_files 行有效，真实 PDF 却消失了。
+
+**修复（按审计建议实现明确的提交边界）**：
+
+1. **新增统一 Store 事务方法 `promoteBlobAttachmentAndBackfill(actorKey, promotion, backfill)`**（`server/canvas-store.mjs`）：
+   - 附件原地提升、source_file 创建、元数据回填、主题关联、Blob 引用递减全部在**单一 SQLite 事务**内提交；
+   - 事务内任何一步失败整体回滚——落盘文件不再被任何 DB 行引用，调用方的补偿删除因此总是安全的；
+   - 事务利用现有 `transaction()` 的重入语义组合两个子方法，无嵌套 BEGIN。
+
+2. **`server/canvas-api.mjs` 提交边界重排**：
+   - 落盘 → `promoteBlobAttachmentAndBackfill()` 单事务提交 → `completeFileOperation()`；
+   - **仅当数据库事务尚未提交时**（合并事务抛错，含 `promotion_target_diverged`），才允许删除落盘文件并标记 `rolled_back`；
+   - **数据库提交后**，`completeFileOperation()` 失败被有意吞掉（带注释说明）：不删除文件、不向客户端报错，操作日志保持 `running` 可恢复状态，由启动恢复器 `reconcileImport` 依据已提交的 source_files 行 + 磁盘事实结算为 `completed`；
+   - `completeFileOperation()` 保留在事务外，其失败绝不触发文件补偿。
+
+### 二、新增行为测试（测试组 29 扩展 29.6/29.7）
+
+1. **29.6 提升事务内回填失败 → 全回滚**：实例级 patch `backfillDocumentAndTopics` 抛错，断言 HTTP 500、回填在合并事务内执行、附件回滚为 `managed_blob` 且 blob 哈希绑定恢复、无任何存活 source_files 行认领落盘路径、Blob 引用计数恢复原值、补偿删除安全执行、操作 `rolled_back`、`PRAGMA foreign_key_check` 为空；
+2. **29.7 提交后 completeFileOperation 失败 → 绝不删文件**：实例级 patch `completeFileOperation` 抛错，断言 HTTP 200 reused（DB 与磁盘已一致）、PDF 保留、附件为 `source_file` 且经统一内容访问器可读、全库扫描断言**不存在"有效 source_file 行指向缺失文件"**、操作保持 `running`，随后 `recoverInterruptedFileOperations` 依据已提交行结算为 `completed`；
+3. **配套修正**：28.1/29.2/29.5 的注入拦截目标从 `promoteBlobAttachmentToSourceFile` 迁移到 `promoteBlobAttachmentAndBackfill`（执行器现在调用合并方法）；29.2/29.5 的文件清理改为保留有 DB 行引用的赢家文件，使 29.7 的全库 live-row 完整性扫描成立。
+
+### 三、全套验证与状态
+
+- `npm test`（10 套完整测试套件）**100% 全部通过（exit 0）**；
+- `git diff --check`：100% 干净；
+- 服务重启验证通过（active/running，端口 8088，`/` 与 `/auth/session` 均 200）；
+- 里程碑状态：严格保持 **`M4 CONDITIONAL PASS`**，等待最终复审与人工实机验收。

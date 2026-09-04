@@ -5547,6 +5547,23 @@ export class CanvasStore {
     });
   }
 
+  // ONE commit boundary for the auto-archive promotion of a re-imported
+  // identical PDF: the in-place attachment promotion, the metadata backfill
+  // and the topic bindings commit in a SINGLE transaction. A failure anywhere
+  // inside rolls back EVERYTHING — the placed file is then referenced by no
+  // DB row and the caller may safely compensate (unlink) it. Callers must
+  // never split this into separately committed steps: the historical split
+  // (promote commits, then backfill) produced a torn state where a live
+  // source_files row pointed at a PDF the error handler had just deleted.
+  // Returns { promotion: { attachment, sourceFile, raced }, document }.
+  promoteBlobAttachmentAndBackfill(actorKey, promotion, backfill) {
+    return this.transaction(() => {
+      const promotionResult = this.promoteBlobAttachmentToSourceFile(actorKey, promotion);
+      const document = this.backfillDocumentAndTopics(actorKey, promotion.documentId, backfill);
+      return { promotion: promotionResult, document };
+    });
+  }
+
   // Promotes a managed_blob attachment onto a source_files row that ALREADY
   // exists for the same document and carries the same content (the one-shot
   // migration's reuse path). Enforces the SAME invariants as

@@ -3094,11 +3094,13 @@ async function testM4AuditFiveStrictSafetyAndPagination() {
       VALUES (?, ?, ?, 'application/pdf', 'promo.pdf', 'Doc To Promote', ?, 'managed_blob', 1, ?, ?)
     `).run(att1Id, doc1.id, blobSha1, blobBytes1.length, new Date().toISOString(), new Date().toISOString());
 
-    // Intercept promoteBlobAttachmentToSourceFile to simulate DB error
+    // Intercept the combined promotion+backfill transaction to simulate a DB
+    // error. The whole transaction rolls back, so the placed file is not yet
+    // referenced and the compensation below is safe.
     let targetRelIntercepted = null;
     const failingStore = new Proxy(store, {
       get(target, prop) {
-        if (prop === 'promoteBlobAttachmentToSourceFile') {
+        if (prop === 'promoteBlobAttachmentAndBackfill') {
           return (...args) => {
             targetRelIntercepted = args[1].relativePath;
             throw new Error('simulated DB promotion failure');
@@ -3424,7 +3426,7 @@ async function testM4AuditSixIdentityDivergenceAndCompensation() {
     let promoteCalls = 0;
     const racingStore = new Proxy(store, {
       get(target, prop) {
-        if (prop === 'promoteBlobAttachmentToSourceFile') {
+        if (prop === 'promoteBlobAttachmentAndBackfill') {
           return (...args) => {
             promoteCalls += 1;
             if (promoteCalls === 1) {
@@ -3437,7 +3439,7 @@ async function testM4AuditSixIdentityDivergenceAndCompensation() {
                 modifiedAt: Math.round(fs.statSync(path.join(rootDir, winnerRel)).mtimeMs)
               });
             }
-            return target.promoteBlobAttachmentToSourceFile(...args);
+            return target.promoteBlobAttachmentAndBackfill(...args);
           };
         }
         const v = target[prop];
@@ -3467,7 +3469,8 @@ async function testM4AuditSixIdentityDivergenceAndCompensation() {
     assert.equal(attAfterDiverge.storageKind, 'source_file');
     const annCount = store.db.prepare('SELECT COUNT(*) AS n FROM annotations WHERE attachment_id = ?').get(diverge2.attId).n;
     assert.equal(annCount, 1, 'annotations survive the diverged promotion');
-    fs.unlinkSync(path.join(rootDir, '网页导入', 'diverge2-a.pdf'));
+    // NOTE: diverge2-a.pdf stays on disk — its live source_files row keeps
+    // pointing at it and later sub-tests assert no live row misses its file.
 
     // --- 29.3 (P1-3) Post-placement failures compensate and surface compensation_failed ---
     // (a) Anchored-stat failure right after a successful placement: the placed
@@ -3617,7 +3620,7 @@ async function testM4AuditSixIdentityDivergenceAndCompensation() {
     let diverge3Calls = 0;
     const tamperStore = new Proxy(store, {
       get(target, prop) {
-        if (prop === 'promoteBlobAttachmentToSourceFile') {
+        if (prop === 'promoteBlobAttachmentAndBackfill') {
           return (...args) => {
             diverge3Calls += 1;
             if (diverge3Calls === 1) {
@@ -3634,7 +3637,7 @@ async function testM4AuditSixIdentityDivergenceAndCompensation() {
               // compensation runs: the verified unlink must refuse to delete it.
               fs.writeFileSync(path.join(rootDir, '网页导入', 'diverge3-b.pdf'), makePdfBytes('replaced-loser-content'));
             }
-            return target.promoteBlobAttachmentToSourceFile(...args); // throws promotion_target_diverged
+            return target.promoteBlobAttachmentAndBackfill(...args); // throws promotion_target_diverged
           };
         }
         const v = target[prop];
@@ -3668,10 +3671,103 @@ async function testM4AuditSixIdentityDivergenceAndCompensation() {
     assert.equal(diverge3Att.storageKind, 'source_file');
     assert.equal(store.getSourceFile(actor, diverge3Att.sourceFileId).relativePath, '网页导入/diverge3-a.pdf',
       'the authoritative archive location stays the winning a.pdf');
-    fs.unlinkSync(path.join(rootDir, '网页导入', 'diverge3-a.pdf'));
+    // diverge3-a.pdf stays (live row keeps pointing at it); b.pdf held foreign
+    // replacement content with no DB row, so it is safe to remove here.
     fs.unlinkSync(path.join(rootDir, '网页导入', 'diverge3-b.pdf'));
 
-    console.log('✅ M4 Audit 6/7: mandatory SHA identity, promotion target divergence compensation (incl. failed-compensation 500), post-placement failure compensation, reuse-path version sync, second-chance recovery audit hygiene passed');
+    // --- 29.6 (Audit 8 P1) SINGLE commit boundary: a backfill failure rolls
+    // back the WHOLE promotion, so the compensation never deletes a
+    // DB-referenced PDF ---
+    const bfFail = seedBlobAttachment('bffail');
+    pdfByUrl.set('https://example.org/bffail.pdf', bfFail.bytes);
+    const bfRefCountBefore = store.db.prepare('SELECT reference_count FROM blobs WHERE sha256 = ?').get(bfFail.sha).reference_count;
+    const originalBackfill = store.backfillDocumentAndTopics;
+    let backfillCalls = 0;
+    // Instance-level patch: the merged store method calls backfill through
+    // `this`, which a Proxy cannot intercept.
+    store.backfillDocumentAndTopics = function () {
+      backfillCalls += 1;
+      throw new Error('simulated backfill failure');
+    };
+    let bfFailRes;
+    try {
+      const bfFailHandler = createCanvasHandler(store, { downloadPdfFn: fakeDownload });
+      bfFailRes = await call(bfFailHandler, '/canvas/imports/native', {
+        method: 'POST', cookie,
+        body: { title: 'Audit6 bffail', pdfUrl: 'https://example.org/bffail.pdf', filename: 'bffail.pdf' }
+      });
+    } finally {
+      store.backfillDocumentAndTopics = originalBackfill;
+    }
+    assert.equal(bfFailRes.statusCode, 500);
+    assert.equal(backfillCalls, 1, 'the backfill must run inside the merged promotion transaction');
+    const bfAtt = store.getAttachment(actor, bfFail.attId);
+    assert.equal(bfAtt.storageKind, 'managed_blob',
+      'a backfill failure must roll the promotion back to managed_blob (no torn half-commit)');
+    assert.equal(bfAtt.blobHash, bfFail.sha, 'the blob binding must be restored by the rollback');
+    assert.equal(store.db.prepare(
+      'SELECT COUNT(*) AS n FROM source_files WHERE root_id = ? AND relative_path = ? AND deleted_at IS NULL'
+    ).get(root.id, '网页导入/bffail.pdf').n, 0, 'no live source_files row may survive the rolled-back promotion');
+    assert.equal(store.db.prepare('SELECT reference_count FROM blobs WHERE sha256 = ?').get(bfFail.sha).reference_count,
+      bfRefCountBefore, 'the blob reference count must be restored by the rollback');
+    // The DB references nothing at the placed path, so compensation removed it.
+    assert.equal(fs.existsSync(path.join(rootDir, '网页导入', 'bffail.pdf')), false,
+      'compensation may only remove the file while the DB does not reference it');
+    const bfOpRow = store.db.prepare(
+      "SELECT state, error_code FROM file_operations WHERE operation_type = 'file.import' AND target_path LIKE '%bffail.pdf%' ORDER BY created_at DESC LIMIT 1"
+    ).get();
+    assert.ok(bfOpRow);
+    assert.equal(bfOpRow.state, 'rolled_back');
+    assert.equal(store.db.prepare('PRAGMA foreign_key_check').all().length, 0,
+      'relational integrity must hold after the rolled-back promotion');
+
+    // --- 29.7 (Audit 8 P1) a COMMITTED promotion whose operation completion
+    // fails must keep the PDF and leave the operation resumable ---
+    const cFail = seedBlobAttachment('commitfail');
+    pdfByUrl.set('https://example.org/commitfail.pdf', cFail.bytes);
+    const originalComplete = store.completeFileOperation;
+    store.completeFileOperation = function () { throw new Error('simulated operation completion failure'); };
+    let cFailRes;
+    try {
+      const cFailHandler = createCanvasHandler(store, { downloadPdfFn: fakeDownload });
+      cFailRes = await call(cFailHandler, '/canvas/imports/native', {
+        method: 'POST', cookie,
+        body: { title: 'Audit6 commitfail', pdfUrl: 'https://example.org/commitfail.pdf', filename: 'commitfail.pdf' }
+      });
+    } finally {
+      store.completeFileOperation = originalComplete;
+    }
+    assert.equal(cFailRes.statusCode, 200,
+      'a committed promotion must report success even when operation completion fails');
+    assert.equal(cFailRes.payload.data.outcome, 'reused');
+    assert.equal(fs.existsSync(path.join(rootDir, '网页导入', 'commitfail.pdf')), true,
+      'post-commit bookkeeping failures must NEVER delete the referenced PDF');
+    const cAtt = store.getAttachment(actor, cFail.attId);
+    assert.equal(cAtt.storageKind, 'source_file');
+    assert.equal(store.getSourceFile(actor, cAtt.sourceFileId).relativePath, '网页导入/commitfail.pdf');
+    // Invariant: no live source_files row may point at a missing file.
+    for (const row of store.db.prepare(
+      "SELECT relative_path FROM source_files WHERE root_id = ? AND deleted_at IS NULL AND status IN ('active','duplicate')"
+    ).all(root.id)) {
+      assert.equal(fs.existsSync(path.join(rootDir, row.relative_path)), true,
+        `live source_files row points at a missing file: ${row.relative_path}`);
+    }
+    // The attachment is readable through the unified content accessor.
+    const cContent = store.getAttachmentContent(actor, cFail.attId);
+    assert.equal(cContent.kind, 'source_file');
+    assert.equal(store.db.prepare('PRAGMA foreign_key_check').all().length, 0);
+    // The completion failure left the operation resumable; startup recovery
+    // settles it to completed from the committed row plus disk facts.
+    const cOpRow = store.db.prepare(
+      "SELECT id, state FROM file_operations WHERE operation_type = 'file.import' AND target_path LIKE '%commitfail.pdf%' ORDER BY created_at DESC LIMIT 1"
+    ).get();
+    assert.ok(cOpRow);
+    assert.equal(cOpRow.state, 'running', 'completion failure must leave the operation resumable');
+    await recoverInterruptedFileOperations(store);
+    const cOpAfter = store.db.prepare('SELECT state, error_code FROM file_operations WHERE id = ?').get(cOpRow.id);
+    assert.equal(cOpAfter.state, 'completed', 'startup recovery must settle the committed promotion to completed');
+
+    console.log('✅ M4 Audit 6/7/8: mandatory SHA identity, diverged-race compensation (incl. 500 on failed cleanup), post-placement failure compensation, reuse-path version sync, single-commit-boundary promotion, recovery audit hygiene passed');
   } finally {
     try { store.close(); } catch {}
     fs.rmSync(tempDir, { recursive: true, force: true });
