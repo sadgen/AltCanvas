@@ -2043,6 +2043,35 @@ try {
   }).cleanTitle, '【测试研究院】视觉语言模型综述（2025）',
     'AI classification must persist the Chinese display name in the same request');
 
+  // [M4 UX] AI placeholder garbage (【未注明机构】…（未知年份）) must never reach
+  // the display name: decorations are stripped, placeholder fields come back
+  // empty, and a fully-stripped title falls back to the document title.
+  const placeholderDoc = store.createDocument(canvasActorKey('https://issuer.example', 'api-subject'), {
+    title: 'Deep Learning Basics'
+  });
+  const placeholderHandler = createCanvasHandler(store, {
+    aiPublicConfig: () => ({ configured: true, provider: 'mock.example', model: 'mock-model' }),
+    aiCompletion: async () => JSON.stringify({
+      classifications: {},
+      documentMetadata: {
+        [placeholderDoc.id]: {
+          cleanTitle: '【未注明机构】深度学习基础（未知年份）',
+          institution: '未注明机构',
+          year: '未知'
+        }
+      }
+    })
+  });
+  const placeholderRes = await call(placeholderHandler, '/canvas/native/documents/classify', {
+    method: 'POST', cookie, body: { documentIds: [placeholderDoc.id] }
+  });
+  assert.equal(placeholderRes.statusCode, 200);
+  const placeholderMeta = placeholderRes.payload.data.documentMetas[0];
+  assert.equal(placeholderMeta.cleanTitle, '深度学习基础',
+    'placeholder decorations must be stripped from the display name');
+  assert.equal(placeholderMeta.institution, '', 'placeholder institution must be stored empty');
+  assert.equal(placeholderMeta.year, '', 'placeholder year must be stored empty');
+
   // Native classify rejects oversized document id lists before any AI call
   const oversizedIds = Array.from({ length: 201 }, () => '00000000-0000-4000-8000-000000000000');
   const oversizedRes = await call(nativeClassifyHandler, '/canvas/native/documents/classify', {

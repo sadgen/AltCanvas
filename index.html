@@ -831,6 +831,26 @@
     </div>
   </div>
 
+  <!-- M4: 手动加入研究主题对话框（低置信度未自动归类的文献由此手动归类） -->
+  <div id="add-to-topic-modal" role="dialog" aria-modal="true" aria-labelledby="add-to-topic-title" class="fixed inset-0 bg-black/75 z-[60] flex items-center justify-center p-4 hidden backdrop-blur-sm">
+    <div class="bg-slate-900 border border-slate-800 rounded-xl max-w-md w-full p-5 space-y-3.5 shadow-2xl">
+      <div class="flex items-center justify-between">
+        <h3 id="add-to-topic-title" class="text-sm font-semibold text-slate-100">加入研究主题</h3>
+        <button id="btn-close-add-to-topic" type="button" class="text-slate-400 hover:text-slate-200 text-lg leading-none" aria-label="关闭">&times;</button>
+      </div>
+      <p id="add-to-topic-doc-name" class="text-[11px] text-slate-400 leading-relaxed break-all"></p>
+      <div>
+        <label for="add-to-topic-select" class="block text-slate-300 font-medium mb-1 text-xs">选择研究主题</label>
+        <select id="add-to-topic-select" class="w-full bg-slate-950 border border-slate-800 rounded text-slate-200 px-3 py-2 text-xs focus:outline-none focus:border-indigo-500"></select>
+      </div>
+      <div id="add-to-topic-error" class="hidden p-2 rounded bg-rose-950/50 border border-rose-800/60 text-[11px] text-rose-300"></div>
+      <div class="flex items-center justify-end gap-2 pt-1">
+        <button id="btn-cancel-add-to-topic" type="button" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-xs transition">取消</button>
+        <button id="btn-confirm-add-to-topic" type="button" class="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-xs font-medium transition">加入</button>
+      </div>
+    </div>
+  </div>
+
   <!-- M4: 原始文件名对话框（重命名 / 移动 / 冲突改名重试） -->
   <div id="file-name-modal" role="dialog" aria-modal="true" aria-labelledby="file-name-modal-title" class="fixed inset-0 bg-black/75 z-[60] flex items-center justify-center p-4 hidden backdrop-blur-sm">
     <div class="bg-slate-900 border border-slate-800 rounded-xl max-w-md w-full p-5 space-y-3.5 shadow-2xl">
@@ -1834,6 +1854,36 @@
       else await loadTopicLibraryDocuments();
     });
     document.getElementById('btn-manage-library-topic')?.addEventListener('click', () => openTopicSettingsModal('docs'));
+    document.getElementById('btn-close-add-to-topic')?.addEventListener('click', closeAddToTopicModal);
+    document.getElementById('btn-cancel-add-to-topic')?.addEventListener('click', closeAddToTopicModal);
+    document.getElementById('btn-confirm-add-to-topic')?.addEventListener('click', async () => {
+      if (!addToTopicItem) return;
+      const topicId = document.getElementById('add-to-topic-select').value;
+      const errEl = document.getElementById('add-to-topic-error');
+      if (!topicId) {
+        errEl.textContent = '请选择研究主题';
+        errEl.classList.remove('hidden');
+        return;
+      }
+      const confirmBtn = document.getElementById('btn-confirm-add-to-topic');
+      confirmBtn.disabled = true;
+      try {
+        await m4Fetch('/native/documents/batch-topics', {
+          method: 'POST',
+          body: { documentIds: [addToTopicItem.key], topicIds: [topicId] }
+        });
+        closeAddToTopicModal();
+        showToast('已加入研究主题', 'success');
+        await loadNativeLibrary().catch(() => {});
+        if (currentLibraryView === 'topics') await loadTopicLibraryDocuments().catch(() => {});
+        else await applyLibraryFilter(libraryFilterState).catch(() => {});
+      } catch (err) {
+        errEl.textContent = errorMessage(err);
+        errEl.classList.remove('hidden');
+      } finally {
+        confirmBtn.disabled = false;
+      }
+    });
     document.getElementById('btn-open-topic-settings')?.addEventListener('click', () => openTopicSettingsModal('meta'));
     document.getElementById('btn-close-topic-settings')?.addEventListener('click', closeTopicSettingsModal);
     document.querySelectorAll('.topic-tab').forEach(btn => {
@@ -2109,6 +2159,7 @@
           </div>
           ${item.isNative && item.sourceFile ? `
           <div class="flex flex-wrap gap-1 mt-1.5 native-item-actions">
+            <button type="button" class="px-1.5 py-0.5 rounded bg-indigo-950/60 border border-indigo-800/60 text-[10px] text-indigo-300 hover:text-indigo-200" data-native-action="add-topic" title="把该文献加入研究主题（主题分类 Tab 可按主题打开）">📚 主题</button>
             <button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-slate-300 hover:text-slate-100" data-native-action="rename-original" title="重命名磁盘上的原始文件（文库文件名不变）">✏️ 原始文件</button>
             <button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-slate-300 hover:text-slate-100" data-native-action="move" title="移动原始文件到其他目录">📂 移动</button>
             ${item.sourceFile.status === 'trashed'
@@ -2120,6 +2171,11 @@
           if (e.target.closest('.btn-item-edit-meta')) {
             e.stopPropagation();
             openDocMetaModal(item);
+            return;
+          }
+          if (e.target.closest('[data-native-action="add-topic"]') && item.isNative) {
+            e.stopPropagation();
+            openAddToTopicModal(item);
             return;
           }
           const nativeActionBtn = e.target.closest('[data-native-action]');
@@ -2743,6 +2799,26 @@
       }
     }
 
+    // --- M4: 手动加入研究主题（AI 批量采纳只覆盖 ≥0.7 置信度，其余文献由此归类） ---
+    let addToTopicItem = null;
+    function openAddToTopicModal(item) {
+      addToTopicItem = item;
+      const meta = documentMetas.get(docMetaKey(item.libraryType || 'native', item.libraryId || 'local', item.key));
+      document.getElementById('add-to-topic-doc-name').textContent =
+        `文献：${meta?.cleanTitle || item.data?.title || item.key}`;
+      const alreadyIn = new Set((item.topics || []).map(t => t.workspaceId || t.id));
+      const select = document.getElementById('add-to-topic-select');
+      select.innerHTML = (userWorkspaces || [])
+        .map(w => `<option value="${escapeHTML(w.id)}"${alreadyIn.has(w.id) ? ' disabled' : ''}>${escapeHTML(w.name)}${alreadyIn.has(w.id) ? '（已加入）' : ''}</option>`)
+        .join('');
+      document.getElementById('add-to-topic-error').classList.add('hidden');
+      document.getElementById('add-to-topic-modal').classList.remove('hidden');
+    }
+    function closeAddToTopicModal() {
+      document.getElementById('add-to-topic-modal').classList.add('hidden');
+      addToTopicItem = null;
+    }
+
     function renderFilteredNativeItems(items, emptyText) {
       const container = document.getElementById('items-container');
       container.innerHTML = '';
@@ -2824,7 +2900,7 @@
         count.textContent = `${resolved.length} 篇`;
         container.replaceChildren();
         if (!resolved.length) {
-          container.innerHTML = '<div class="text-center text-slate-500 py-12 px-3 text-xs leading-relaxed">该主题下暂无可阅读的 PDF。<br>可在“收件箱”中先完成 AI 分类并采纳建议。</div>';
+          container.innerHTML = '<div class="text-center text-slate-500 py-12 px-3 text-xs leading-relaxed">该主题下暂无可阅读的 PDF。<br>可在文库列表将文献归入本主题，或用「✨ AI 主题归类」批量采纳。</div>';
           return;
         }
 

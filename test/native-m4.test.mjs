@@ -4057,6 +4057,39 @@ async function testM4PinnedIpRealDial() {
   }
 }
 
+// ============================================================
+// 33. M4 UX fix: /canvas/native/documents list rows must carry attachments.
+//     The 主题分类 tab caches these rows as library items and filters them by
+//     children PDF presence; list rows without attachments made every
+//     classified document vanish from the tab ("0 篇").
+// ============================================================
+async function testM4NativeListCarriesAttachments() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-listatt-store-'));
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-listatt-root-'));
+  const store = new CanvasStore(path.join(tempDir, 'canvas.sqlite'));
+  const actor = canvasActorKey('local', 'm4-listatt');
+  try {
+    const [root] = store.ensureLibraryRootsFromConfig(actor, [{ absolutePath: rootDir, displayName: '列表文库' }]);
+    fs.mkdirSync(path.join(rootDir, '网页导入'), { recursive: true });
+    fs.writeFileSync(path.join(rootDir, '网页导入', 'List Fixture.pdf'), makePdfBytes('list-fixture'));
+    const scan = await scanLibraryRoot(store, actor, root.id, {});
+    assert.equal(scan.report.newDocuments, 1);
+
+    const { documents } = store.listNativeLibraryDocuments(actor, { limit: 10 });
+    const doc = documents.find(d => d.title === 'List Fixture');
+    assert.ok(doc, 'the enrolled document must be listed');
+    assert.equal(Array.isArray(doc.attachments), true, 'list rows must carry attachments');
+    assert.equal(doc.attachments.length, 1, 'the enrolled PDF attachment must ride along');
+    assert.equal(doc.attachments[0].mimeType, 'application/pdf');
+    assert.ok(doc.attachments[0].id, 'the attachment id must be present for topic binding cross-checks');
+    assert.equal(doc.attachments[0].storageKind, 'source_file');
+  } finally {
+    try { store.close(); } catch {}
+    fs.rmSync(tempDir, { recursive: true, force: true });
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+}
+
 async function testM4FinalRemediation() {
   await testWebImportDefaultArchiving();
   await testBlobOnlyWebImportMigration();
@@ -4067,6 +4100,7 @@ async function testM4FinalRemediation() {
   await testM4AuditNineMigrationCrashJournal();
   await testM4SourceFileVersionEndpoint();
   await testM4PinnedIpRealDial();
+  await testM4NativeListCarriesAttachments();
 }
 
 try {

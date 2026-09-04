@@ -1875,6 +1875,14 @@ assert.match(html, /function getHeaders\(extra = \{\}\) \{\s*return \{\s*'Accept
   }
 }
 
+// [M4 UX] Manual topic binding entry on native library rows; the topic-tab
+// empty state must not reference the retired inbox.
+assert.ok(html.includes('data-native-action="add-topic"'), 'library rows must expose the manual 主题 binding button');
+assert.equal((html.match(/id=["']add-to-topic-modal["']/g) || []).length, 1, 'add-to-topic modal must exist exactly once');
+assert.ok(html.includes('openAddToTopicModal(item)'), 'library row clicks must wire openAddToTopicModal');
+assert.ok(html.includes('btn-confirm-add-to-topic'), 'add-to-topic confirm button must exist');
+assert.ok(!html.includes('可在“收件箱”中先完成 AI 分类'), 'topic-tab empty state must not reference the retired inbox');
+
 assert.match(devServer, /style-src-attr 'unsafe-inline'/, 'CSP must permit dynamic Canvas geometry styles');
 assert.match(devServer, /script-src 'self'/, 'script CSP must remain restricted');
 

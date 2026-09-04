@@ -5306,6 +5306,12 @@ export class CanvasStore {
         WHERE sf.document_id = ? AND sf.deleted_at IS NULL
         ORDER BY sf.status = 'active' DESC, sf.created_at ASC LIMIT 1
       `).get(row.id) || null);
+      // Attachments must ride along with list rows: the web client caches
+      // these rows as library items (children included). Without them every
+      // cached item looks PDF-less and the 主题分类 tab filters everything out.
+      doc.attachments = this.db.prepare(`
+        SELECT * FROM attachments WHERE document_id = ? AND deleted_at IS NULL ORDER BY created_at ASC
+      `).all(row.id).map(attachmentRow);
       return doc;
     }) };
   }

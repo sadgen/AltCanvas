@@ -363,6 +363,26 @@ function parseAiJsonArray(text) {
   }
 }
 
+// AI models pad unknown metadata with literal placeholders (【未注明机构】,
+// （未知年份）, institution "未知" …) because the prompt example shows a
+// decorated title format. Strip those decorations deterministically so the
+// library never displays fabricated placeholders.
+const META_PLACEHOLDER_EXACT = /^(未注明机构|未注明|未知年份|未知|暂无|不明|无|待补充|unknown|n\/a|none)$/i;
+
+function stripMetaPlaceholderDecorations(value) {
+  return String(value || '')
+    .replace(/【[^】]*(?:未注明|未知|暂无|不明|待补充)[^】]*】/g, '')
+    .replace(/（[^）]*(?:未知|暂无|不明|待补充)[^）]*）/g, '')
+    .replace(/\([^)]*(?:未知|暂无|不明|待补充)[^)]*\)/gi, '')
+    .replace(/^[\s·、,，\-—|]+|[\s·、,，\-—|]+$/g, '')
+    .trim();
+}
+
+function metaFieldValue(value) {
+  const trimmed = String(value || '').trim();
+  return META_PLACEHOLDER_EXACT.test(trimmed) ? '' : trimmed;
+}
+
 function saveClassificationDocumentMetas(store, actorKey, entries, parsed) {
   const rawMap = parsed?.documentMetadata || parsed?.documentMetas || parsed?.titles || {};
   const saved = [];
@@ -372,8 +392,10 @@ function saveClassificationDocumentMetas(store, actorKey, entries, parsed) {
     const candidate = typeof raw === 'string' ? { cleanTitle: raw } : raw;
     if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
 
-    const cleanTitle = String(candidate.cleanTitle || candidate.chineseTitle || '').trim().slice(0, 500);
-    if (!cleanTitle) continue;
+    const rawClean = String(candidate.cleanTitle || candidate.chineseTitle || '').trim().slice(0, 500);
+    if (!rawClean) continue;
+    const fallbackTitle = String(entry.title || '').trim().slice(0, 500);
+    const cleanTitle = stripMetaPlaceholderDecorations(rawClean) || fallbackTitle;
 
     const existing = store.getDocumentMeta(actorKey, entry);
     if (existing?.source === 'manual') {
@@ -388,10 +410,10 @@ function saveClassificationDocumentMetas(store, actorKey, entries, parsed) {
       attachmentKey: existing?.attachmentKey || entry.attachmentKey || null,
       attachmentVersion: existing?.attachmentVersion ?? null,
       cleanTitle,
-      institution: String(candidate.institution || '').trim().slice(0, 200),
-      reportTitle: String(candidate.reportTitle || candidate.chineseTitle || '').trim().slice(0, 300),
-      subtitle: String(candidate.subtitle || '').trim().slice(0, 300),
-      year: String(candidate.year || entry.year || '').trim().slice(0, 50),
+      institution: metaFieldValue(candidate.institution).slice(0, 200),
+      reportTitle: metaFieldValue(candidate.reportTitle || candidate.chineseTitle).slice(0, 300),
+      subtitle: metaFieldValue(candidate.subtitle).slice(0, 300),
+      year: metaFieldValue(candidate.year || entry.year || '').slice(0, 50),
       summary: String(candidate.summary || '').trim().slice(0, 5000),
       source: 'ai_classification'
     }));
@@ -1197,7 +1219,8 @@ async function runAiClassification({ store, actorKey, targetEntries, workspaces,
     '1. confidence 为 0.0 到 1.0 之间的浮点数。若不符合主题或命中排除规则，置信度应低于 0.3；',
     '2. reason 简述推荐或不推荐的核心理由（30字以内）；',
     '3. 同一篇文献可同时推荐给多个符合的主题（多对多归类）；',
-    '4. 必须在同一次返回中为每篇文献生成 documentMetadata；cleanTitle 必须是准确、自然、可直接展示的简体中文名，保留机构与年份等关键辨识信息。'
+    '4. 必须在同一次返回中为每篇文献生成 documentMetadata；cleanTitle 必须是准确、自然、可直接展示的简体中文名，保留真实可辨识的机构与年份；',
+    '5. 机构或年份无法从文献信息确定时：cleanTitle 直接省略对应装饰，institution 与 year 字段留空字符串。严禁编造「未注明机构」「未知年份」之类的占位词。'
   ].join('\n');
 
   const topicContexts = workspaces.map((w, idx) => `[主题 ${idx + 1}] ID: ${w.id}\n名称: ${w.name}\n研究问题: ${w.researchQuestion || '无'}\n纳入规则: ${w.inclusionRules || '无'}\n排除规则: ${w.exclusionRules || '无'}`).join('\n\n');
@@ -1251,7 +1274,8 @@ async function runAiTopicGeneration({ store, actorKey, targetEntries, maxTopics 
     '3. 为每个主题提供：`name`（15字以内的凝练中文名称）、`researchQuestion`（核心研究问题）、`inclusionRules`（清晰的纳入规则）、`exclusionRules`（排除规则）；',
     '4. 为每篇待分类文献推荐最契合的主题（可多对多），仅当极个别文献确实与主要主题完全无关时才设立兜底补充主题；',
     '5. 在同一次返回中为每篇文献生成规范中文名与元数据，不要要求第二次模型调用；',
-    '6. 只输出合法的 JSON 对象，严禁 Markdown 代码块。',
+    '6. 规范中文名必须自然可展示：机构或年份无法确定时直接省略对应装饰并留空字段，严禁编造「未注明机构」「未知年份」等占位词；',
+    '7. 只输出合法的 JSON 对象，严禁 Markdown 代码块。',
     'JSON 格式示例：',
     '{',
     '  "topics": [',
