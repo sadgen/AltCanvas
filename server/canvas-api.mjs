@@ -2663,6 +2663,15 @@ export function createCanvasHandler(store, {
       }
 
       match = /^\/canvas\/native\/source-files\/([0-9a-f-]+)$/.exec(pathname);
+      if (match && method === 'GET') {
+        // Version lookup for the optimistic-concurrency file-ops UI: the
+        // rename/move/trash/restore flows resolve their If-Match version from
+        // this endpoint when the directory-tree payload carries none. Without
+        // it those flows 404 before any modal opens.
+        const sourceFile = store.requireSourceFile(actor.actorKey, match[1]);
+        json(res, 200, { data: sourceFile }, { ETag: etag(sourceFile.version) });
+        return;
+      }
       if (match && method === 'DELETE') {
         const result = await trashSourceFile(store, actor.actorKey, match[1], versionFromIfMatch(req));
         json(res, 200, { data: result.sourceFile }, { ETag: etag(result.sourceFile.version) });

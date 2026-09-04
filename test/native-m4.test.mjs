@@ -3937,6 +3937,78 @@ async function testM4AuditNineMigrationCrashJournal() {
   }
 }
 
+// ============================================================
+// 31. M4 Audit 9 (UI acceptance finding): the file-ops UI resolves its
+//     If-Match version from GET /canvas/native/source-files/:id when the
+//     tree payload carries no version. The route was never implemented, so
+//     rename/move/trash/restore 404'd before any modal opened. Pins the
+//     endpoint and the full UI resolve-then-mutate contract.
+// ============================================================
+async function testM4SourceFileVersionEndpoint() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-sfver-store-'));
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-sfver-root-'));
+  const store = new CanvasStore(path.join(tempDir, 'canvas.sqlite'));
+  const actor = canvasActorKey('local', 'm4-sfver');
+  try {
+    const [root] = store.ensureLibraryRootsFromConfig(actor, [{ absolutePath: rootDir, displayName: '版本文库' }]);
+    const bytes = makePdfBytes('sfver');
+    fs.writeFileSync(path.join(rootDir, '版本测试.pdf'), bytes);
+    const sf = store.createSourceFile(actor, root.id, {
+      relativePath: '版本测试.pdf',
+      filename: '版本测试.pdf',
+      sha256: sha256Of(bytes),
+      sizeBytes: bytes.length,
+      modifiedAt: Date.now(),
+      status: 'active'
+    });
+
+    const session = createSession({
+      userId: 'm4-sfver-1', subject: 'm4-sfver', authMode: 'local',
+      username: 'sfver', role: 'admin', actorKey: actor
+    });
+    const cookie = `altcanvas_session=${session.id}`;
+    const handler = createCanvasHandler(store);
+
+    // 31.1 The version-lookup endpoint the file-ops UI depends on.
+    const got = await call(handler, `/canvas/native/source-files/${sf.id}`, { cookie });
+    assert.equal(got.statusCode, 200, `version lookup must succeed, got ${got.statusCode}: ${got.text}`);
+    assert.equal(got.payload.data.id, sf.id);
+    assert.equal(typeof got.payload.data.version, 'number');
+    assert.ok(got.payload.data.version >= 1, 'the row must expose a numeric optimistic-concurrency version');
+    const etagHeader = String(got.headers.get('etag') || '');
+    assert.ok(etagHeader.length > 0 && etagHeader.includes(String(got.payload.data.version)),
+      `the response must carry an ETag for the version, got: ${etagHeader}`);
+
+    // 31.2 Ownership isolation: another account's lookup is a 404, never a leak.
+    const otherSession = createSession({
+      userId: 'm4-sfver-2', subject: 'm4-sfver-other', authMode: 'local',
+      username: 'sfver-other', role: 'admin', actorKey: canvasActorKey('local', 'm4-sfver-other')
+    });
+    const foreign = await call(handler, `/canvas/native/source-files/${sf.id}`, {
+      cookie: `altcanvas_session=${otherSession.id}`
+    });
+    assert.equal(foreign.statusCode, 404);
+    const missing = await call(handler, `/canvas/native/source-files/${crypto.randomUUID()}`, { cookie });
+    assert.equal(missing.statusCode, 404);
+
+    // 31.3 The full UI contract: resolve version via GET, then rename with
+    // If-Match — exactly what resolveSourceFileRef + promptM4FileName do.
+    const rename = await call(handler, `/canvas/native/source-files/${sf.id}/rename`, {
+      method: 'POST', cookie,
+      headers: { 'if-match': `W/"${got.payload.data.version}"` },
+      body: { filename: '版本测试改名.pdf' }
+    });
+    assert.equal(rename.statusCode, 200, `resolve-then-rename must succeed, got ${rename.statusCode}: ${rename.text}`);
+    assert.equal(rename.payload.data.relativePath, '版本测试改名.pdf');
+    assert.equal(fs.existsSync(path.join(rootDir, '版本测试改名.pdf')), true,
+      'the disk file must carry the new original filename');
+  } finally {
+    try { store.close(); } catch {}
+    fs.rmSync(tempDir, { recursive: true, force: true });
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+}
+
 async function testM4FinalRemediation() {
   await testWebImportDefaultArchiving();
   await testBlobOnlyWebImportMigration();
@@ -3945,6 +4017,7 @@ async function testM4FinalRemediation() {
   await testM4AuditFiveStrictSafetyAndPagination();
   await testM4AuditSixIdentityDivergenceAndCompensation();
   await testM4AuditNineMigrationCrashJournal();
+  await testM4SourceFileVersionEndpoint();
 }
 
 try {
