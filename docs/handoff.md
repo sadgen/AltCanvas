@@ -2060,3 +2060,40 @@ M4 维持 CONDITIONAL PASS——按审计结论，本项补完后进入最后人
 - 隔离测试实例（8089）保留运行供用户复看：`~/Projects/AltCanvas-ui-test/`，
   清理：`kill $(ss -tlnp | grep 8089 ...)` + 删除该目录。
 - `npm test` 10 套全绿（exit 0）；`git diff --check` 干净。
+
+---
+
+## 2026-09-05 会话三（用户实机反馈修复：主题分类 Tab 0 篇 / AI 取名占位垃圾 / 手动归类入口）
+
+用户在隔离实例实机使用后反馈"自动取名有问题、分了类也不出现在主题分类里"。
+逐层排查（DB → 接口 → 前端链路 → 浏览器实测）定位三个问题，提交 `102aef8`：
+
+1. **主题分类 Tab 永远"0 篇"（P1）**：`/canvas/native/documents` 列表接口
+   返回的行**不带 attachments**（store 只附了 topics/sourceFile），前端
+   `nativeDocumentToLibraryItem` 缓存的文库条目因此没有 children，
+   `resolveTopicLibraryPdf` 按子附件核验 PDF 时全部落空 → 所有已归类文献
+   被过滤。修复：`listNativeLibraryDocuments` 组装 attachments（组 33 测试）；
+   空态文案同时去除对已退役"收件箱"的引用（canvas-ui 断言钉住）。
+2. **AI 取名出现「【未注明机构】xxx（未知年份）」**：prompt 示例格式诱导模型
+   编造占位词。修复：两处 system prompt 明确"未知即省略装饰、字段留空、
+   禁止占位词"；`saveClassificationDocumentMetas` 确定性剥除占位装饰、
+   占位 institution/year 存空、剥空后回退文档标题（canvas.test 占位清洗
+   用例）。存量 document_metas 已用同逻辑脚本清洗（含生产实例）。
+3. **低置信度文献无手动归类入口**：AI 批量采纳只覆盖 ≥0.7，其余文献此前
+   无法进入主题。文库 native 行新增「📚 主题」按钮 + `add-to-topic-modal`，
+   走既有 `batch-topics` 端点（重复加入幂等），加入后刷新文库与主题分类
+   （canvas-ui 结构断言）。
+
+### 实测验证（8089 隔离实例）
+
+- 主题分类 Tab 选择绑定主题 → 正确显示 1 篇（arXiv 论文 + AI 中文名）；
+- 「📚 主题」加入另一主题 → 该主题 Tab 立即可见 1 篇；
+- 存量两条占位名清洗为「测试文献一/二」，arXiv 的优质名保留。
+- `npm test` 10 套全绿（exit 0）。
+
+### 取名模型说明（用户问"底层扫描怎么取名"）
+
+- 扫描入册：文库名 = 原始文件名去 `.pdf` 扩展名，**不调用 AI**；
+- AI 中文名（document_metas.clean_title）只在 AI 主题归类/元数据提取时
+  生成，仅作显示层覆盖（文库列表、主题分类、Reader 标题），文档 title 与
+  磁盘文件名永不自动改名；manual 来源的元数据不会被 AI 覆盖。
