@@ -187,7 +187,9 @@ async function migrateOneBlobOnlyAttachment(store, actorKey, root, attachment, t
       placedPath = targetAbs;
     } catch (innerErr) {
       try { fs.unlinkSync(staged); } catch {}
-      try { if (fs.existsSync(targetAbs)) fs.unlinkSync(targetAbs); } catch {}
+      try {
+        await safeUnlinkWithExpectedSha(root.absolutePath, relativePath, sha256);
+      } catch {}
       throw innerErr;
     }
   } catch (placeErr) {
@@ -258,17 +260,22 @@ export async function runBlobOnlyWebImportMigration(store, actorKey, {
   };
 
   try {
-    // Loop through candidates in bounded batches until pending reaches 0
-    // or no progress can be made (all remaining are conflicts/failed).
-    const seenAttachmentIds = new Set();
+    // [P1-2 Fix] Compound cursor pagination (created_at, attachment_id).
+    // The loop advances monotonically through the database table, completely
+    // immune to conflict or failure starvation: items in page 1 that fail or
+    // encounter a filename conflict do NOT block page 2 from being read.
+    let afterCreatedAt = null;
+    let afterId = null;
     while (true) {
-      const candidates = store.listBlobOnlyWebImportAttachments(actorKey, { limit: BATCH_SIZE });
-      const unhandled = candidates.filter(c => !seenAttachmentIds.has(c.attachment_id));
-      if (!unhandled.length) break;
+      const candidates = store.listBlobOnlyWebImportAttachments(actorKey, {
+        afterCreatedAt,
+        afterId,
+        limit: BATCH_SIZE
+      });
+      if (!candidates.length) break;
 
-      report.scanned += unhandled.length;
-      for (const attachment of unhandled) {
-        seenAttachmentIds.add(attachment.attachment_id);
+      report.scanned += candidates.length;
+      for (const attachment of candidates) {
         let result;
         try {
           result = await migrateOneBlobOnlyAttachment(store, actorKey, root, attachment, targetDir);
@@ -295,6 +302,10 @@ export async function runBlobOnlyWebImportMigration(store, actorKey, {
         }
         if (batchDelayMs) await new Promise(r => setTimeout(r, batchDelayMs));
       }
+
+      const last = candidates[candidates.length - 1];
+      afterCreatedAt = last.created_at;
+      afterId = last.attachment_id;
     }
 
     store.completeFileOperation(operation.id);

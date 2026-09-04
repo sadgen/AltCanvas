@@ -1551,14 +1551,32 @@ async function executeNativeImportItem(store, actorKey, normalized, {
         };
       }
 
+      // [P1-1 Fix] Journal operation in file_operations BEFORE touching the disk
+      const operation = store.createFileOperation(actorKey, {
+        operationType: 'file.import',
+        sourcePath: tempFilePath,
+        targetPath: `${effectiveFileTarget.root.absolutePath}/${targetRelativePath}`,
+        payload: { rootId: effectiveFileTarget.root.id, targetDir: archiveDir, filename: targetFilename, kind: 'blob_promotion', sha256: attachment.sha256 }
+      });
+      store.startFileOperation(operation.id);
+
       let placedOnDisk = false;
+      let targetStat = null;
       try {
         if (!conflict) {
-          placeFileIntoRoot(effectiveFileTarget.root.absolutePath, targetRelativePath, tempFilePath);
+          const placedTarget = placeFileIntoRoot(effectiveFileTarget.root.absolutePath, targetRelativePath, tempFilePath);
+          targetStat = fs.statSync(placedTarget);
           placedOnDisk = true;
+        } else {
+          // conflict.type === 'duplicate_content': identical file already on disk, adopt stat safely
+          const { openFileInsideRoot } = await import('./native-fs.mjs');
+          const opened = openFileInsideRoot(effectiveFileTarget.root.absolutePath, targetRelativePath);
+          targetStat = opened.stat;
+          try { fs.closeSync(opened.fd); } catch {}
         }
       } catch (placeErr) {
         cleanupTemp();
+        store.failFileOperation(operation.id, placeErr.code || 'placement_failed');
         if (placeErr instanceof FileOpError || placeErr instanceof NativePathError) {
           return { result: { outcome: placeErr.code, targetPath: targetRelativePath }, warning };
         }
@@ -1575,13 +1593,15 @@ async function executeNativeImportItem(store, actorKey, normalized, {
           relativePath: targetRelativePath,
           filename: targetFilename,
           sha256: attachment.sha256,
-          sizeBytes: attachment.sizeBytes,
-          modifiedAt: Math.round(fs.statSync(path.join(fileTarget.root.absolutePath, targetRelativePath)).mtimeMs)
+          sizeBytes: attachment.sizeBytes || targetStat.size,
+          modifiedAt: Math.round(targetStat.mtimeMs)
         });
 
         const updatedDoc = store.backfillDocumentAndTopics(actorKey, blobHolder.id, {
           doi, isbn, url, abstract, year, creators, topicIds: allTopicIds
         });
+
+        store.completeFileOperation(operation.id);
 
         return {
           result: {
@@ -1596,7 +1616,14 @@ async function executeNativeImportItem(store, actorKey, normalized, {
         };
       } catch (promoteErr) {
         if (placedOnDisk) {
-          try { safeUnlinkInsideRoot(effectiveFileTarget.root.absolutePath, targetRelativePath); } catch {}
+          try {
+            await safeUnlinkWithExpectedSha(effectiveFileTarget.root.absolutePath, targetRelativePath, attachment.sha256);
+            store.markFileOperationRolledBack(operation.id);
+          } catch (compensationErr) {
+            store.failFileOperation(operation.id, 'compensation_failed');
+          }
+        } else {
+          store.failFileOperation(operation.id, 'promotion_failed');
         }
         throw promoteErr;
       }
@@ -1623,10 +1650,10 @@ async function executeNativeImportItem(store, actorKey, normalized, {
   // directory after the content/name conflict rules have been applied.
   let promotion = null;
   let filePlacement = null;
-  if (fileTarget) {
+  if (effectiveFileTarget) {
     if (attachment && tempFilePath) {
-      if (!fileTarget.filename && attachment) {
-        fileTarget.filename = deriveWebImportFilename({
+      if (!effectiveFileTarget.filename && attachment) {
+        effectiveFileTarget.filename = deriveWebImportFilename({
           download: { filename: downloadDispositionName },
           pdfUrl: pdfUrl,
           title,
@@ -1635,8 +1662,8 @@ async function executeNativeImportItem(store, actorKey, normalized, {
       }
       const archiveDir = effectiveFileTarget.targetDir || WEB_IMPORT_DEFAULT_DIR;
       const targetRelativePath = archiveDir
-        ? `${archiveDir}/${fileTarget.filename}`
-        : fileTarget.filename;
+        ? `${archiveDir}/${effectiveFileTarget.filename}`
+        : effectiveFileTarget.filename;
       const conflict = await probeTargetPath(store, actorKey, effectiveFileTarget.root, targetRelativePath, attachment.sha256);
       if (conflict) {
         cleanupTemp();
@@ -1648,8 +1675,8 @@ async function executeNativeImportItem(store, actorKey, normalized, {
       const operation = store.createFileOperation(actorKey, {
         operationType: 'file.import',
         sourcePath: tempFilePath,
-        targetPath: `${fileTarget.root.absolutePath}/${targetRelativePath}`,
-        payload: { rootId: effectiveFileTarget.root.id, targetDir: archiveDir, filename: fileTarget.filename }
+        targetPath: `${effectiveFileTarget.root.absolutePath}/${targetRelativePath}`,
+        payload: { rootId: effectiveFileTarget.root.id, targetDir: archiveDir, filename: effectiveFileTarget.filename, sha256: attachment.sha256 }
       });
       store.startFileOperation(operation.id);
       try {
@@ -1679,11 +1706,11 @@ async function executeNativeImportItem(store, actorKey, normalized, {
         rootId: effectiveFileTarget.root.id,
         rootAbsolutePath: effectiveFileTarget.root.absolutePath,
         relativePath: targetRelativePath,
-        filename: fileTarget.filename,
+        filename: effectiveFileTarget.filename,
         archiveDir,
         sha256: attachment.sha256,
         sizeBytes: attachment.sizeBytes,
-        modifiedAt: Math.round(fs.statSync(path.join(fileTarget.root.absolutePath, targetRelativePath)).mtimeMs)
+        modifiedAt: Math.round(fs.statSync(path.join(effectiveFileTarget.root.absolutePath, targetRelativePath)).mtimeMs)
       };
       cleanupTemp();
     }
@@ -1758,7 +1785,7 @@ async function executeNativeImportItem(store, actorKey, normalized, {
         sha256: filePlacement.sha256,
         sizeBytes: filePlacement.sizeBytes,
         modifiedAt: filePlacement.modifiedAt,
-        topicIds: fileTarget.topicIds || [],
+        topicIds: effectiveFileTarget.topicIds || [],
         forceNew: normalized.forceNew,
         confirmFuzzy: normalized.confirmFuzzy
       });

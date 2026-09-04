@@ -1703,10 +1703,10 @@ M4 维持 CONDITIONAL PASS——按审计结论，本项补完后进入最后人
   - 返回 `200 OK`（`outcome: 'reused'`, `promotedFromBlob: true`）；
   - 遇到同名异内容文件时仍安全返回 409 `filename_conflict` 要求改名。
 
-#### 2. 放宽 Blob 归档审计范围
-- `store.listBlobOnlyWebImportAttachments` 与 `store.countBlobOnlyWebImports` 移除 `source_url IS NOT NULL` 限制，**覆盖全库所有处于 `storage_kind = 'managed_blob'` 的历史附件**；
-- 用户当前真实库里的 3 篇文献全部纳入待归档列表；
-- 前端“原始文件”Tab 顶部提醒条现在能准确发现这 3 篇文献，并提供“一键归档”批量挪入 `网页导入/`。
+#### 2. 网页来源 Blob 归档审计精准范围（统一定性）
+- 审计范围严格锁定为：**仅处理来自网页、DOI、arXiv、BibTeX、RIS 或 Translation Server 导入且当前为 `managed_blob` 的附件（带有 `source_url` 或拥有 `external_refs`）**；
+- 纯本地手动上传的 Blob 附件继续保留为 `managed_blob`（保持旧 Blob 完全向后兼容，不强制落盘）；
+- 若用户再次导入或通过 DOI/链接导入相同内容，则在 Phase 0 自动将其提升为 `source_file`，实现按需归档。
 
 #### 3. 前端交互细节增强
 - 导入成功或复用成功后，若当前处于“原始文件”面板，自动联动触发 `loadSourceFiles()` 刷新目录列表；
@@ -1768,3 +1768,55 @@ M4 维持 CONDITIONAL PASS——按审计结论，本项补完后进入最后人
 - `git diff --check`：100% 通过；
 - 服务重启：`altcanvas.service` 状态 active (running)，单一 worker，端口 8088 正常提供服务；
 - 里程碑状态：保持 **`M4 CONDITIONAL PASS`**，等待最后一轮复审与人工实机验收。
+
+---
+
+## 2026-09-04 会话（M4 五轮终审加固：归档旁路消除 / 复合游标饿死防范 / 原地升级前置与版本原子同步 / TOCTOU 双重锚定删除）
+
+### 一、整改背景与根因修复
+
+在第五轮终审复审中，闭环了以下 4 个深度安全与一致性 P1 以及 2 个 P2 缺口：
+
+1. **[P1-1] 同哈希旧 Blob 自动归档旁路安全化**：
+   - **根因**：`canvas-api.mjs` 中的 `blobHolder` 提升分支原先直接落盘，没有在 `file_operations` 中落账，且失败补偿调用了未导入的 `safeUnlinkInsideRoot` 并被空 `catch` 吞并，异常时落盘文件永久遗留且断电无法恢复；`fs.statSync` 使用未经校验的拼接路径；
+   - **修复**：
+     - 在落盘前创建并启动 `file.import` 操作记录（记录 `targetDir`, `filename`, `sha256`）；
+     - 落盘采用 `placeFileIntoRoot` 并在成功后通过 `openFileInsideRoot` 句柄读取可靠的 `stat`；
+     - DB 失败或写时分叉竞争时，调用 `await safeUnlinkWithExpectedSha` 进行哈希核验删除；
+     - 删除成功标记 `rolled_back`，删除失败标记 `failed` (`compensation_failed`)，绝不吞并错误；
+     - 进程中断恢复由 `reconcileImport` 依据 `op.payload.sha256` 自动探测并安全补偿。
+2. **[P1-2] 循环迁移游标分页消除冲突项饿死**：
+   - **根因**：`blob-migration.mjs` 原先每轮固定读取前 100 条并在内存中用 `seenAttachmentIds` 过滤。当前 100 条全部为冲突或失败时，因未更新数据库，后续轮次依然读取同一批前 100 条导致循环提前中断，产生饿死；
+   - **修复**：
+     - `canvas-store.mjs` 的 `listBlobOnlyWebImportAttachments` 升级为 `(a.created_at, a.id)` 复合游标分页；
+     - 迁移主循环使用 `(afterCreatedAt, afterId)` 单调向前推进游标，无论上一页条目成功、冲突还是失败，循环均平稳滑向后续页面，彻底消除了饿死现象。
+3. **[P1-3] 原地升级完整前置条件、并发结构与版本原子同步**：
+   - **根因**：`promoteBlobAttachmentToSourceFile` 缺少所有权与原哈希强校验；并发已被升级时返回单个附件（与正常返回结构不一致）；附件 `version` 递增但 `topic_documents.attachment_version` 未同步；
+   - **修复**：
+     - 前置条件增加 `d.owner_key = ? AND a.document_id = ? AND a.blob_hash = ?` 完整校验；
+     - 并发已被其他请求升级时，统一返回 `{ attachment, sourceFile, raced: true }` 一致结构；
+     - 在同一 SQLite 事务内，原子同步递增并更新 `topic_documents.attachment_version = attachments.version`，断言保证两者永久相等。
+4. **[P1-4] 目标文件清理消除裸删除与 TOCTOU 双重锚定**：
+   - **根因**：`blob-migration.mjs` 在落盘异常时存在裸 `fs.existsSync(targetAbs) && fs.unlinkSync(targetAbs)`，若目标被并发替换会误删外来文件；`safeUnlinkWithExpectedSha` 关闭 fd 后再 unlink 存在微小 TOCTOU 窗口；
+   - **修复**：
+     - `server/native-fs.mjs` 的 `safeUnlinkWithExpectedSha` 升级为 **dev/ino 双重锚定**：通过 `openFileInsideRoot` (O_NOFOLLOW) 打开句柄，记录 `fstat(fd)` 的 `(dev, ino)`，直接通过 fd 流式计算 SHA-256 核验预期值；关闭句柄后立即通过 `lstat` 复核目标路径的 `(dev, ino)` 是否改变，检测到原子偷换抛出 `toctou_detected`，未被篡改才调用 `fs.unlinkSync`；
+     - `blob-migration.mjs` 与 `library-scanner.mjs` 中所有清理调用彻底替换为 `safeUnlinkWithExpectedSha`，删除所有裸 `unlinkSync`。
+5. **[P2-1] 执行器彻底统一使用 `effectiveFileTarget`**：
+   - `executeNativeImportItem` 内部所有对 `fileTarget` 的直接读取与属性赋值全部收敛至防御性克隆的 `effectiveFileTarget`。
+6. **[P2-2] 文档口径统一定性**：
+   - `docs/handoff.md` 全文统一定性为：“仅迁移来自网页、DOI、arXiv、BibTeX、RIS 或 Translation Server 且当前为 `managed_blob` 的附件；纯本地手动上传的 Blob 保持 `managed_blob` 向后兼容，再次导入相同内容时自动提升”。
+
+### 二、新增行为测试（测试组 28 闭环）
+
+在 `test/native-m4.test.mjs` 中新增测试组 28（`testM4AuditFiveStrictSafetyAndPagination`）：
+1. **28.1 自动归档 DB 失败补偿与崩溃中断恢复**：模拟落盘后 DB 报错，断言文件被安全补偿删除、操作记录标记 `rolled_back`；构造崩溃现场断言恢复器安全清理孤儿文件并置 `rolled_back`；
+2. **28.2 复合游标分页防饿死**：构造 101 个历史附件，前 100 个预置不同内容的同名冲突文件，第 101 个目标空闲；运行迁移断言：游标平稳越过 100 个冲突，第 101 个成功归档落盘（`scanned: 101, conflicts: 100, migrated: 1`）；
+3. **28.3 并发原地升级统一结构与版本原子同步**：验证并发时统一返回 `{ attachment, sourceFile, raced: true }`；断言事务内 `topic_documents.attachment_version === attachments.version` 绝对相等；
+4. **28.4 静态代码安全审查断言**：自动化扫描 `server/` 下所有 `.mjs`，断言零出现裸 `unlinkSync(targetAbs)`，且零出现已废弃的 `safeUnlinkInsideRoot(`。
+
+### 三、全套验证与状态
+
+- `npm test`（10 套完整测试套件）**100% 全部通过（exit 0）**；
+- `git diff --check`：100% 干净，无格式或空白行违规；
+- 服务运行正常：`systemctl --user status altcanvas.service` 处于 active (running)，端口 8088 监听正常；
+- 里程碑状态：保持 **`M4 CONDITIONAL PASS`**，等待审计通过后启动人工实机验收。

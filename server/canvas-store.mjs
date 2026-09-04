@@ -5449,17 +5449,42 @@ export class CanvasStore {
   // attachment residing in a real library root. Atomically creates the
   // source_files row, flips the attachment storage_kind, and decrements the
   // blob reference count.
+  // Promotes an existing managed_blob attachment to a source_file in place.
+  // Invariants enforced (P1-3):
+  //   1. Full precondition validation: validates attachmentId, documentId, sha256,
+  //      storage_kind, and document ownership in one query;
+  //   2. Uniform return shape on concurrent race: returns { attachment, sourceFile, raced: true };
+  //   3. Version continuity: atomically bumps attachments.version and synchronizes
+  //      topic_documents.attachment_version = attachments.version in the same transaction.
   promoteBlobAttachmentToSourceFile(actorKey, {
     attachmentId, documentId, rootId, relativePath, filename, sha256, sizeBytes, modifiedAt
   }) {
     const timestamp = nowIso();
     return this.transaction(() => {
-      // Re-read to guard against races
-      const att = this.db.prepare('SELECT * FROM attachments WHERE id = ? AND deleted_at IS NULL').get(attachmentId);
-      if (!att) throw new CanvasNotFoundError('attachment not found');
+      // Full precondition check: must belong to the document and owner, and still be a managed_blob
+      const att = this.db.prepare(`
+        SELECT a.* FROM attachments a
+        JOIN documents d ON d.id = a.document_id AND d.deleted_at IS NULL
+        WHERE a.id = ? AND a.document_id = ? AND d.owner_key = ? AND a.deleted_at IS NULL
+      `).get(attachmentId, documentId, actorKey);
+
+      if (!att) throw new CanvasNotFoundError('attachment or document not found or access denied');
+
+      // Concurrent race condition: already promoted by another competing process
       if (att.storage_kind === 'source_file') {
-        return this.getAttachment(actorKey, attachmentId);
+        const existingSourceFile = att.source_file_id ? this.getSourceFile(actorKey, att.source_file_id) : null;
+        return {
+          attachment: this.getAttachment(actorKey, attachmentId),
+          sourceFile: existingSourceFile,
+          raced: true
+        };
       }
+
+      // Verify blob hash matches
+      if (att.blob_hash !== sha256) {
+        throw new CanvasConflictError('attachment blob hash mismatch');
+      }
+
       // Stale takeover if the path row was vacant on disk
       this.releaseSourceFilePath(actorKey, rootId, relativePath, 'blob_promotion');
 
@@ -5475,16 +5500,27 @@ export class CanvasStore {
         lastSeenAt: timestamp
       });
 
+      const nextAttachmentVersion = att.version + 1;
+
       this.db.prepare(`
         UPDATE attachments SET
           storage_kind = 'source_file',
           blob_hash = NULL,
           source_file_id = ?,
           original_filename = ?,
-          version = version + 1,
+          version = ?,
           updated_at = ?
         WHERE id = ? AND deleted_at IS NULL
-      `).run(sourceFile.id, filename, timestamp, attachmentId);
+      `).run(sourceFile.id, filename, nextAttachmentVersion, timestamp, attachmentId);
+
+      // Atomically synchronize bound topic_documents to keep attachment_version identical
+      this.db.prepare(`
+        UPDATE topic_documents SET
+          attachment_version = ?,
+          version = version + 1,
+          updated_at = ?
+        WHERE attachment_key = ? AND deleted_at IS NULL
+      `).run(nextAttachmentVersion, timestamp, attachmentId);
 
       if (att.blob_hash) {
         this.decrementBlobRef(att.blob_hash);
@@ -5492,7 +5528,8 @@ export class CanvasStore {
 
       return {
         attachment: this.getAttachment(actorKey, attachmentId),
-        sourceFile: this.getSourceFile(actorKey, sourceFile.id)
+        sourceFile: this.getSourceFile(actorKey, sourceFile.id),
+        raced: false
       };
     });
   }
@@ -5504,10 +5541,31 @@ export class CanvasStore {
   // store (storage_kind = 'managed_blob') and originated from a web import
   // (recorded a source_url or has associated external_refs). Pure manual
   // native uploads without web source provenance are excluded per spec.
-  listBlobOnlyWebImportAttachments(actorKey, { limit = 500 } = {}) {
+  // Cursor-paginated audit query using (a.created_at, a.id) compound cursor.
+  // This guarantees that pagination advances monotonically even when previous
+  // items encountered conflicts or failed, preventing the loop starvation
+  // defect where conflicts keep matching the head of the queue.
+  listBlobOnlyWebImportAttachments(actorKey, { afterCreatedAt = null, afterId = null, limit = 100 } = {}) {
+    if (afterCreatedAt && afterId) {
+      return this.db.prepare(`
+        SELECT a.id AS attachment_id, a.document_id, a.blob_hash, a.original_filename,
+               a.source_url, a.size_bytes, a.created_at, d.title AS document_title
+        FROM attachments a
+        JOIN documents d ON d.id = a.document_id AND d.deleted_at IS NULL
+        WHERE d.owner_key = ? AND a.deleted_at IS NULL
+          AND a.storage_kind = 'managed_blob'
+          AND (
+            a.source_url IS NOT NULL
+            OR EXISTS (SELECT 1 FROM external_refs er WHERE er.document_id = d.id)
+          )
+          AND (a.created_at > ? OR (a.created_at = ? AND a.id > ?))
+        ORDER BY a.created_at ASC, a.id ASC
+        LIMIT ?
+      `).all(actorKey, afterCreatedAt, afterCreatedAt, afterId, Math.max(1, Math.min(1000, limit)));
+    }
     return this.db.prepare(`
       SELECT a.id AS attachment_id, a.document_id, a.blob_hash, a.original_filename,
-             a.source_url, a.size_bytes, d.title AS document_title
+             a.source_url, a.size_bytes, a.created_at, d.title AS document_title
       FROM attachments a
       JOIN documents d ON d.id = a.document_id AND d.deleted_at IS NULL
       WHERE d.owner_key = ? AND a.deleted_at IS NULL
@@ -5516,9 +5574,9 @@ export class CanvasStore {
           a.source_url IS NOT NULL
           OR EXISTS (SELECT 1 FROM external_refs er WHERE er.document_id = d.id)
         )
-      ORDER BY a.created_at ASC
+      ORDER BY a.created_at ASC, a.id ASC
       LIMIT ?
-    `).all(actorKey, Math.max(1, Math.min(5000, limit)));
+    `).all(actorKey, Math.max(1, Math.min(1000, limit)));
   }
 
   countBlobOnlyWebImports(actorKey) {

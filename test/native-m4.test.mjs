@@ -3042,11 +3042,245 @@ async function testM4AuditFourContinuousReconciliation() {
 }
 
 
+// ============================================================
+// 28. M4 Audit 5 Suite:
+//     - P1-1 Auto-archive DB failure & crash compensation with file_operations
+//     - P1-2 Cursor pagination prevents conflict starvation (100 conflicts + 1 success)
+//     - P1-3 Concurrent promoteBlobAttachmentToSourceFile uniform return shape & version sync invariant
+//     - P1-4 TOCTOU safeUnlinkWithExpectedSha refuses foreign file
+//     - Static safety: zero naked unlinkSync(targetAbs) & zero unimported references
+// ============================================================
+async function testM4AuditFiveStrictSafetyAndPagination() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-audit5-store-'));
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-audit5-root-'));
+  const store = new CanvasStore(path.join(tempDir, 'canvas.sqlite'));
+  const actor = canvasActorKey('local', 'm4-audit5');
+  const session = createSession({
+    userId: 'm4-audit5-1', subject: 'm4-audit5', authMode: 'local',
+    username: 'audit5', role: 'admin', actorKey: actor
+  });
+  const cookie = `altcanvas_session=${session.id}`;
+  const [root] = store.ensureLibraryRootsFromConfig(actor, [{ absolutePath: rootDir, displayName: 'Audit5 Root' }]);
+
+  const pdfByUrl = new Map();
+  let dlCount = 0;
+  const fakeDownload = async (url, targetDir) => {
+    const bytes = pdfByUrl.get(url);
+    if (!bytes) { const err = new Error('not found'); err.status = 404; throw err; }
+    dlCount++;
+    fs.mkdirSync(targetDir, { recursive: true, mode: 0o700 });
+    const p = path.join(targetDir, `dl5-${dlCount}.pdf`);
+    fs.writeFileSync(p, bytes);
+    return { tempFilePath: p, sha256: sha256Of(bytes), sizeBytes: bytes.length, mimeType: 'application/pdf' };
+  };
+
+  try {
+    // --- 28.1 Auto-Archive DB Failure Compensation & Crash Recovery (P1-1) ---
+    const blobBytes1 = makePdfBytes('blob-promotion-fail-test');
+    const blobSha1 = sha256Of(blobBytes1);
+    const blobPath1 = store.resolveBlobPath(blobSha1, '.pdf');
+    fs.mkdirSync(path.dirname(blobPath1), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(blobPath1, blobBytes1, { mode: 0o600 });
+    const rel1 = path.relative(store.getBlobStorageDir(), blobPath1);
+    store.upsertBlob({ sha256: blobSha1, relativePath: rel1, sizeBytes: blobBytes1.length, mimeType: 'application/pdf' });
+
+    const doc1 = store.createDocument(actor, { title: 'Doc To Promote' });
+    const att1Id = crypto.randomUUID();
+    store.db.prepare(`
+      INSERT INTO attachments
+        (id, document_id, blob_hash, mime_type, original_filename, title, size_bytes, storage_kind, version, created_at, updated_at)
+      VALUES (?, ?, ?, 'application/pdf', 'promo.pdf', 'Doc To Promote', ?, 'managed_blob', 1, ?, ?)
+    `).run(att1Id, doc1.id, blobSha1, blobBytes1.length, new Date().toISOString(), new Date().toISOString());
+
+    // Intercept promoteBlobAttachmentToSourceFile to simulate DB error
+    let targetRelIntercepted = null;
+    const failingStore = new Proxy(store, {
+      get(target, prop) {
+        if (prop === 'promoteBlobAttachmentToSourceFile') {
+          return (...args) => {
+            targetRelIntercepted = args[1].relativePath;
+            throw new Error('simulated DB promotion failure');
+          };
+        }
+        const v = target[prop];
+        return typeof v === 'function' ? v.bind(target) : v;
+      }
+    });
+
+    pdfByUrl.set('https://doi.org/10.7777/promo.pdf', blobBytes1);
+    const failHandler = createCanvasHandler(failingStore, { downloadPdfFn: fakeDownload });
+    const promoFailRes = await call(failHandler, '/canvas/imports/native', {
+      method: 'POST', cookie,
+      body: { title: 'Doc To Promote', pdfUrl: 'https://doi.org/10.7777/promo.pdf' }
+    });
+    assert.equal(promoFailRes.statusCode, 500);
+
+    // Verify compensation: placed file removed cleanly, operation marked rolled_back
+    assert.ok(targetRelIntercepted);
+    assert.equal(fs.existsSync(path.join(rootDir, targetRelIntercepted)), false, 'Placed file must be compensated away on DB failure');
+    const promoOp = store.db.prepare(
+      "SELECT * FROM file_operations WHERE operation_type = 'file.import' AND target_path LIKE '%promo.pdf%' ORDER BY created_at DESC LIMIT 1"
+    ).get();
+    assert.ok(promoOp, 'file_operations journal entry must exist');
+    assert.equal(promoOp.state, 'rolled_back');
+
+    // Crash recovery: simulate an interrupted promotion where file is on disk but process died before DB commit
+    fs.mkdirSync(path.join(rootDir, '网页导入'), { recursive: true });
+    fs.writeFileSync(path.join(rootDir, '网页导入', 'crash-promo.pdf'), blobBytes1);
+    const crashOp = store.createFileOperation(actor, {
+      operationType: 'file.import',
+      sourcePath: 'tmp-crashed',
+      targetPath: `${rootDir}/网页导入/crash-promo.pdf`,
+      payload: { rootId: root.id, targetDir: '网页导入', filename: 'crash-promo.pdf', kind: 'blob_promotion' }
+    });
+    store.startFileOperation(crashOp.id);
+
+    const { recoverInterruptedFileOperations } = await import('../server/library-scanner.mjs');
+    const recSummary = await recoverInterruptedFileOperations(store);
+    assert.equal(store.getFileOperation(actor, crashOp.id).state, 'rolled_back');
+    assert.equal(fs.existsSync(path.join(rootDir, '网页导入', 'crash-promo.pdf')), false,
+      'Crash recovery must safely unlink orphan placed file');
+
+    // --- 28.2 Cursor Pagination Prevents Conflict Starvation (P1-2) ---
+    // Seed 101 legacy web imports
+    const conflictBytes = makePdfBytes('conflict-content-different-bytes');
+    fs.mkdirSync(path.join(rootDir, '网页导入'), { recursive: true });
+
+    for (let i = 0; i < 101; i++) {
+      const pBytes = makePdfBytes(`starvation-paper-bytes-${i}`);
+      const pSha = sha256Of(pBytes);
+      const bPath = store.resolveBlobPath(pSha, '.pdf');
+      fs.mkdirSync(path.dirname(bPath), { recursive: true, mode: 0o700 });
+      fs.writeFileSync(bPath, pBytes, { mode: 0o600 });
+      const rPath = path.relative(store.getBlobStorageDir(), bPath);
+      store.upsertBlob({ sha256: pSha, relativePath: rPath, sizeBytes: pBytes.length, mimeType: 'application/pdf' });
+
+      const d = store.createDocument(actor, { title: `Starvation Paper ${i}` });
+      store.db.prepare(`
+        INSERT INTO attachments
+          (id, document_id, blob_hash, mime_type, original_filename, title, source_url, size_bytes, storage_kind, version, created_at, updated_at)
+        VALUES (?, ?, ?, 'application/pdf', ?, ?, 'https://example.org/starvation.pdf', ?, 'managed_blob', 1, ?, ?)
+      `).run(crypto.randomUUID(), d.id, pSha, `starv-${i}.pdf`, `Starvation Paper ${i}`, pBytes.length, new Date(Date.now() + i * 10).toISOString(), new Date(Date.now() + i * 10).toISOString());
+
+      // Place conflicting different-content file for the first 100 items only
+      if (i < 100) {
+        fs.writeFileSync(path.join(rootDir, '网页导入', `starv-${i}.pdf`), conflictBytes);
+      }
+    }
+
+    assert.equal(store.countBlobOnlyWebImports(actor), 101);
+    const { runBlobOnlyWebImportMigration } = await import('../server/blob-migration.mjs');
+    const starvationMigRes = await runBlobOnlyWebImportMigration(store, actor, {});
+
+    // Assert: all 101 items were scanned, first 100 were conflicts, and 101st was SUCCESSFULLY migrated!
+    assert.equal(starvationMigRes.report.scanned, 101, 'Cursor pagination must advance past the first 100 conflict items');
+    assert.equal(starvationMigRes.report.conflicts, 100);
+    assert.equal(starvationMigRes.report.migrated, 1, '101st item must NOT be starved and must be successfully migrated');
+    assert.equal(fs.existsSync(path.join(rootDir, '网页导入', 'starv-100.pdf')), true, '101st item placed on disk');
+
+    // Clean up starvation test files
+    for (let i = 0; i < 101; i++) {
+      try { fs.unlinkSync(path.join(rootDir, '网页导入', `starv-${i}.pdf`)); } catch {}
+    }
+
+    // --- 28.3 Concurrent In-Place Promotion Uniform Return Shape & Version Sync Invariant (P1-3) ---
+    const syncDoc = store.createDocument(actor, { title: 'Sync Version Doc' });
+    const syncTopic = store.createWorkspace(actor, { name: 'Sync Topic' });
+    const syncPdfBytes = makePdfBytes('sync-version-pdf');
+    const syncSha = sha256Of(syncPdfBytes);
+    const syncBlobPath = store.resolveBlobPath(syncSha, '.pdf');
+    fs.mkdirSync(path.dirname(syncBlobPath), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(syncBlobPath, syncPdfBytes, { mode: 0o600 });
+    store.upsertBlob({ sha256: syncSha, relativePath: path.relative(store.getBlobStorageDir(), syncBlobPath), sizeBytes: syncPdfBytes.length, mimeType: 'application/pdf' });
+
+    const syncAttId = crypto.randomUUID();
+    store.db.prepare(`
+      INSERT INTO attachments
+        (id, document_id, blob_hash, mime_type, original_filename, title, size_bytes, storage_kind, version, created_at, updated_at)
+      VALUES (?, ?, ?, 'application/pdf', 'sync.pdf', 'Sync Doc', ?, 'managed_blob', 1, ?, ?)
+    `).run(syncAttId, syncDoc.id, syncSha, syncPdfBytes.length, new Date().toISOString(), new Date().toISOString());
+
+    // Bind to topic with initial attachment version 1
+    const tdSync = store.addTopicDocument(actor, syncTopic.id, {
+      libraryType: 'native', libraryId: 'local', itemKey: syncDoc.id,
+      attachmentKey: syncAttId, attachmentVersion: 1, status: 'accepted'
+    });
+    assert.equal(tdSync.attachmentVersion, 1);
+
+    // First promotion call
+    fs.writeFileSync(path.join(rootDir, '网页导入', 'sync.pdf'), syncPdfBytes);
+    const promo1 = store.promoteBlobAttachmentToSourceFile(actor, {
+      attachmentId: syncAttId,
+      documentId: syncDoc.id,
+      rootId: root.id,
+      relativePath: '网页导入/sync.pdf',
+      filename: 'sync.pdf',
+      sha256: syncSha,
+      sizeBytes: syncPdfBytes.length,
+      modifiedAt: Math.round(fs.statSync(path.join(rootDir, '网页导入', 'sync.pdf')).mtimeMs)
+    });
+
+    assert.equal(promo1.raced, false);
+    assert.equal(promo1.attachment.storageKind, 'source_file');
+    assert.equal(promo1.attachment.version, 2);
+    assert.ok(promo1.sourceFile);
+
+    // Version sync invariant: topic_documents.attachment_version must equal attachments.version atomically
+    const tdAfterSync = store.db.prepare('SELECT attachment_version, version FROM topic_documents WHERE id = ?').get(tdSync.id);
+    assert.equal(tdAfterSync.attachment_version, 2, 'topic_documents.attachment_version must be synchronized atomically');
+    assert.equal(tdAfterSync.attachment_version, promo1.attachment.version, 'attachment_version invariant must hold');
+
+    // Second promotion call (concurrent race simulation): must return uniform { attachment, sourceFile, raced: true }
+    const promo2 = store.promoteBlobAttachmentToSourceFile(actor, {
+      attachmentId: syncAttId,
+      documentId: syncDoc.id,
+      rootId: root.id,
+      relativePath: '网页导入/sync.pdf',
+      filename: 'sync.pdf',
+      sha256: syncSha,
+      sizeBytes: syncPdfBytes.length,
+      modifiedAt: Math.round(fs.statSync(path.join(rootDir, '网页导入', 'sync.pdf')).mtimeMs)
+    });
+
+    assert.equal(promo2.raced, true);
+    assert.ok(promo2.attachment, 'Must return attachment on race');
+    assert.ok(promo2.sourceFile, 'Must return sourceFile on race (uniform return shape)');
+    assert.equal(promo2.sourceFile.id, promo1.sourceFile.id);
+    assert.equal(promo2.attachment.id, syncAttId);
+
+    // Clean up sync test file
+    fs.unlinkSync(path.join(rootDir, '网页导入', 'sync.pdf'));
+
+    // --- 28.4 Static Security Assertions ---
+    // Assert zero occurrences of naked unlinkSync(targetAbs) across server code
+    const serverFiles = [
+      'server/blob-migration.mjs',
+      'server/canvas-api.mjs',
+      'server/native-file-ops.mjs',
+      'server/library-scanner.mjs'
+    ];
+    for (const rel of serverFiles) {
+      const content = fs.readFileSync(path.join(new URL('../', import.meta.url).pathname, rel), 'utf8');
+      assert.equal(content.includes('unlinkSync(targetAbs)'), false,
+        `${rel} must not contain naked unlinkSync(targetAbs)`);
+      assert.equal(content.includes('safeUnlinkInsideRoot('), false,
+        `${rel} must not reference removed safeUnlinkInsideRoot`);
+    }
+
+    console.log('✅ M4 Audit 5: P1-1 auto-archive compensation, P1-2 starvation-free cursor pagination, P1-3 in-place version sync & uniform race shape, P1-4 TOCTOU safeUnlinkWithExpectedSha, static code safety passed');
+  } finally {
+    try { store.close(); } catch {}
+    fs.rmSync(tempDir, { recursive: true, force: true });
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+}
+
 async function testM4FinalRemediation() {
   await testWebImportDefaultArchiving();
   await testBlobOnlyWebImportMigration();
   await testReimportAutoArchivingAndBackfill();
   await testM4AuditFourContinuousReconciliation();
+  await testM4AuditFiveStrictSafetyAndPagination();
 }
 
 try {

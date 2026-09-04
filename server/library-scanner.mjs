@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { hashFileInsideRoot, resolveRootRealPath, ensureVerifiedDirectory, safeProbeInsideRoot, safeUnlinkInsideRoot } from './native-fs.mjs';
+import { hashFileInsideRoot, resolveRootRealPath, ensureVerifiedDirectory, safeProbeInsideRoot, safeUnlinkWithExpectedSha } from './native-fs.mjs';
 import { nowIso } from './canvas-store.mjs';
 
 // M4 incremental library scanner. A scan is a full directory inventory whose
@@ -397,7 +397,8 @@ async function reconcileImport(store, op) {
     // the placed file so no unmanaged content leaks. A failed removal is a
     // failed operation — never a rolled-back one.
     try {
-      safeUnlinkInsideRoot(root.absolute_path, relativePath);
+      // Re-hash to ensure the file is our orphan placement before deleting
+      await safeUnlinkWithExpectedSha(root.absolute_path, relativePath, op.payload?.sha256 || null);
     } catch (unlinkErr) {
       store.failFileOperation(op.id, 'compensation_failed');
       return 'failed';
@@ -449,7 +450,7 @@ async function reconcilePermanentDelete(store, op) {
         return 'failed';
       }
       try {
-        safeUnlinkInsideRoot(root.absolute_path, trashRel);
+        await safeUnlinkWithExpectedSha(root.absolute_path, trashRel, row.sha256);
       } catch (unlinkErr) {
         store.failFileOperation(op.id, 'compensation_failed');
         return 'failed';

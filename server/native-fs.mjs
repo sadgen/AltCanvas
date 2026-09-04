@@ -432,6 +432,13 @@ export function safeUnlinkInsideRoot(rootPath, relativePath) {
 // hash matches expectedSha256 before unlinking. If the file was replaced
 // concurrently by different content, unlinking is refused to prevent deleting
 // foreign data during error compensation.
+// Safe removal with content verification and TOCTOU defense:
+//   1. Checks path safety and regular file existence via safeProbeInsideRoot;
+//   2. Anchors on an open file descriptor (O_NOFOLLOW) and fstat to record dev/ino;
+//   3. Hashes the file contents directly through the anchored fd to match expectedSha256;
+//   4. Re-checks lstat on the path right before unlinking to assert (dev, ino) identity,
+//      preventing a concurrent swap between hash verification and removal;
+//   5. Unlinks the file.
 export async function safeUnlinkWithExpectedSha(rootPath, relativePath, expectedSha256) {
   const probe = safeProbeInsideRoot(rootPath, relativePath);
   if (!probe.present) {
@@ -442,23 +449,47 @@ export async function safeUnlinkWithExpectedSha(rootPath, relativePath, expected
     err.probeReason = probe.reason;
     throw err;
   }
-  const stat = fs.lstatSync(probe.absPath);
-  if (!stat.isFile()) {
-    const err = new NativePathError('only regular files can be removed', 'invalid_path');
-    err.probeReason = 'not_a_file';
-    throw err;
-  }
-  if (expectedSha256) {
-    const hashed = await hashFileInsideRoot(rootPath, relativePath);
-    if (hashed.sha256 !== expectedSha256) {
-      const err = new NativePathError(
-        'file content does not match expected SHA-256 for compensation removal',
-        'content_mismatch'
-      );
-      err.probeReason = 'content_mismatch';
+
+  // Open file with O_NOFOLLOW to pin it and verify dev/ino
+  const opened = openFileInsideRoot(rootPath, relativePath);
+  const targetDev = opened.stat.dev;
+  const targetIno = opened.stat.ino;
+
+  try {
+    if (!opened.stat.isFile()) {
+      const err = new NativePathError('only regular files can be removed', 'invalid_path');
+      err.probeReason = 'not_a_file';
       throw err;
     }
+
+    if (expectedSha256) {
+      const crypto = await import('node:crypto');
+      const hash = crypto.createHash('sha256');
+      const stream = fs.createReadStream('', { fd: opened.fd, autoClose: false });
+      const { pipeline } = await import('node:stream/promises');
+      await pipeline(stream, hash);
+      const actualSha = hash.digest('hex');
+      if (actualSha !== expectedSha256) {
+        const err = new NativePathError(
+          'file content does not match expected SHA-256 for compensation removal',
+          'content_mismatch'
+        );
+        err.probeReason = 'content_mismatch';
+        throw err;
+      }
+    }
+  } finally {
+    try { fs.closeSync(opened.fd); } catch {}
   }
+
+  // Post-hash TOCTOU verification: assert the file on path is still the EXACT same inode
+  const finalStat = fs.lstatSync(probe.absPath);
+  if (finalStat.isSymbolicLink() || finalStat.dev !== targetDev || finalStat.ino !== targetIno) {
+    const err = new NativePathError('file inode changed between hash and removal (TOCTOU swap detected)', 'toctou_detected');
+    err.probeReason = 'toctou_detected';
+    throw err;
+  }
+
   fs.unlinkSync(probe.absPath);
   return true;
 }
