@@ -3775,6 +3775,168 @@ async function testM4AuditSixIdentityDivergenceAndCompensation() {
   }
 }
 
+// ============================================================
+// 30. M4 Audit 9: crash-safe placement journaling for the blob-only
+//     web-import migration. A crash between disk placement and the DB
+//     promotion commit must leave a recoverable file.import journal so
+//     startup recovery removes exactly those orphaned bytes — the scanner
+//     must never enroll them as a second library identity for content
+//     still owned by a managed_blob attachment. Also pins the honest
+//     interrupted_by_restart classification for interrupted
+//     library.reconcile wrappers.
+// ============================================================
+async function testM4AuditNineMigrationCrashJournal() {
+  const { runBlobOnlyWebImportMigration } = await import('../server/blob-migration.mjs');
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-crash-store-'));
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-crash-root-'));
+  const store = new CanvasStore(path.join(tempDir, 'canvas.sqlite'));
+  const actor = canvasActorKey('local', 'm4-crash');
+  try {
+    const [root] = store.ensureLibraryRootsFromConfig(actor, [{ absolutePath: rootDir, displayName: '崩溃文库' }]);
+
+    const makeBlobLegacyImport = (title, pdfBytes) => {
+      const sha256 = sha256Of(pdfBytes);
+      const blobPath = store.resolveBlobPath(sha256, '.pdf');
+      fs.mkdirSync(path.dirname(blobPath), { recursive: true, mode: 0o700 });
+      fs.writeFileSync(blobPath, pdfBytes, { mode: 0o600 });
+      const relPath = path.relative(store.getBlobStorageDir(), blobPath);
+      store.upsertBlob({ sha256, relativePath: relPath, sizeBytes: pdfBytes.length, mimeType: 'application/pdf' });
+      const document = store.createDocument(actor, { title });
+      const attachmentId = crypto.randomUUID();
+      const timestamp = new Date().toISOString();
+      store.db.prepare(`
+        INSERT INTO attachments
+          (id, document_id, blob_hash, mime_type, original_filename, title, source_url, size_bytes,
+           storage_kind, version, created_at, updated_at)
+        VALUES (?, ?, ?, 'application/pdf', ?, ?, ?, ?, 'managed_blob', 1, ?, ?)
+      `).run(attachmentId, document.id, sha256, `${title}.pdf`, title, 'https://example.org/pdf/crash.pdf', pdfBytes.length, timestamp, timestamp);
+      return { document, attachmentId, sha256, bytes: pdfBytes };
+    };
+
+    // --- 30.1 Crash AFTER placement, BEFORE the promotion commit: the
+    // orphaned bytes plus their running file.import journal are compensated
+    // by startup recovery, and a subsequent scan enrolls nothing. ---
+    const orphan = makeBlobLegacyImport('Crash Orphan Doc', makePdfBytes('crash-orphan'));
+    const orphanRel = '网页导入/Crash Orphan Doc.pdf';
+    fs.mkdirSync(path.join(rootDir, '网页导入'), { recursive: true });
+    fs.writeFileSync(path.join(rootDir, orphanRel), orphan.bytes);
+    const crashOp = store.createFileOperation(actor, {
+      operationType: 'file.import',
+      sourcePath: store.resolveBlobPath(orphan.sha256, '.pdf'),
+      targetPath: `${root.absolutePath}/${orphanRel}`,
+      payload: { rootId: root.id, targetDir: '网页导入', filename: 'Crash Orphan Doc.pdf', kind: 'blob_migration', sha256: orphan.sha256 }
+    });
+    store.startFileOperation(crashOp.id);
+
+    const crashSummary = await recoverInterruptedFileOperations(store);
+    assert.equal(crashSummary.rolledBack >= 1, true, 'the interrupted placement must be rolled back');
+    const crashOpAfter = store.db.prepare('SELECT state FROM file_operations WHERE id = ?').get(crashOp.id);
+    assert.equal(crashOpAfter.state, 'rolled_back');
+    assert.equal(fs.existsSync(path.join(rootDir, orphanRel)), false,
+      'startup recovery must remove the orphaned placement (verified by payload SHA)');
+    assert.equal(store.getAttachment(actor, orphan.attachmentId).storageKind, 'managed_blob',
+      'the attachment stays on blob storage until the migration really runs');
+    assert.equal(store.countBlobOnlyWebImports(actor), 1, 'the migration candidate count is unchanged');
+    const crashScan = await scanLibraryRoot(store, actor, root.id, {});
+    assert.equal(crashScan.report.newDocuments, 0,
+      'after recovery the scan must find no anonymous bytes to enroll');
+    assert.equal(store.db.prepare(
+      'SELECT COUNT(*) AS n FROM source_files WHERE sha256 = ? AND deleted_at IS NULL'
+    ).get(orphan.sha256).n, 0, 'no second library identity may exist for the blob content');
+
+    // --- 30.2 The migration then completes cleanly: exactly one library
+    // identity, and the placement is journaled as a completed file.import. ---
+    const migRes = await runBlobOnlyWebImportMigration(store, actor, {});
+    assert.equal(migRes.report.migrated, 1);
+    assert.equal(migRes.report.failed, 0);
+    const attAfter = store.getAttachment(actor, orphan.attachmentId);
+    assert.equal(attAfter.storageKind, 'source_file');
+    const identityRows = store.db.prepare(
+      "SELECT document_id FROM source_files WHERE sha256 = ? AND deleted_at IS NULL AND status = 'active'"
+    ).all(orphan.sha256);
+    assert.equal(identityRows.length, 1, 'exactly one live identity may claim the content');
+    assert.equal(identityRows[0].document_id, orphan.document.id,
+      'the enrolled identity must be the ORIGINAL document, not a scanner-created duplicate');
+    assert.equal(fs.existsSync(path.join(rootDir, orphanRel)), true);
+    const completedJournals = store.db.prepare(
+      "SELECT id FROM file_operations WHERE operation_type = 'file.import' AND target_path LIKE ? AND state = 'completed'"
+    ).all('%Crash Orphan Doc.pdf');
+    assert.equal(completedJournals.length, 1,
+      'the real migration must journal its placement as a completed file.import');
+
+    // --- 30.3 Crash AFTER the promotion commit, BEFORE the operation
+    // completion: recovery settles the journal to completed from the
+    // committed row plus disk facts and never touches the referenced PDF. ---
+    const committed = makeBlobLegacyImport('Crash Committed Doc', makePdfBytes('crash-committed'));
+    const committedRel = '网页导入/Crash Committed Doc.pdf';
+    fs.writeFileSync(path.join(rootDir, committedRel), committed.bytes);
+    store.promoteBlobAttachmentToSourceFile(actor, {
+      attachmentId: committed.attachmentId,
+      documentId: committed.document.id,
+      rootId: root.id,
+      relativePath: committedRel,
+      filename: 'Crash Committed Doc.pdf',
+      sha256: committed.sha256,
+      sizeBytes: committed.bytes.length,
+      modifiedAt: Date.now()
+    });
+    const commitOp = store.createFileOperation(actor, {
+      operationType: 'file.import',
+      sourcePath: store.resolveBlobPath(committed.sha256, '.pdf'),
+      targetPath: `${root.absolutePath}/${committedRel}`,
+      payload: { rootId: root.id, targetDir: '网页导入', filename: 'Crash Committed Doc.pdf', kind: 'blob_migration', sha256: committed.sha256 }
+    });
+    store.startFileOperation(commitOp.id);
+    const commitSummary = await recoverInterruptedFileOperations(store);
+    assert.equal(commitSummary.completed >= 1, true, 'the committed placement must be settled to completed');
+    assert.equal(store.db.prepare('SELECT state FROM file_operations WHERE id = ?').get(commitOp.id).state, 'completed');
+    assert.equal(fs.existsSync(path.join(rootDir, committedRel)), true,
+      'a committed, referenced PDF is never removed by recovery');
+
+    // --- 30.4 An interrupted library.reconcile wrapper is failed honestly
+    // as interrupted_by_restart, not unknown_operation_type. ---
+    const wrapperOp = store.createFileOperation(actor, {
+      operationType: 'library.reconcile',
+      sourcePath: root.absolutePath,
+      payload: { kind: 'blob-only-web-import-migration', rootId: root.id, targetDir: '网页导入' }
+    });
+    store.startFileOperation(wrapperOp.id);
+    await recoverInterruptedFileOperations(store);
+    const wrapperAfter = store.db.prepare('SELECT state, error_code FROM file_operations WHERE id = ?').get(wrapperOp.id);
+    assert.equal(wrapperAfter.state, 'failed');
+    assert.equal(wrapperAfter.error_code, 'interrupted_by_restart');
+
+    // --- 30.5 Runtime DB-failure compensation settles the journal to
+    // rolled_back and removes the placed file (no running leftovers). ---
+    const dbFail = makeBlobLegacyImport('Crash DbFail Doc', makePdfBytes('crash-dbfail'));
+    const failingStore = new Proxy(store, {
+      get(target, prop) {
+        if (prop === 'promoteBlobAttachmentToSourceFile') {
+          return () => { throw new Error('simulated DB failure during migration'); };
+        }
+        const value = target[prop];
+        return typeof value === 'function' ? value.bind(target) : value;
+      }
+    });
+    const failedRun = await runBlobOnlyWebImportMigration(failingStore, actor, {});
+    assert.equal(failedRun.report.failed, 1);
+    assert.equal(failedRun.report.migrated, 0);
+    const dbFailOp = store.db.prepare(
+      "SELECT state FROM file_operations WHERE operation_type = 'file.import' AND target_path LIKE '%Crash DbFail Doc.pdf%'"
+    ).get();
+    assert.ok(dbFailOp, 'the failed migration must still have journaled its placement');
+    assert.equal(dbFailOp.state, 'rolled_back', 'a compensated placement rolls its journal back');
+    assert.equal(fs.existsSync(path.join(rootDir, '网页导入', 'Crash DbFail Doc.pdf')), false,
+      'the DB-failure compensation removes the placed file');
+
+    console.log('✅ M4 Audit 9: migration placement journaling closes the crash-orphan window, recovery compensates verified orphans, committed placements settle completed, library.reconcile interrupts classify honestly passed');
+  } finally {
+    try { store.close(); } catch {}
+    fs.rmSync(tempDir, { recursive: true, force: true });
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+}
+
 async function testM4FinalRemediation() {
   await testWebImportDefaultArchiving();
   await testBlobOnlyWebImportMigration();
@@ -3782,6 +3944,7 @@ async function testM4FinalRemediation() {
   await testM4AuditFourContinuousReconciliation();
   await testM4AuditFiveStrictSafetyAndPagination();
   await testM4AuditSixIdentityDivergenceAndCompensation();
+  await testM4AuditNineMigrationCrashJournal();
 }
 
 try {

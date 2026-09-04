@@ -1939,3 +1939,63 @@ M4 维持 CONDITIONAL PASS——按审计结论，本项补完后进入最后人
 - `git diff --check`：100% 干净；
 - 服务重启验证通过（active/running，端口 8088，`/` 与 `/auth/session` 均 200）；
 - 里程碑状态：严格保持 **`M4 CONDITIONAL PASS`**，等待最终复审与人工实机验收。
+
+---
+
+## 2026-09-05 会话（换机接续 + M4 第九轮终审：迁移落盘崩溃孤儿窗口闭环）
+
+### 开发环境迁移
+
+- 旧开发服务器即 lxc（Debian 13）本身：`~/Projects/AltCanvas` 分支
+  `feat/m4-native-library` 与远程一致（`282e271`），`data/library/`（2.9M 真实
+  PDF）、SQLite、blobs、`.debug/` 均在该机，`altcanvas.service` 仍在 8088 运行。
+  换机不由 git 携带的数据迁移（如需）必须先停服务再拷贝。
+- 新工作流（用户指定）：**Windows 只改代码 → lxc 部署/跑 `npm test` →
+  Windows 端 ZCode 电脑操作做 UI 验收**。Windows 克隆位于
+  `C:\Users\sadgen\Projects\AltCanvas`；Windows Node 22.11 跑 `node:sqlite`
+  需 `NODE_OPTIONS=--experimental-sqlite`（lxc Node 22.22 无需），且
+  canvas/native-m1/native-m4 三套因 POSIX 权限断言（0700/0600、chmod 注入）
+  在 Windows 必然失败——属平台差异，不在 Windows 修复。
+
+### 基线复核
+
+- lxc（权威环境）：`npm test` 10 套全绿（exit 0），与第八轮记录一致。
+- M4 维持 CONDITIONAL PASS，第九轮审计针对第八轮整改面
+  （promoteBlobAttachmentAndBackfill 单事务边界、补偿路径、恢复器）进行。
+
+### 第九轮审计发现与整改（2 项）
+
+1. **[P1] blob-only 迁移的"落盘后、提交前"崩溃孤儿窗口**：
+   - 根因：`blob-migration.mjs` 的空路径落盘分支直接 `linkSync`，整个迁移只
+     记一条 `library.reconcile` 包装操作，没有像 canvas-api 执行器那样对每次
+     落盘记 `file.import` 日志。进程在 linkSync 与 `promoteBlobAttachmentToSourceFile`
+     提交之间崩溃时，恢复器无据可查，孤儿 PDF 留在磁盘上；下一次递归扫描的
+     Phase C 不感知 blob 身份，会把该内容**入册为第二个文库身份**（原文档仍
+     指向 managed_blob），且此后迁移重跑只会撞 `filename_conflict`。
+   - 修复：落盘前记 `file.import` 日志（payload
+     `{rootId, targetDir, filename, kind: 'blob_migration', sha256}`），全部
+     结算路径收敛到 `settleOpCompleted/RolledBack/Failed` 守卫（防止
+     failed→rolled_back 的合法翻转覆盖 compensation_failed 标记）；崩溃态由
+     既有 `reconcileImport` 闭环——present && 无行 && SHA 匹配 → 核验删除 +
+     rolled_back；已提交未 complete → completed。adopt/raced（非本次落盘）
+     分支不产生可补偿日志，一律 rolled_back。
+2. **[P2] 恢复器缺 `library.reconcile` 分支**：中断的迁移包装操作落入
+   `default:` 被标 `unknown_operation_type`，审计语义误导。新增显式分支：
+   `interrupted_by_restart`（迁移幂等可重跑，磁盘补偿由 per-placement 日志承担）。
+
+### 回归测试（测试组 30，`testM4AuditNineMigrationCrashJournal`）
+
+1. 30.1 崩溃态（文件在 + 日志 running + 无行）→ 恢复器核验 SHA 后删除孤儿、
+   rolled_back；随后扫描 `newDocuments=0`，内容零 source_files 行。
+2. 30.2 重跑迁移 → migrated=1，活跃身份唯一且 `document_id` 为原文档；
+   真实迁移落盘产生恰好一条 completed 的 file.import 日志。
+3. 30.3 崩溃于提交后、complete 前 → 恢复器依据已提交行 + 磁盘事实结算
+   completed，被引用 PDF 绝不删除。
+4. 30.4 中断的 `library.reconcile` → failed / `interrupted_by_restart`。
+5. 30.5 运行期 DB 失败补偿 → 日志 rolled_back、落盘文件被安全删除。
+
+### 验证与状态
+
+- lxc `npm test` 10 套全绿（exit 0）。
+- 里程碑状态：保持 **`M4 CONDITIONAL PASS`**，待人工实机验收（步骤见 M4
+  实施会话节；本轮无 UI 变更，验收可沿用原步骤）。

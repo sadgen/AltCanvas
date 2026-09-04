@@ -32,6 +32,12 @@ import {
 //      authoritative location is reported as a reuse.
 //   4. Loop pagination: runBlobOnlyWebImportMigration loops in batches until
 //      the pending count reaches 0 or only unresolvable conflicts remain.
+//   5. Crash-safe placement journaling: every real disk placement in the
+//      vacant-path branch is journaled as a file.import operation (payload
+//      kind 'blob_migration') BEFORE the link, so a crash between placement
+//      and the DB promotion commit is compensated at startup by
+//      reconcileImport (verified SHA unlink) instead of leaking bytes that
+//      the scanner would enroll as a second library identity.
 
 const DEFAULT_ARCHIVE_DIR = '网页导入';
 const BATCH_SIZE = 100;
@@ -168,6 +174,27 @@ async function migrateOneBlobOnlyAttachment(store, actorKey, root, attachment, t
 
   // 3. Target path is vacant: perform atomic placement from verified blob.
   const targetAbs = resolveInsideRoot(rootReal, relativePath);
+  // Journal the placement BEFORE touching the disk (same pattern as the
+  // canvas-api file-target executor). A crash after linkSync but before the
+  // DB promotion commit otherwise leaves anonymous bytes that the scanner's
+  // Phase C would enroll as a SECOND library identity for content still owned
+  // by a managed_blob attachment. With the journal, startup recovery
+  // (reconcileImport) verifies payload.sha256 and removes exactly those
+  // orphaned bytes.
+  const placementOp = store.createFileOperation(actorKey, {
+    operationType: 'file.import',
+    sourcePath: blobAbs,
+    targetPath: `${root.absolutePath}/${relativePath}`,
+    payload: { rootId: root.id, targetDir, filename: finalName, kind: 'blob_migration', sha256 }
+  });
+  store.startFileOperation(placementOp.id);
+  // The journal must reach exactly one terminal state; guards keep late catch
+  // blocks from overwriting an already-settled outcome (failed → rolled_back
+  // is a legal transition and would erase a compensation_failed marker).
+  let opSettled = false;
+  const settleOpCompleted = () => { opSettled = true; store.completeFileOperation(placementOp.id); };
+  const settleOpRolledBack = () => { opSettled = true; store.markFileOperationRolledBack(placementOp.id); };
+  const settleOpFailed = (code) => { opSettled = true; store.failFileOperation(placementOp.id, code); };
   try {
     ensureParentInsideRoot(rootReal, relativePath, { create: true });
     const staged = path.join(path.dirname(targetAbs),
@@ -184,6 +211,9 @@ async function migrateOneBlobOnlyAttachment(store, actorKey, root, attachment, t
           // Raced placement: re-hash to confirm bytes match before concluding reused
           const racedHash = await hashFileInsideRoot(rootReal, relativePath);
           if (racedHash.sha256 !== sha256) {
+            // The target belongs to a different content owner and nothing of
+            // ours is on disk: rolled back, never compensated.
+            settleOpRolledBack();
             return { outcome: 'conflict', reason: 'filename_conflict' };
           }
           // Same bytes were placed by the competitor; adopt in-place
@@ -198,11 +228,14 @@ async function migrateOneBlobOnlyAttachment(store, actorKey, root, attachment, t
               sizeBytes: racedHash.sizeBytes,
               modifiedAt: Math.round(racedHash.mtimeMs)
             });
+            settleOpCompleted();
             return { outcome: 'reused', relativePath, raced: true };
           } catch (racedErr) {
             if (isPromotionTargetDiverged(racedErr)) {
+              settleOpRolledBack();
               return { outcome: 'reused', relativePath: authoritativeRelativePath(store, actorKey, attachment.attachment_id), raced: true };
             }
+            settleOpRolledBack();
             return { outcome: 'failed', reason: `adopt_failed:${racedErr.message}`.slice(0, 120) };
           }
         }
@@ -218,24 +251,30 @@ async function migrateOneBlobOnlyAttachment(store, actorKey, root, attachment, t
       // describe and misreport it as a generic placement failure.
       try {
         await safeUnlinkWithExpectedSha(root.absolutePath, relativePath, sha256);
+        settleOpRolledBack();
       } catch (compensationErr) {
         if (compensationErr.code !== 'file_not_found') {
+          settleOpFailed('compensation_failed');
           const compensated = new Error(`placement compensation failed: ${compensationErr.message}`);
           compensated.code = 'compensation_failed';
           throw compensated;
         }
         // file_not_found: this attempt never created the target — nothing to remove.
+        settleOpRolledBack();
       }
       throw innerErr;
     }
   } catch (placeErr) {
     if (placeErr && typeof placeErr.code === 'string' && placeErr.code.startsWith('unsafe_path')) {
+      settleOpFailed(placeErr.code);
       return { outcome: 'conflict', reason: placeErr.code };
     }
     if (placeErr && placeErr.code === 'compensation_failed') {
+      // The journal entry was already settled next to the failed compensation.
       return { outcome: 'failed', reason: `compensation_failed:${placeErr.message}`.slice(0, 120) };
     }
-    return { outcome: 'failed', reason: `placement_failed:${placeErr.code || placeErr.message}`.slice(0, 120) };
+    if (!opSettled) settleOpFailed(placeErr?.code || 'placement_failed');
+    return { outcome: 'failed', reason: `placement_failed:${placeErr?.code || placeErr?.message}`.slice(0, 120) };
   }
 
   // 4. In-place database upgrade preserving the SAME attachment ID. The stat
@@ -248,8 +287,10 @@ async function migrateOneBlobOnlyAttachment(store, actorKey, root, attachment, t
   } catch (statErr) {
     try {
       await safeUnlinkWithExpectedSha(root.absolutePath, relativePath, sha256);
+      settleOpRolledBack();
       return { outcome: 'failed', reason: `placement_verify_failed:${statErr.code || statErr.message}`.slice(0, 120) };
     } catch (compensationErr) {
+      settleOpFailed('compensation_failed');
       return { outcome: 'failed', reason: `compensation_failed:${compensationErr.message}`.slice(0, 120) };
     }
   }
@@ -264,6 +305,7 @@ async function migrateOneBlobOnlyAttachment(store, actorKey, root, attachment, t
       sizeBytes: attachment.size_bytes || placedStat.size,
       modifiedAt: Math.round(placedStat.mtimeMs)
     });
+    settleOpCompleted();
     return { outcome: 'migrated', relativePath };
   } catch (dbErr) {
     if (isPromotionTargetDiverged(dbErr)) {
@@ -271,7 +313,9 @@ async function migrateOneBlobOnlyAttachment(store, actorKey, root, attachment, t
       // verified identity and report the authoritative location as a reuse.
       try {
         await safeUnlinkWithExpectedSha(root.absolutePath, relativePath, sha256);
+        settleOpRolledBack();
       } catch (compensationErr) {
+        settleOpFailed('compensation_failed');
         return { outcome: 'failed', reason: `compensation_failed:${compensationErr.message}`.slice(0, 120) };
       }
       return { outcome: 'reused', relativePath: authoritativeRelativePath(store, actorKey, attachment.attachment_id), raced: true };
@@ -279,7 +323,9 @@ async function migrateOneBlobOnlyAttachment(store, actorKey, root, attachment, t
     // Compensation safety: unlink ONLY with verified expected SHA
     try {
       await safeUnlinkWithExpectedSha(root.absolutePath, relativePath, sha256);
+      settleOpRolledBack();
     } catch (compensationErr) {
+      settleOpFailed('compensation_failed');
       return { outcome: 'failed', reason: `compensation_failed:${compensationErr.message}`.slice(0, 120) };
     }
     return { outcome: 'failed', reason: `db_failed:${dbErr.message}`.slice(0, 120) };

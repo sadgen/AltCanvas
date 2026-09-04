@@ -167,6 +167,15 @@ export async function recoverInterruptedFileOperations(store) {
           resetRootScanState(store, op.payload?.rootId);
           summary.scansReset += 1;
           break;
+        case 'library.reconcile':
+          // One-shot administrative reconciliations (e.g. the blob-only
+          // web-import migration) are idempotent and simply re-runnable.
+          // Their per-placement file.import journals carry the real disk
+          // compensation, so the wrapper only needs an honest terminal state
+          // instead of a misleading unknown_operation_type.
+          store.failFileOperation(op.id, 'interrupted_by_restart');
+          summary.failed += 1;
+          break;
         case 'file.rename':
         case 'file.move':
           summary[await reconcileMoveLike(store, op)] += 1;
