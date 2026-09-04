@@ -1999,3 +1999,64 @@ M4 维持 CONDITIONAL PASS——按审计结论，本项补完后进入最后人
 - lxc `npm test` 10 套全绿（exit 0）。
 - 里程碑状态：保持 **`M4 CONDITIONAL PASS`**，待人工实机验收（步骤见 M4
   实施会话节；本轮无 UI 变更，验收可沿用原步骤）。
+
+---
+
+## 2026-09-05 会话二（M4 实机 UI 验收：新工作流落地，抓到并修复 2 个真实缺陷）
+
+### 工作流与验收环境
+
+- 按用户指定工作流执行：Windows 改代码 → lxc 部署/`npm test` → Windows 端
+  ZCode 电脑操作（内嵌浏览器）做 UI 验收。
+- 验收在**隔离测试实例**上进行（不触碰真实文库）：lxc 8089 端口、独立
+  `~/Projects/AltCanvas-ui-test/{data,library,logs}`、`DEBUG_LOG_DIR` 独立，
+  `NATIVE_LIBRARY_ROOTS` 指向隔离文库（含 2 个真实 PDF 夹具，顶层 + 子目录）。
+  测试管理员 `zcadmin`。真实 8088 服务与数据全程未动，仅在最终部署时重启。
+- 教训：`NATIVE_LIBRARY_ROOTS` 写入 env 文件必须带引号（`|` 分隔符会被
+  shell 当管道），首次启动曾因此回落真实 .env 的根目录，已当场纠正。
+
+### 验收结果（全部通过，其中 2 步各抓到 1 个真实缺陷）
+
+| 步骤 | 结果 |
+| --- | --- |
+| 管理员创建 / 登录 / 画板初始化 | PASS（无 ReferenceError，零 Altero 调用） |
+| 原始文件 Tab + 递归扫描 | PASS（双名称展示、子目录递归入册、`newDocuments` 计数正确） |
+| 重命名 | **抓到缺陷 A** → 修复后 PASS（磁盘改名、文库名不变） |
+| 回收站 → 恢复 | PASS（`.altcanvas-trash` 状态机、路径保留、恢复回原位） |
+| 未分类 / 无 PDF 等过滤器 | PASS（双名称关联在改名后保持正确） |
+| Reader 打开 PDF | 数据链路 PASS（认证→source_file→Range 服务→PDF.js 解析 20 页）；画布绘制受内嵌浏览器沙箱 rAF 限制无法执行，留真实浏览器复验 |
+| 快速导入 arXiv → 网页导入归档 | **抓到缺陷 B** → 修复后 PASS（解析→下载→`网页导入/` 归档，file.import 日志 completed） |
+| AI 主题归类 | PASS（本机 AI 网关提炼 3 个主题，2 篇自动采纳 ≥0.7） |
+| 日志复查 | 修复部署后 `.debug/dev.log`、`browser.log` 零新增错误 |
+
+### 缺陷 A：`GET /canvas/native/source-files/:id` 从未实现（`b780843`）
+
+- 文件操作 UI 的 `resolveSourceFileRef` 在树条目缺 `version` 时 GET 该端点
+  解析 If-Match，但路由表只有 POST 子路由与 DELETE → 404 → **重命名/移动/
+  回收/恢复四个流程在真实 UI 里弹窗前即静默失败**。自动化测试直测变更契约、
+  从未走过前端解析路径，故 8 轮审计未暴露。
+- 修复：补 GET 路由（owner 隔离、404、ETag=行版本），测试组 31 钉住
+  「GET 版本 → If-Match 改名」的完整 UI 契约与越权 404。
+
+### 缺陷 B：固定 IP 拨号在 Node autoSelectFamily 下全灭（`ee1c5fd`）
+
+- `POST /imports/resolve` 对任意 arXiv/DOI 真实域名返回 400
+  `ERR_INVALID_IP_ADDRESS(undefined)`。根因：Node ≥20 默认 autoSelectFamily
+  （Happy Eyeballs）以 `all:true` 语义调用自定义 lookup，期望
+  `cb(null, [{address, family}, …])`；`requestWithPinnedIp` 用单地址形状
+  `cb(null, "IP", family)`，Node 把字符串当数组读 `.address` 得 undefined。
+  这与第三轮翻译服务器修过的缺陷同类——但当时只修了 translation-server，
+  import 下载器漏掉；注入 transportFn 的测试永远走不到真实 lookup。
+- 修复：lookup 回调双形状兼容（`opt.all` 区分）；无已验证地址时硬失败
+  （旧的主机名 fallback 既绕过 DNS 固定又把非 IP 交给 Node）。测试组 32
+  以真实主机名拨号穿过 autoSelectFamily 机制（注意：IP 字面量主机名会跳过
+  lookup；默认 keep-alive 池会让同 host 的第二个请求跳过 lookup，测试用
+  独立主机名隔离）。
+
+### 遗留与说明
+
+- Reader 画布绘制需在真实桌面浏览器确认（本次自动化环境的 rAF/合成器限制，
+  非代码问题）；其余 M4 关闭闸门条件已全部实机通过。
+- 隔离测试实例（8089）保留运行供用户复看：`~/Projects/AltCanvas-ui-test/`，
+  清理：`kill $(ss -tlnp | grep 8089 ...)` + 删除该目录。
+- `npm test` 10 套全绿（exit 0）；`git diff --check` 干净。
