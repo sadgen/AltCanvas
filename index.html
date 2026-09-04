@@ -305,6 +305,7 @@
           <span id="source-files-path-label" class="flex-1 truncate text-[10px] font-mono text-slate-500" title="当前目录">/</span>
         </div>
       </div>
+      <div id="blob-migration-notice" class="hidden px-1"></div>
       <div id="source-files-items" class="hidden flex-1 overflow-y-auto custom-scrollbar p-2 space-y-1">
         <div class="text-center text-slate-500 py-12 text-xs">正在加载原始文件...</div>
       </div>
@@ -787,6 +788,10 @@
           <button id="btn-quick-import-topic" type="button" disabled class="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-xs font-medium transition shadow-md disabled:opacity-40 disabled:cursor-not-allowed">导入并加入当前主题</button>
         </div>
       </div>
+      <div id="quick-import-default-location" class="hidden pt-2 text-[11px] text-emerald-300/90 flex items-center gap-1.5">
+        <span>💾 保存位置：</span><span id="quick-import-default-location-text" class="font-medium">研究文库 / 网页导入</span>
+        <span class="text-slate-500">（取得 PDF 的导入统一归档到原始文件）</span>
+      </div>
       <div id="quick-import-directory-section" class="pt-3 border-t border-slate-800 space-y-2 hidden">
         <div class="text-xs font-semibold text-emerald-300 flex items-center gap-1.5">📂 归档到文库目录（原始文件）</div>
         <div class="grid grid-cols-2 gap-2">
@@ -800,7 +805,7 @@
             <label for="quick-import-target-dir" class="block text-[11px] text-slate-400 mb-1">目标子目录（相对路径）</label>
             <input id="quick-import-target-dir" type="text" autocomplete="off" spellcheck="false"
               class="w-full px-2 py-1.5 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:outline-none focus:border-emerald-500 font-mono text-xs"
-              placeholder="例如 papers/2024（可留空）" />
+              placeholder="默认：网页导入（可自定义子目录）" />
           </div>
         </div>
         <div class="grid grid-cols-2 gap-2">
@@ -2606,13 +2611,48 @@
       document.getElementById('source-files-items').classList.toggle('hidden', !showing);
     }
 
+    async function refreshBlobMigrationNotice() {
+      const container = document.getElementById('blob-migration-notice');
+      if (!container) return;
+      try {
+        const status = await m4Fetch('/native/migrations/blob-only-web-imports');
+        const pending = status?.data?.pending || 0;
+        if (pending > 0) {
+          container.classList.remove('hidden');
+          container.innerHTML = `
+            <div class="p-2 rounded bg-amber-950/50 border border-amber-800/60 text-[11px] text-amber-300 flex items-center justify-between gap-2">
+              <span>检测到 ${pending} 个历史网页导入 PDF 仍在内部存储，尚未归档到文库目录。</span>
+              <button id="btn-run-blob-migration" type="button" class="px-2 py-1 rounded bg-amber-900/70 hover:bg-amber-800 text-amber-100 border border-amber-700 text-[11px] transition shrink-0">一键归档</button>
+            </div>`;
+          document.getElementById('btn-run-blob-migration')?.addEventListener('click', runBlobMigration);
+        } else {
+          container.classList.add('hidden');
+          container.innerHTML = '';
+        }
+      } catch {}
+    }
+
+    async function runBlobMigration() {
+      const btn = document.getElementById('btn-run-blob-migration');
+      if (btn) { btn.disabled = true; btn.textContent = '⏳ 归档中...'; }
+      try {
+        const result = await m4Fetch('/native/migrations/blob-only-web-imports', { method: 'POST', body: {} });
+        const report = result?.data?.report || {};
+        showToast(`归档完成：迁移 ${report.migrated ?? 0} · 复用 ${report.reused ?? 0} · 冲突 ${report.conflicts ?? 0} · 失败 ${report.failed ?? 0}`, 'success');
+        await Promise.all([refreshBlobMigrationNotice(), loadSourceFiles(sourceFilesState.path), loadNativeLibrary().catch(() => {})]);
+      } catch (err) {
+        showToast(`归档失败: ${errorMessage(err)}`, 'error');
+        if (btn) { btn.disabled = false; btn.textContent = '一键归档'; }
+      }
+    }
+
     async function openLibraryFilesView() {
       switchSourceFilesView(true);
       try {
         await fetchLibraryRoots(true);
         renderSourceFilesRootSelect();
         if (!sourceFilesState.rootId && sourceFilesState.roots.length) sourceFilesState.rootId = sourceFilesState.roots[0].id;
-        await loadSourceFiles(sourceFilesState.path || '');
+        await Promise.all([loadSourceFiles(sourceFilesState.path || ''), refreshBlobMigrationNotice()]);
       } catch (err) {
         showToast(`文库根目录加载失败: ${errorMessage(err)}`, 'error');
       }
@@ -4540,7 +4580,8 @@
           });
         localStorage.setItem(`altcanvas.canvasBoard.${config.userId}`, canvasBoard.id);
         await loadCanvasSnapshot();
-        await loadInboxEntries();
+        // [M4] The inbox runtime is fully retired; canvas initialization no
+        // longer touches it.
       } catch (err) {
         reportApplicationError('canvas.initialize', err);
         canvasReady = false;
@@ -6103,15 +6144,21 @@
       const modal = document.getElementById('quick-import-modal');
       const queryInput = document.getElementById('input-quick-import-query');
       const resultCard = document.getElementById('quick-import-result-card');
-      const btnInboxOnly = document.getElementById('btn-quick-import-inbox-only');
       const btnTopic = document.getElementById('btn-quick-import-topic');
       const dupWarning = document.getElementById('quick-import-duplicate-warning');
 
       queryInput.value = '';
       resultCard.classList.add('hidden');
       dupWarning.classList.add('hidden');
-      btnInboxOnly.disabled = true;
+      // [M4] The retired inbox import button is gone; both real actions
+      // (topic import / directory archive) stay disabled until a resolve
+      // succeeds.
       btnTopic.disabled = true;
+      const btnDirectory = document.getElementById('btn-quick-import-directory');
+      if (btnDirectory) {
+        btnDirectory.disabled = true;
+        btnDirectory.textContent = '📥 解析并归档到目录';
+      }
       currentResolvedImport = null;
 
       modal.classList.remove('hidden');
@@ -6141,7 +6188,6 @@
       const badgeEl = document.getElementById('quick-import-source-badge');
       const dupWarning = document.getElementById('quick-import-duplicate-warning');
       const dupDetails = document.getElementById('quick-import-duplicate-details');
-      const btnInboxOnly = document.getElementById('btn-quick-import-inbox-only');
       const btnTopic = document.getElementById('btn-quick-import-topic');
 
       resolveBtn.disabled = true;
@@ -6176,9 +6222,19 @@
           dupWarning.classList.add('hidden');
         }
 
-        btnInboxOnly.disabled = false;
-        btnTopic.disabled = false;
+        // Enable actions per the retired-free product semantics: topic import
+        // requires a current topic; directory archiving requires an available
+        // native root. Failures keep everything disabled.
+        btnTopic.disabled = !canvasWorkspace?.id;
+        const btnDirectory = document.getElementById('btn-quick-import-directory');
+        if (btnDirectory) {
+          btnDirectory.disabled = (sourceFilesState.roots || []).length === 0;
+        }
+        if (typeof updateQuickImportDefaultLocation === 'function') updateQuickImportDefaultLocation();
       } catch (err) {
+        btnTopic.disabled = true;
+        const btnDirectory = document.getElementById('btn-quick-import-directory');
+        if (btnDirectory) btnDirectory.disabled = true;
         if (err?.status === 503 || err?.code === 'translation_server_unavailable') {
           showToast('解析服务未配置：解析 BibTeX/RIS 书目需先在服务端配置 Translation Server（TRANSLATION_SERVER_URL）', 'error');
         } else if (err?.status === 504 || ['total_timeout', 'connect_timeout', 'response_timeout'].includes(err?.code)) {
@@ -6194,9 +6250,7 @@
 
     async function executeQuickImport(targetWorkspaceId = null, confirmFuzzy = false) {
       if (!currentResolvedImport) return;
-      const btnInboxOnly = document.getElementById('btn-quick-import-inbox-only');
       const btnTopic = document.getElementById('btn-quick-import-topic');
-      btnInboxOnly.disabled = true;
       btnTopic.disabled = true;
 
       try {
@@ -6216,12 +6270,18 @@
           const candidates = result.data?.candidates || [];
           const detail = candidates.slice(0, 3).map(c => `《${c.title || c.documentId}》`).join('、');
           if (window.confirm(`检测到高度相似文献：${detail}。是否确认导入为新条目？`)) {
-            btnInboxOnly.disabled = false;
             btnTopic.disabled = false;
             return executeQuickImport(targetWorkspaceId, true);
           }
           showToast('已取消导入', 'info');
-          btnInboxOnly.disabled = false;
+          btnTopic.disabled = false;
+          return;
+        }
+        if (res.status === 409 && result.error?.code === 'duplicate_content') {
+          const existing = result.data?.document;
+          showToast(existing
+            ? `相同 SHA-256 的内容已在文库中：《${existing.title || '未命名'}》，未重复导入`
+            : '相同 SHA-256 的内容已在文库中，未重复导入', 'error');
           btnTopic.disabled = false;
           return;
         }
@@ -6235,12 +6295,10 @@
           : '已成功导入至 Native 文库！', 'success');
         closeQuickImportModal();
 
-        // Refresh native library list and inbox if loaded
+        // Refresh the native library after a successful import.
         loadCollectionsAndLibrary();
-        if (typeof loadInboxEntries === 'function') loadInboxEntries();
       } catch (err) {
         showToast(`导入失败: ${errorMessage(err)}`, 'error');
-        btnInboxOnly.disabled = false;
         btnTopic.disabled = false;
       }
     }
@@ -6250,10 +6308,24 @@
       const section = document.getElementById('quick-import-directory-section');
       if (!section) return;
       section.classList.remove('hidden');
+      const locationLine = document.getElementById('quick-import-default-location');
       try {
         await fetchLibraryRoots();
         renderSourceFilesRootSelect();
-      } catch {}
+        if (locationLine) {
+          if (sourceFilesState.roots.length) {
+            locationLine.classList.remove('hidden');
+            const selectedRoot = sourceFilesState.roots.find(r => r.id === (sourceFilesState.rootId || sourceFilesState.roots[0].id))
+              || sourceFilesState.roots[0];
+            const textEl = document.getElementById('quick-import-default-location-text');
+            if (textEl) textEl.textContent = `${selectedRoot.displayName} / 网页导入`;
+          } else {
+            locationLine.classList.add('hidden');
+          }
+        }
+      } catch {
+        if (locationLine) locationLine.classList.add('hidden');
+      }
       const topicSelect = document.getElementById('quick-import-dir-topics');
       if (topicSelect) {
         const options = (userWorkspaces || [])
@@ -6271,7 +6343,8 @@
         showToast('未配置文库根目录（服务端 NATIVE_LIBRARY_ROOTS）', 'error');
         return;
       }
-      const targetDir = (document.getElementById('quick-import-target-dir')?.value || '').trim();
+      const rawTargetDir = (document.getElementById('quick-import-target-dir')?.value || '').trim();
+      const targetDir = rawTargetDir || undefined;
       const filenameInput = (overrideFilename || document.getElementById('quick-import-filename')?.value || '').trim();
       const topicIds = Array.from(document.getElementById('quick-import-dir-topics')?.selectedOptions || [])
         .map(opt => opt.value).filter(Boolean);
@@ -6291,6 +6364,7 @@
             confirmFuzzy: confirmFuzzy || undefined
           })
         });
+        void targetDir;
         const result = await res.json().catch(() => null);
 
         if (res.status === 409 && result.error?.code === 'duplicate_confirmation_required') {
@@ -6862,7 +6936,6 @@
           await openNativeDocument(result.data.document, result.data.attachment);
         }
         if (typeof loadCollectionsAndLibrary === 'function') loadCollectionsAndLibrary();
-        if (typeof loadInboxEntries === 'function') loadInboxEntries();
       } catch (err) {
         showToast(`上传失败: ${err.message}`, 'error');
       }

@@ -1513,7 +1513,7 @@ assert.match(html, /function getHeaders\(extra = \{\}\) \{\s*return \{\s*'Accept
   let postedPayload = null;
   const execRunner = new Function(
     'currentResolvedImport', 'document', 'fetch', 'showToast', 'closeQuickImportModal',
-    'loadCollectionsAndLibrary', 'loadInboxEntries', 'errorMessage',
+    'loadCollectionsAndLibrary', 'errorMessage',
     `
     ${executeQuickImportMatch[0]}
     return executeQuickImport;
@@ -1521,12 +1521,11 @@ assert.match(html, /function getHeaders\(extra = \{\}\) \{\s*return \{\s*'Accept
   );
   const execFn = execRunner(
     { title: 'Book With ISBN', isbn: '978-1-4028-9462-6', sourceType: 'ris' },
-    { getElementById: () => ({ disabled: false, classList: { add() {} } }) },
+    { getElementById: (id) => id === 'btn-quick-import-topic' ? { disabled: false } : null },
     async (url, opts) => {
       postedPayload = JSON.parse(opts.body);
       return { ok: true, status: 201, json: async () => ({ data: { outcome: 'created' } }) };
     },
-    () => {},
     () => {},
     () => {},
     () => {},
@@ -1535,6 +1534,345 @@ assert.match(html, /function getHeaders\(extra = \{\}\) \{\s*return \{\s*'Accept
   await execFn(null, false);
   assert.ok(postedPayload, 'executeQuickImport must post payload to /canvas/imports/native');
   assert.equal(postedPayload.resolved.isbn, '978-1-4028-9462-6', 'Resolved ISBN must be preserved in the POST payload');
+}
+
+// ============================================================
+// 5.1 [M4 final] 登录初始化行为测试：loadInboxEntries 不存在、零 inbox/Altero 请求
+// ============================================================
+{
+  const initCanvasMatch = scripts[0].match(/async function initCanvasWorkspace\(\) \{([\s\S]*?)\n    \}/);
+  assert.ok(initCanvasMatch, 'initCanvasWorkspace must exist in script');
+  assert.doesNotMatch(initCanvasMatch[0], /loadInboxEntries/,
+    'initCanvasWorkspace must not reference loadInboxEntries');
+  assert.doesNotMatch(html, /loadInboxEntries\s*\(/,
+    'html must contain zero loadInboxEntries calls');
+
+  const canvasFetchCalls = [];
+  let saveState = '';
+  let canvasReadyState = null;
+  let renderCanvasCalled = false;
+  let selectorCalledWith = null;
+  let snapshotLoaded = false;
+  const localStorageStore = new Map();
+
+  const mockCanvasFetch = async (path, opts) => {
+    canvasFetchCalls.push({ path, opts });
+    if (path === '/workspaces') return [{ id: 'ws-init-1', name: '我的研究主题' }];
+    if (path === '/workspaces/ws-init-1/boards') return [{ id: 'board-init-1', name: '研究画板' }];
+    return {};
+  };
+
+  const initCanvasRunner = new Function(
+    'config', 'setCanvasSaveState', 'localStorage', 'canvasFetch',
+    'renderTopicWorkspaceSelector', 'loadCanvasSnapshot', 'reportApplicationError',
+    'showToast', 'errorMessage', 'renderCanvas',
+    `
+    let userWorkspaces = [];
+    let canvasWorkspace = null;
+    let canvasBoard = null;
+    let canvasReady = false;
+    // NOTE: loadInboxEntries is deliberately UNDEFINED here.
+    return (async () => {
+      ${initCanvasMatch[1]}
+      return { userWorkspaces, canvasWorkspace, canvasBoard, canvasReady };
+    })();
+    `
+  );
+
+  const result = await initCanvasRunner(
+    { mode: 'bff', user: { id: 'u1' }, userId: 'u1' },
+    (state, kind) => { saveState = state; },
+    {
+      getItem: k => localStorageStore.get(k) || null,
+      setItem: (k, v) => localStorageStore.set(k, String(v))
+    },
+    mockCanvasFetch,
+    (wsId) => { selectorCalledWith = wsId; },
+    async () => { snapshotLoaded = true; },
+    (src, err) => { throw err; },
+    () => {},
+    e => e.message,
+    () => { renderCanvasCalled = true; }
+  );
+
+  assert.equal(result.canvasWorkspace.id, 'ws-init-1', 'Workspace must be selected');
+  assert.equal(result.canvasBoard.id, 'board-init-1', 'Board must be selected');
+  assert.equal(selectorCalledWith, 'ws-init-1', 'Topic selector must be populated');
+  assert.equal(snapshotLoaded, true, 'Canvas snapshot must be loaded');
+  assert.ok(canvasFetchCalls.every(c => !c.path.includes('/inbox')), 'Must make ZERO inbox requests');
+  assert.ok(canvasFetchCalls.every(c => !c.path.includes('/api/')), 'Must make ZERO /api/ proxy requests');
+  assert.ok(canvasFetchCalls.every(c => !c.path.toLowerCase().includes('altero')), 'Must make ZERO Altero requests');
+  assert.ok(canvasFetchCalls.every(c => !c.path.toLowerCase().includes('oidc')), 'Must make ZERO OIDC requests');
+  assert.ok(canvasFetchCalls.every(c => !c.path.toLowerCase().includes('oauth')), 'Must make ZERO OAuth requests');
+}
+
+// ============================================================
+// 5.2 [M4 final] 快速导入真实 DOM 契约测试（严格 ID 白名单，未知 ID 返回 null）
+// ============================================================
+{
+  const openQuickImportMatch = scripts[0].match(/function openQuickImportModal\(\) \{([\s\S]*?)\n    \}/);
+  const resolveQuickImportMatch = scripts[0].match(/async function resolveQuickImport\(\) \{([\s\S]*?)\n    \}/);
+  const execQuickImportMatch = scripts[0].match(/async function executeQuickImport\([\s\S]*?\{([\s\S]*?)\n    \}/);
+  const execDirectoryMatch = scripts[0].match(/async function executeQuickDirectoryImport\([\s\S]*?\{([\s\S]*?)\n    \}/);
+
+  assert.ok(openQuickImportMatch);
+  assert.ok(resolveQuickImportMatch);
+  assert.ok(execQuickImportMatch);
+  assert.ok(execDirectoryMatch);
+
+  // 1. openQuickImportModal: strict DOM provides ONLY existing IDs.
+  //    btn-quick-import-inbox-only returns null; code must NOT touch it.
+  {
+    const element = (tag = 'div') => ({
+      disabled: false, value: 'pre', textContent: '',
+      focusCalls: 0, focus() { this.focusCalls++; },
+      classList: {
+        classes: new Set(),
+        add(c) { this.classes.add(c); },
+        remove(c) { this.classes.delete(c); },
+        toggle(c, force) { if (force !== undefined) force ? this.classes.add(c) : this.classes.delete(c); else this.classes.has(c) ? this.classes.delete(c) : this.classes.add(c); },
+        contains(c) { return this.classes.has(c); }
+      }
+    });
+
+    const strictElements = {
+      'quick-import-modal': element(),
+      'input-quick-import-query': element('textarea'),
+      'quick-import-result-card': element(),
+      'btn-quick-import-topic': element('button'),
+      'quick-import-duplicate-warning': element(),
+      'btn-quick-import-directory': element('button'),
+      'quick-import-directory-section': element(),
+      'quick-import-default-location': element(),
+      'quick-import-default-location-text': element(),
+      'quick-import-target-root': element('select'),
+      'quick-import-target-dir': element('input'),
+      'quick-import-filename': element('input'),
+      'quick-import-dir-topics': element('select')
+    };
+
+    const strictDoc = {
+      getElementById: (id) => strictElements[id] || null
+    };
+
+    assert.equal(strictDoc.getElementById('btn-quick-import-inbox-only'), null,
+      'Precondition: retired inbox-only button must be absent from strict DOM');
+
+    const openRunner = new Function(
+      'document', 'initQuickImportDirectorySection',
+      `
+      let currentResolvedImport = null;
+      ${openQuickImportMatch[1]}
+      return { currentResolvedImport };
+      `
+    );
+
+    // Must NOT throw TypeError: Cannot set properties of null
+    const openRes = openRunner(strictDoc, () => {});
+    assert.equal(strictElements['input-quick-import-query'].value, '');
+    assert.equal(strictElements['btn-quick-import-topic'].disabled, true, 'Topic import stays disabled before resolve');
+    assert.equal(strictElements['btn-quick-import-directory'].disabled, true, 'Directory archive stays disabled before resolve');
+    assert.equal(strictElements['input-quick-import-query'].focusCalls, 1);
+    assert.equal(openRes.currentResolvedImport, null);
+  }
+
+  // 2. resolveQuickImport: enables actions based on real available state
+  {
+    const makeResolveDom = () => ({
+      'input-quick-import-query': { value: '10.1038/nature', focus() {} },
+      'btn-quick-import-resolve': { disabled: false, textContent: '🔍 解析' },
+      'quick-import-result-card': { classList: { remove() {}, add() {} } },
+      'quick-import-result-title': { textContent: '' },
+      'quick-import-result-meta': { innerHTML: '' },
+      'quick-import-result-abstract': { textContent: '' },
+      'quick-import-source-badge': { textContent: '', className: '' },
+      'quick-import-duplicate-warning': { classList: { remove() {}, add() {} } },
+      'quick-import-duplicate-details': { innerHTML: '' },
+      'btn-quick-import-topic': { disabled: true },
+      'btn-quick-import-directory': { disabled: true }
+    });
+
+    const runResolveTest = async ({ workspace, roots, canvasFetchImpl }) => {
+      const dom = makeResolveDom();
+      const doc = { getElementById: id => dom[id] || null };
+      const toasts = [];
+      const runner = new Function(
+        'document', 'canvasFetch', 'showToast', 'errorMessage', 'escapeHTML',
+        'canvasWorkspace', 'sourceFilesState', 'updateQuickImportDefaultLocation', 'dom', 'toasts',
+        `
+        let currentResolvedImport = null;
+        return (async () => {
+          ${resolveQuickImportMatch[1]}
+          return { currentResolvedImport, dom, toasts };
+        })();
+        `
+      );
+      return runner(
+        doc, canvasFetchImpl,
+        (msg, type) => toasts.push({ msg, type }),
+        e => e.message,
+        s => String(s),
+        workspace,
+        { roots },
+        () => {},
+        dom, toasts
+      );
+    };
+
+    // Success with workspace & roots: both buttons enabled, zero inbox calls
+    const calls = [];
+    const successRes = await runResolveTest({
+      workspace: { id: 'ws-1' },
+      roots: [{ id: 'r-1', displayName: '根' }],
+      canvasFetchImpl: async (path, opts) => {
+        calls.push(path);
+        return {
+          resolved: { sourceType: 'doi', title: 'Resolved Paper', creators: [{ name: 'A' }] },
+          parsedBy: 'native_resolver'
+        };
+      }
+    });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0], '/imports/resolve');
+    assert.equal(successRes.dom['btn-quick-import-topic'].disabled, false, 'Enabled when workspace exists');
+    assert.equal(successRes.dom['btn-quick-import-directory'].disabled, false, 'Enabled when roots exist');
+
+    // Success without a workspace: topic button stays disabled, directory button enabled
+    const noWsRes = await runResolveTest({
+      workspace: null,
+      roots: [{ id: 'r-1' }],
+      canvasFetchImpl: async () => ({ resolved: { title: 'T' } })
+    });
+    assert.equal(noWsRes.dom['btn-quick-import-topic'].disabled, true, 'Topic import disabled without a workspace');
+    assert.equal(noWsRes.dom['btn-quick-import-directory'].disabled, false);
+
+    // Resolve failure: both buttons stay disabled, error toast surfaces
+    const failRes = await runResolveTest({
+      workspace: { id: 'ws-1' },
+      roots: [{ id: 'r-1' }],
+      canvasFetchImpl: async () => { throw new Error('resolve failed'); }
+    });
+    assert.equal(failRes.dom['btn-quick-import-topic'].disabled, true);
+    assert.equal(failRes.dom['btn-quick-import-directory'].disabled, true);
+    assert.ok(failRes.toasts.some(t => t.msg.includes('resolve failed')));
+  }
+
+  // 3. executeQuickImport: strict DOM, zero inbox references in body, duplicate_content handling
+  {
+    const topicBtn = { disabled: false };
+    const doc = { getElementById: id => id === 'btn-quick-import-topic' ? topicBtn : null };
+    const toasts = [];
+    let modalClosed = false;
+    let libraryReloaded = false;
+
+    const runner = new Function(
+      'currentResolvedImport', 'document', 'fetch', 'showToast', 'closeQuickImportModal',
+      'loadCollectionsAndLibrary', 'errorMessage',
+      `
+      return (async (targetWorkspaceId, confirmFuzzy) => {
+        ${execQuickImportMatch[1]}
+      });
+      `
+    );
+
+    let postedOpts = null;
+    const execute = runner(
+      { sourceType: 'doi', title: 'Topic Paper' },
+      doc,
+      async (url, opts) => {
+        postedOpts = opts;
+        return {
+          ok: true, status: 201,
+          json: async () => ({ data: { outcome: 'created' } })
+        };
+      },
+      (msg, type) => toasts.push({ msg, type }),
+      () => { modalClosed = true; },
+      () => { libraryReloaded = true; },
+      e => e.message
+    );
+
+    await execute('ws-1', false);
+    assert.ok(postedOpts);
+    const body = JSON.parse(postedOpts.body);
+    assert.equal(body.targetWorkspaceId, 'ws-1');
+    assert.equal('inbox' in body, false);
+    assert.equal('inboxOnly' in body, false);
+    assert.equal(modalClosed, true);
+    assert.equal(libraryReloaded, true);
+
+    // 409 duplicate_content surfaces specific toast and keeps topicBtn enabled
+    modalClosed = false;
+    const dupExecute = runner(
+      { sourceType: 'doi', title: 'Topic Paper' },
+      doc,
+      async () => ({
+        ok: false, status: 409,
+        json: async () => ({
+          error: { code: 'duplicate_content' },
+          data: { document: { title: '已存在的文献' } }
+        })
+      }),
+      (msg, type) => toasts.push({ msg, type }),
+      () => { modalClosed = true; },
+      () => {},
+      e => e.message
+    );
+    await dupExecute('ws-1', false);
+    assert.equal(modalClosed, false, 'Modal stays open on duplicate');
+    assert.ok(toasts.some(t => t.msg.includes('相同 SHA-256') && t.msg.includes('已存在的文献')));
+    assert.equal(topicBtn.disabled, false, 'Button re-enabled after duplicate refusal');
+  }
+
+  // 4. executeQuickDirectoryImport: empty targetDir sends undefined (server defaults to 网页导入)
+  {
+    const dirBtn = { disabled: false, textContent: '按钮' };
+    const elements = {
+      'quick-import-target-root': { value: 'root-strict' },
+      'quick-import-target-dir': { value: '   ' }, // blank -> defaults on server
+      'quick-import-filename': { value: '' },
+      'quick-import-dir-topics': { selectedOptions: [{ value: 'ws-dir-1' }] },
+      'btn-quick-import-directory': dirBtn
+    };
+    const doc = { getElementById: id => elements[id] || null };
+    let postedBody = null;
+    let modalClosed = false;
+
+    const runner = new Function(
+      'currentResolvedImport', 'document', 'fetch', 'showToast', 'closeQuickImportModal',
+      'loadCollectionsAndLibrary', 'promptM4FileName', 'resetQuickDirectoryButton', 'errorMessage',
+      `
+      return (async (confirmFuzzy, overrideFilename) => {
+        ${execDirectoryMatch[1]}
+      });
+      `
+    );
+
+    const executeDir = runner(
+      { sourceType: 'doi', title: 'Directory Paper' },
+      doc,
+      async (url, opts) => {
+        postedBody = JSON.parse(opts.body);
+        return {
+          ok: true, status: 201,
+          json: async () => ({ data: { outcome: 'created' } })
+        };
+      },
+      () => {},
+      () => { modalClosed = true; },
+      () => {},
+      async () => ({ ok: true }),
+      () => { dirBtn.disabled = false; },
+      e => e.message
+    );
+
+    await executeDir(false, null);
+    assert.ok(postedBody);
+    assert.equal(postedBody.rootId, 'root-strict');
+    assert.equal(postedBody.targetDir, undefined, 'Empty directory input must not send a blank string; server applies 网页导入');
+    assert.deepEqual(postedBody.topicIds, ['ws-dir-1']);
+    assert.equal(modalClosed, true);
+  }
 }
 
 assert.match(devServer, /style-src-attr 'unsafe-inline'/, 'CSP must permit dynamic Canvas geometry styles');
