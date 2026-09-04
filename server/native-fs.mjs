@@ -426,3 +426,39 @@ export function safeUnlinkInsideRoot(rootPath, relativePath) {
   fs.unlinkSync(probe.absPath);
   return true;
 }
+
+// Safe removal with content verification: verifies the target exists safely
+// inside root (no symlink component), is a regular file, and its SHA-256
+// hash matches expectedSha256 before unlinking. If the file was replaced
+// concurrently by different content, unlinking is refused to prevent deleting
+// foreign data during error compensation.
+export async function safeUnlinkWithExpectedSha(rootPath, relativePath, expectedSha256) {
+  const probe = safeProbeInsideRoot(rootPath, relativePath);
+  if (!probe.present) {
+    const err = new NativePathError(
+      probe.reason === 'absent' ? 'path does not exist inside the root' : `path is not safely addressable (${probe.reason})`,
+      probe.reason === 'absent' ? 'file_not_found' : probe.reason
+    );
+    err.probeReason = probe.reason;
+    throw err;
+  }
+  const stat = fs.lstatSync(probe.absPath);
+  if (!stat.isFile()) {
+    const err = new NativePathError('only regular files can be removed', 'invalid_path');
+    err.probeReason = 'not_a_file';
+    throw err;
+  }
+  if (expectedSha256) {
+    const hashed = await hashFileInsideRoot(rootPath, relativePath);
+    if (hashed.sha256 !== expectedSha256) {
+      const err = new NativePathError(
+        'file content does not match expected SHA-256 for compensation removal',
+        'content_mismatch'
+      );
+      err.probeReason = 'content_mismatch';
+      throw err;
+    }
+  }
+  fs.unlinkSync(probe.absPath);
+  return true;
+}

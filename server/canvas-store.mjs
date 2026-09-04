@@ -5500,6 +5500,10 @@ export class CanvasStore {
   // Audits all legacy attachments that still reside only in the managed blob
   // store (storage_kind = 'managed_blob'). Both web imports and direct uploads
   // from earlier milestones are eligible for one-shot archiving into library roots.
+  // Audits legacy attachments that still reside only in the managed blob
+  // store (storage_kind = 'managed_blob') and originated from a web import
+  // (recorded a source_url or has associated external_refs). Pure manual
+  // native uploads without web source provenance are excluded per spec.
   listBlobOnlyWebImportAttachments(actorKey, { limit = 500 } = {}) {
     return this.db.prepare(`
       SELECT a.id AS attachment_id, a.document_id, a.blob_hash, a.original_filename,
@@ -5508,6 +5512,10 @@ export class CanvasStore {
       JOIN documents d ON d.id = a.document_id AND d.deleted_at IS NULL
       WHERE d.owner_key = ? AND a.deleted_at IS NULL
         AND a.storage_kind = 'managed_blob'
+        AND (
+          a.source_url IS NOT NULL
+          OR EXISTS (SELECT 1 FROM external_refs er WHERE er.document_id = d.id)
+        )
       ORDER BY a.created_at ASC
       LIMIT ?
     `).all(actorKey, Math.max(1, Math.min(5000, limit)));
@@ -5520,6 +5528,10 @@ export class CanvasStore {
       JOIN documents d ON d.id = a.document_id AND d.deleted_at IS NULL
       WHERE d.owner_key = ? AND a.deleted_at IS NULL
         AND a.storage_kind = 'managed_blob'
+        AND (
+          a.source_url IS NOT NULL
+          OR EXISTS (SELECT 1 FROM external_refs er WHERE er.document_id = d.id)
+        )
     `).get(actorKey);
     return row?.c || 0;
   }

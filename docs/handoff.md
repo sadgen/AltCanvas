@@ -1719,3 +1719,52 @@ M4 维持 CONDITIONAL PASS——按审计结论，本项补完后进入最后人
   - 验证 25.1 审计数量正确识别全部 3 篇并完成迁移。
 - `test/canvas.test.mjs` 适配单篇与批量再次导入相同 PDF 均返回 200 `reused` 的新契约。
 - `npm test`（全部 10 套测试）**100% 通过（exit 0）**；`git diff --check` 通过。
+
+---
+
+## 2026-09-04 会话（M4 终审深度加固：附件身份连续性 / 批量导入隔离 / 安全补偿删除 / 循环迁移闭环）
+
+### 一、整改背景与根因
+
+在第四轮终审审计中，排查出 4 个深度数据与并发一致性 P1 以及 2 个 P2 缺口：
+1. **P1.1 附件身份连续性破坏**：
+   - 根因：`server/blob-migration.mjs` 原先通过新建 source_file 附件并软删除原 managed_blob 附件的方式迁移，导致原附件上的高亮批注（`annotations.attachment_id` 外键）以及研究主题关联（`topic_documents.attachment_key`）脱节，迁移后批注不可见、主题绑定已删附件；
+   - 修复：重构为**原地升级**（In-Place Upgrade）。直接调用 `store.promoteBlobAttachmentToSourceFile`，更新同一附件记录的 `storage_kind = 'source_file'`，原 `attachment.id` 100% 保持不变，批注、主题、分析状态与 Range 流式服务完全连续。
+2. **P1.2 批量导入共用可变 `fileTarget` 污染**：
+   - 根因：批量循环在外层构造单一 `batchFileTarget`，第一项派生出的文件名写回该对象的 `filename` 属性，导致后续所有项被强行复用第一项的文件名，触发非预期的 `filename_conflict`；
+   - 修复：执行器防御性克隆 `effectiveFileTarget`，批量循环为每一项独立构造 `itemFileTarget`，文件名按项独立派生，彻底杜绝对象属性污染。
+3. **P1.3 批量 PDF 未加入 `targetWorkspaceId`**：
+   - 根因：文件落盘分支仅读取 `fileTarget.topicIds`，忽略了批量顶层传入的 `fallbackTargetWorkspaceId`，导致文件虽归档但未入主题；
+   - 修复：每项将 `body.topicIds`、`targetWorkspaceId` 与 `normalized.targetWorkspaceId` 合并去重为 `itemTopicIds`，批量多篇 PDF 全部正确归入目标主题。
+4. **P1.4 补偿删除绕过安全原语**：
+   - 根因：`canvas-api.mjs` 在 DB 失败与写时竞争时直接调用裸 `fs.unlinkSync`，且吞并异常继续标记 `rolled_back`，若落盘后路径被偷换可能误删非本次操作的文件；
+   - 修复：`server/native-fs.mjs` 新增 `safeUnlinkWithExpectedSha(rootPath, relativePath, expectedSha256)`，逐级校验父级符号链接防逃逸，并重算流式 SHA-256 核验一致后方可删除；若删除失败或哈希不符，显式标记 `compensation_failed`，绝不谎报 `rolled_back`。
+5. **P2.1 无根目录 metadata-only 响应规范**：
+   - 确保无 PDF 或下载失败降级创建纯元数据文档时，响应统一显式携带 `hasPdf: false`。
+6. **P2.2 循环分页迁移直到待处理为 0**：
+   - `runBlobOnlyWebImportMigration` 重构为以 `BATCH_SIZE = 100` 循环迭代执行，直至待处理项为 0 或仅剩冲突项，解决之前单次 500 条截断导致的大文库遗漏隐患；处理 EEXIST 竞争时重验哈希并原地采纳。
+
+### 二、测试覆盖（测试组 27 闭环）
+
+在 `test/native-m4.test.mjs` 中新增测试组 27（`testM4AuditFourContinuousReconciliation`）：
+1. **附件身份原地连续性**：构造历史 Blob 并在其上建立 2 条高亮批注和主题绑定（`analysis_status='ready'`）；执行迁移后断言 `attachment.id` 保持一致、2 条批注完整存活、主题文献依然引用该附件、HTTP Range 成功读取；
+2. **批量独立目标与主题归入**：批量传入 2 个不同 PDF，断言两篇均 `201 created`、独立派生文件名无冲突、磁盘均落入 `网页导入/`，且两篇均成功归入目标主题；
+3. **安全补偿删除防篡改**：在 DB 事务失败前故意篡改已落盘文件的内容；断言 `safeUnlinkWithExpectedSha` 拒绝删除被篡改文件、操作记录被标记为 `failed`（`errorCode: 'compensation_failed'`），外来文件完好保留；
+4. **循环跨批次迁移**：构造 105 个历史附件（超过单批 100）；断言迁移循环完整处理全部 105 条，`countBlobOnlyWebImports` 精确降至 0。
+
+### 三、全套验证与状态
+
+- `npm test`（10 套完整套件）全部通过（exit 0）：
+  - `bff.test.mjs` - PASS
+  - `bff-flow.test.mjs` - PASS
+  - `ai-provider.test.mjs` - PASS
+  - `canvas.test.mjs` - PASS
+  - `canvas-ui.test.mjs` - PASS
+  - `dev-logger.test.mjs` - PASS
+  - `native-m1.test.mjs` - PASS
+  - `translation-server.test.mjs` - PASS
+  - `native-m4.test.mjs` - PASS
+  - `deploy-config.test.mjs` - PASS
+- `git diff --check`：100% 通过；
+- 服务重启：`altcanvas.service` 状态 active (running)，单一 worker，端口 8088 正常提供服务；
+- 里程碑状态：保持 **`M4 CONDITIONAL PASS`**，等待最后一轮复审与人工实机验收。

@@ -2591,12 +2591,12 @@ async function testBlobOnlyWebImportMigration() {
 
     const auditedCount = store.countBlobOnlyWebImports(actor);
     const auditedList = store.listBlobOnlyWebImportAttachments(actor);
-    // [M4 UX upgrade] All legacy managed_blobs (both web and uploaded) are audited
-    assert.equal(auditedCount, 3, 'audit covers all 3 legacy managed_blobs');
+    // [M4 spec] Only genuine web imports are audited; pure uploads stay untouched.
+    assert.equal(auditedCount, 2, 'audit covers exactly the two web imports');
 
     const result = await runBlobOnlyWebImportMigration(store, actor, {});
-    assert.equal(result.report.scanned, 3);
-    assert.equal(result.report.migrated, 3);
+    assert.equal(result.report.scanned, 2);
+    assert.equal(result.report.migrated, 2);
     assert.equal(result.report.conflicts, 0);
     assert.equal(result.report.failed, 0);
 
@@ -2615,9 +2615,8 @@ async function testBlobOnlyWebImportMigration() {
     // Archived under 网页导入/ with derived names.
     assert.equal(fs.existsSync(path.join(rootDir, '网页导入', 'Legacy Web Paper A.pdf')), true);
     assert.equal(fs.existsSync(path.join(rootDir, '网页导入', 'Legacy Web Paper B.pdf')), true);
-    // The uploaded blob attachment is also successfully migrated to source_file.
-    const uploadDoc = store.getDocument(actor, uploadKeep.document.id);
-    assert.equal(uploadDoc.attachments[0].storageKind, 'source_file');
+    // The uploaded (non-web) blob attachment is untouched.
+    assert.equal(store.getAttachment(actor, uploadKeep.attachmentId).storageKind, 'managed_blob');
 
     // Range reads keep working through the unified endpoint.
     const session = createSession({
@@ -2659,7 +2658,7 @@ async function testBlobOnlyWebImportMigration() {
     const legacy4 = makeBlobLegacyImport('Legacy Web Paper D', legacy4Bytes);
     const failingStore = new Proxy(store, {
       get(target, prop) {
-        if (prop === 'createSourceFileAttachment') {
+        if (prop === 'promoteBlobAttachmentToSourceFile') {
           return () => { throw new Error('simulated DB failure during migration'); };
         }
         const value = target[prop];
@@ -2815,10 +2814,239 @@ async function testReimportAutoArchivingAndBackfill() {
   }
 }
 
+
+// ============================================================
+// 27. M4 Strict Continuity & Batch Robustness Suite:
+//     - P1.1 Attachment identity continuity across blob migration (annotations + topic bindings survive)
+//     - P1.2/1.3 Batch import independent fileTarget + targetWorkspaceId union
+//     - P1.4 Compensation unlink refuses foreign content, marks compensation_failed
+//     - P2.2 Multi-batch migration loops until all items are archived
+// ============================================================
+async function testM4AuditFourContinuousReconciliation() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-audit4-store-'));
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-audit4-root-'));
+  const store = new CanvasStore(path.join(tempDir, 'canvas.sqlite'));
+  const actor = canvasActorKey('local', 'm4-audit4');
+  const session = createSession({
+    userId: 'm4-audit4-1', subject: 'm4-audit4', authMode: 'local',
+    username: 'audit4', role: 'admin', actorKey: actor
+  });
+  const cookie = `altcanvas_session=${session.id}`;
+  const targetTopic = store.createWorkspace(actor, { name: 'Audit4 Target Topic' });
+
+  const pdfByUrl = new Map();
+  let downloadCounter = 0;
+  const fakeDownloadPdf = async (pdfUrl, tempDirForDownload) => {
+    const bytes = pdfByUrl.get(pdfUrl);
+    if (!bytes) {
+      const err = new Error('not found');
+      err.status = 404;
+      throw err;
+    }
+    downloadCounter += 1;
+    fs.mkdirSync(tempDirForDownload, { recursive: true, mode: 0o700 });
+    const tempFilePath = path.join(tempDirForDownload, `dl-${downloadCounter}.pdf`);
+    fs.writeFileSync(tempFilePath, bytes);
+    return { tempFilePath, sha256: sha256Of(bytes), sizeBytes: bytes.length, mimeType: 'application/pdf' };
+  };
+  const handler = createCanvasHandler(store, { downloadPdfFn: fakeDownloadPdf });
+
+  try {
+    const [root] = store.ensureLibraryRootsFromConfig(actor, [{ absolutePath: rootDir, displayName: 'Audit4 Root' }]);
+
+    // --- 27.1 Attachment Identity Continuity across Blob Migration (P1.1) ---
+    const legacyPdfBytes = makePdfBytes('legacy-continuous-annotation-pdf');
+    const legacySha = sha256Of(legacyPdfBytes);
+    const legacyBlobPath = store.resolveBlobPath(legacySha, '.pdf');
+    fs.mkdirSync(path.dirname(legacyBlobPath), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(legacyBlobPath, legacyPdfBytes, { mode: 0o600 });
+    const relPath = path.relative(store.getBlobStorageDir(), legacyBlobPath);
+    store.upsertBlob({ sha256: legacySha, relativePath: relPath, sizeBytes: legacyPdfBytes.length, mimeType: 'application/pdf' });
+
+    const legacyDoc = store.createDocument(actor, { title: 'Continuous Document' });
+    const originalAttId = crypto.randomUUID();
+    store.db.prepare(`
+      INSERT INTO attachments
+        (id, document_id, blob_hash, mime_type, original_filename, title, source_url, size_bytes, storage_kind, version, created_at, updated_at)
+      VALUES (?, ?, ?, 'application/pdf', 'continuous.pdf', 'Continuous Document', 'https://example.org/continuous.pdf', ?, 'managed_blob', 1, ?, ?)
+    `).run(originalAttId, legacyDoc.id, legacySha, legacyPdfBytes.length, new Date().toISOString(), new Date().toISOString());
+
+    // Create annotations on this attachment
+    const ann1 = store.createAnnotation(actor, originalAttId, {
+      pageLabel: '1', position: { x: 10, y: 20 }, quote: 'Important Discovery', comment: 'Crucial', color: '#ff0000'
+    });
+    const ann2 = store.createAnnotation(actor, originalAttId, {
+      pageLabel: '2', position: { x: 30, y: 40 }, quote: 'Second Finding', comment: 'Followup', color: '#00ff00'
+    });
+
+    // Bind document to topic referencing this attachment
+    const topicDoc = store.addTopicDocument(actor, targetTopic.id, {
+      libraryType: 'native', libraryId: 'local', itemKey: legacyDoc.id,
+      attachmentKey: originalAttId, attachmentVersion: 1, status: 'accepted', origin: 'manual'
+    });
+    store.db.prepare("UPDATE topic_documents SET analysis_status = 'ready' WHERE id = ?").run(topicDoc.id);
+
+    // Run migration
+    const { runBlobOnlyWebImportMigration } = await import('../server/blob-migration.mjs');
+    const migRes = await runBlobOnlyWebImportMigration(store, actor, {});
+    assert.equal(migRes.report.migrated, 1);
+
+    // Assert attachment ID remained 100% IDENTICAL (in-place upgrade)
+    const attAfter = store.getAttachment(actor, originalAttId);
+    assert.ok(attAfter, 'Attachment ID must remain intact and NOT be deleted');
+    assert.equal(attAfter.id, originalAttId, 'Same attachment ID preserved');
+    assert.equal(attAfter.storageKind, 'source_file', 'Upgraded in-place to source_file');
+    assert.equal(attAfter.blobHash ?? null, null);
+    assert.ok(attAfter.sourceFileId);
+
+    // Assert annotations are completely preserved without cascade deletion
+    const annotationsAfter = store.listAnnotations(actor, originalAttId);
+    assert.equal(annotationsAfter.length, 2, 'Annotations must survive in-place migration');
+    assert.ok(annotationsAfter.some(a => a.id === ann1.id && a.quote === 'Important Discovery'));
+    assert.ok(annotationsAfter.some(a => a.id === ann2.id && a.quote === 'Second Finding'));
+
+    // Assert topic binding still points to the surviving attachment and remains ready
+    const topicDocsAfter = store.listNativeLibraryDocuments(actor, { topicId: targetTopic.id }).documents;
+    const matchedTopicDoc = topicDocsAfter.find(d => d.id === legacyDoc.id);
+    assert.ok(matchedTopicDoc);
+    assert.equal(matchedTopicDoc.topics[0].attachment_key, originalAttId, 'Topic document must still reference original attachment ID');
+
+    // Assert content can be served via HTTP Range using the original attachment ID
+    const fileRes = await call(handler, `/canvas/native/attachments/${originalAttId}/file`, { cookie });
+    assert.equal(fileRes.statusCode, 200);
+    assert.equal(fileRes.buffer.equals(legacyPdfBytes), true);
+
+    // --- 27.2 Batch Import Independent fileTarget & targetWorkspaceId Union (P1.2 & P1.3) ---
+    const batchTopic = store.createWorkspace(actor, { name: 'Batch Dedicated Topic' });
+    const pdfBytes1 = makePdfBytes('batch-distinct-pdf-one');
+    const pdfBytes2 = makePdfBytes('batch-distinct-pdf-two');
+    pdfByUrl.set('https://example.org/distinct-1.pdf', pdfBytes1);
+    pdfByUrl.set('https://example.org/distinct-2.pdf', pdfBytes2);
+
+    const batchRes = await call(handler, '/canvas/imports/native/batch', {
+      method: 'POST', cookie,
+      body: {
+        sourceType: 'batch_distinct',
+        targetWorkspaceId: batchTopic.id,
+        items: [
+          { title: 'Alpha Multi-Item Paper', pdfUrl: 'https://example.org/distinct-1.pdf' },
+          { title: 'Beta Multi-Item Paper', pdfUrl: 'https://example.org/distinct-2.pdf' }
+        ]
+      }
+    });
+
+    assert.equal(batchRes.statusCode, 201);
+    assert.equal(batchRes.payload.data.job.completedCount, 2, 'Both distinct PDFs must complete successfully');
+    assert.equal(batchRes.payload.data.job.failedCount, 0, 'Zero filename_conflict failures across items');
+
+    const item1Report = batchRes.payload.data.job.report.items[0];
+    const item2Report = batchRes.payload.data.job.report.items[1];
+    assert.equal(item1Report.ok, true);
+    assert.equal(item2Report.ok, true);
+    assert.notEqual(item1Report.documentId, item2Report.documentId);
+
+    // Verify independent filenames were derived and placed in 网页导入/
+    const doc1 = store.getDocument(actor, item1Report.documentId);
+    const doc2 = store.getDocument(actor, item2Report.documentId);
+    const sf1 = store.getAttachmentContent(actor, doc1.attachments[0].id).sourceFile;
+    const sf2 = store.getAttachmentContent(actor, doc2.attachments[0].id).sourceFile;
+    assert.notEqual(sf1.relativePath, sf2.relativePath, 'Filenames must not mutate or collide across batch items');
+    assert.equal(sf1.relativePath.startsWith('网页导入/'), true);
+    assert.equal(sf2.relativePath.startsWith('网页导入/'), true);
+    assert.equal(fs.existsSync(path.join(rootDir, sf1.relativePath)), true);
+    assert.equal(fs.existsSync(path.join(rootDir, sf2.relativePath)), true);
+
+    // Verify BOTH documents were cleanly joined to batchTopic.id
+    const boundBatchDocs = store.listNativeLibraryDocuments(actor, { topicId: batchTopic.id }).documents;
+    assert.equal(boundBatchDocs.length, 2, 'Both batch items must be bound to the target workspace');
+    assert.ok(boundBatchDocs.some(d => d.id === doc1.id));
+    assert.ok(boundBatchDocs.some(d => d.id === doc2.id));
+
+    // --- 27.3 Compensation Unlink Refuses Foreign Content & Marks compensation_failed (P1.4) ---
+    let tamperedTargetRel = null;
+    const tamperPdfBytes = makePdfBytes('genuine-payload-to-be-tampered');
+    const foreignDecoyBytes = makePdfBytes('foreign-decoy-bytes-must-not-be-deleted');
+    pdfByUrl.set('https://example.org/tamper.pdf', tamperPdfBytes);
+
+    const tamperedStore = new Proxy(store, {
+      get(target, prop) {
+        if (prop === 'importNativeDocumentToSourceFile') {
+          return (...args) => {
+            tamperedTargetRel = args[1].relativePath;
+            // Corrupt the just-placed file on disk with foreign content before DB throws
+            const placedDiskPath = path.join(rootDir, tamperedTargetRel);
+            fs.writeFileSync(placedDiskPath, foreignDecoyBytes);
+            throw new Error('simulated transactional failure after tamper');
+          };
+        }
+        const val = target[prop];
+        return typeof val === 'function' ? val.bind(target) : val;
+      }
+    });
+
+    const tamperedHandler = createCanvasHandler(tamperedStore, { downloadPdfFn: fakeDownloadPdf });
+    const tamperedRes = await call(tamperedHandler, '/canvas/imports/native', {
+      method: 'POST', cookie,
+      body: { title: 'Tamper Paper', pdfUrl: 'https://example.org/tamper.pdf' }
+    });
+    assert.equal(tamperedRes.statusCode, 500);
+
+    // Assert the foreign file on disk was NOT deleted
+    assert.ok(tamperedTargetRel);
+    const tamperedDiskPath = path.join(rootDir, tamperedTargetRel);
+    assert.equal(fs.existsSync(tamperedDiskPath), true, 'Foreign file must NOT be unlinked by compensation');
+    assert.equal(fs.readFileSync(tamperedDiskPath).equals(foreignDecoyBytes), true);
+
+    // Assert the file_operation is marked as failed/compensation_failed, NOT rolled_back
+    const failedOp = store.db.prepare(
+      "SELECT * FROM file_operations WHERE operation_type = 'file.import' AND target_path LIKE ? ORDER BY created_at DESC LIMIT 1"
+    ).get(`%${tamperedTargetRel}%`);
+    assert.ok(failedOp);
+    assert.equal(failedOp.state, 'failed', 'Operation must be marked failed when compensation cannot safely verify SHA');
+    assert.equal(failedOp.error_code, 'compensation_failed');
+
+    // Clean up tampered file
+    fs.unlinkSync(tamperedDiskPath);
+
+    // --- 27.4 Multi-Batch Migration Loops until all Items are Processed (P2.2) ---
+    // Seed 105 legacy web imports (exceeds single batch size 100)
+    for (let i = 0; i < 105; i++) {
+      const bBytes = makePdfBytes(`p22-loop-pdf-${i}`);
+      const bSha = sha256Of(bBytes);
+      const bPath = store.resolveBlobPath(bSha, '.pdf');
+      fs.mkdirSync(path.dirname(bPath), { recursive: true, mode: 0o700 });
+      fs.writeFileSync(bPath, bBytes, { mode: 0o600 });
+      const bRel = path.relative(store.getBlobStorageDir(), bPath);
+      store.upsertBlob({ sha256: bSha, relativePath: bRel, sizeBytes: bBytes.length, mimeType: 'application/pdf' });
+
+      const d = store.createDocument(actor, { title: `Loop Paper ${i}` });
+      store.db.prepare(`
+        INSERT INTO attachments
+          (id, document_id, blob_hash, mime_type, original_filename, title, source_url, size_bytes, storage_kind, version, created_at, updated_at)
+        VALUES (?, ?, ?, 'application/pdf', ?, ?, 'https://example.org/loop.pdf', ?, 'managed_blob', 1, ?, ?)
+      `).run(crypto.randomUUID(), d.id, bSha, `loop-${i}.pdf`, `Loop Paper ${i}`, bBytes.length, new Date().toISOString(), new Date().toISOString());
+    }
+
+    assert.equal(store.countBlobOnlyWebImports(actor), 105);
+    const loopMigRes = await runBlobOnlyWebImportMigration(store, actor, {});
+    assert.equal(loopMigRes.report.scanned, 105, 'Loop must traverse all candidates across multiple batches');
+    assert.equal(loopMigRes.report.migrated, 105);
+    assert.equal(store.countBlobOnlyWebImports(actor), 0, 'Pending count must reach 0 after loop migration');
+
+    console.log('✅ M4 Audit 4: attachment identity continuity, batch independent fileTarget, compensation unlink safety, multi-batch loop passed');
+  } finally {
+    try { store.close(); } catch {}
+    fs.rmSync(tempDir, { recursive: true, force: true });
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+}
+
+
 async function testM4FinalRemediation() {
   await testWebImportDefaultArchiving();
   await testBlobOnlyWebImportMigration();
   await testReimportAutoArchivingAndBackfill();
+  await testM4AuditFourContinuousReconciliation();
 }
 
 try {

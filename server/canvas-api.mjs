@@ -18,7 +18,7 @@ import {
 import { getSession, getSessionIdFromRequest } from './session.mjs';
 import { getAiPublicConfig, requestAiCompletion, validateAiEndpoint } from './ai-provider.mjs';
 import { resolveImportInput, findDuplicateCandidates, safeDownloadPdfFile } from './import-resolver.mjs';
-import { NativePathError, openFileInsideRoot, normalizeRelativePath, normalizeFilename, listDirectoryPage, ensureDirectoryInsideRoot } from './native-fs.mjs';
+import { NativePathError, openFileInsideRoot, normalizeRelativePath, normalizeFilename, listDirectoryPage, ensureDirectoryInsideRoot, safeUnlinkWithExpectedSha } from './native-fs.mjs';
 import { scanLibraryRoot, LibraryScanError } from './library-scanner.mjs';
 import { runBlobOnlyWebImportMigration } from './blob-migration.mjs';
 import {
@@ -1399,6 +1399,9 @@ async function executeNativeImportItem(store, actorKey, normalized, {
   fileTarget = null,
   webImportArchive = false
 }) {
+  // Defensive shallow clone: per-item derived filenames must NEVER mutate
+  // the caller's shared target object (e.g. batch imports).
+  const effectiveFileTarget = fileTarget ? { ...fileTarget } : null;
   let resolved = normalized.resolved;
   if (!resolved && normalized.input) {
     try {
@@ -1479,7 +1482,7 @@ async function executeNativeImportItem(store, actorKey, normalized, {
       attachment = null;
       tempFilePath = null;
     }
-    if (attachment && webImportArchive && !fileTarget) {
+    if (attachment && webImportArchive && !effectiveFileTarget) {
       // [M4] Web imports that obtained a PDF must be archived into the
       // library roots, never left as a blob-only document.
       try { if (tempFilePath && fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath); } catch {}
@@ -1502,9 +1505,9 @@ async function executeNativeImportItem(store, actorKey, normalized, {
   //      source_file in the target directory, backfill metadata and topics.
   // This satisfies single-instance storage while allowing re-imports to refresh
   // metadata and organize into research topics without a 409 error.
-  if (fileTarget && attachment && tempFilePath) {
+  if (effectiveFileTarget && attachment && tempFilePath) {
     const allTopicIds = Array.from(new Set([
-      ...(fileTarget.topicIds || []),
+      ...(effectiveFileTarget.topicIds || []),
       ...(targetWorkspaceId ? [targetWorkspaceId] : [])
     ])).filter(Boolean);
 
@@ -1530,16 +1533,16 @@ async function executeNativeImportItem(store, actorKey, normalized, {
     // Case 2: Exists as a legacy managed_blob -> promote to source_file in root directory
     const blobHolder = store.findDocumentByBlobHash(actorKey, attachment.sha256);
     if (blobHolder) {
-      const targetFilename = fileTarget.filename || deriveWebImportFilename({
+      const targetFilename = effectiveFileTarget.filename || deriveWebImportFilename({
         download: { filename: downloadDispositionName },
         pdfUrl,
         title: blobHolder.title || title,
         sha256: attachment.sha256
       });
-      const archiveDir = fileTarget.targetDir || WEB_IMPORT_DEFAULT_DIR;
+      const archiveDir = effectiveFileTarget.targetDir || WEB_IMPORT_DEFAULT_DIR;
       const targetRelativePath = archiveDir ? `${archiveDir}/${targetFilename}` : targetFilename;
 
-      const conflict = await probeTargetPath(store, actorKey, fileTarget.root, targetRelativePath, attachment.sha256);
+      const conflict = await probeTargetPath(store, actorKey, effectiveFileTarget.root, targetRelativePath, attachment.sha256);
       if (conflict && conflict.type === 'filename_conflict') {
         cleanupTemp();
         return {
@@ -1551,7 +1554,7 @@ async function executeNativeImportItem(store, actorKey, normalized, {
       let placedOnDisk = false;
       try {
         if (!conflict) {
-          placeFileIntoRoot(fileTarget.root.absolutePath, targetRelativePath, tempFilePath);
+          placeFileIntoRoot(effectiveFileTarget.root.absolutePath, targetRelativePath, tempFilePath);
           placedOnDisk = true;
         }
       } catch (placeErr) {
@@ -1568,7 +1571,7 @@ async function executeNativeImportItem(store, actorKey, normalized, {
         const promotion = store.promoteBlobAttachmentToSourceFile(actorKey, {
           attachmentId: legacyAtt.id,
           documentId: blobHolder.id,
-          rootId: fileTarget.root.id,
+          rootId: effectiveFileTarget.root.id,
           relativePath: targetRelativePath,
           filename: targetFilename,
           sha256: attachment.sha256,
@@ -1593,7 +1596,7 @@ async function executeNativeImportItem(store, actorKey, normalized, {
         };
       } catch (promoteErr) {
         if (placedOnDisk) {
-          try { safeUnlinkInsideRoot(fileTarget.root.absolutePath, targetRelativePath); } catch {}
+          try { safeUnlinkInsideRoot(effectiveFileTarget.root.absolutePath, targetRelativePath); } catch {}
         }
         throw promoteErr;
       }
@@ -1630,11 +1633,11 @@ async function executeNativeImportItem(store, actorKey, normalized, {
           sha256: attachment.sha256
         });
       }
-      const archiveDir = fileTarget.targetDir || WEB_IMPORT_DEFAULT_DIR;
+      const archiveDir = effectiveFileTarget.targetDir || WEB_IMPORT_DEFAULT_DIR;
       const targetRelativePath = archiveDir
         ? `${archiveDir}/${fileTarget.filename}`
         : fileTarget.filename;
-      const conflict = await probeTargetPath(store, actorKey, fileTarget.root, targetRelativePath, attachment.sha256);
+      const conflict = await probeTargetPath(store, actorKey, effectiveFileTarget.root, targetRelativePath, attachment.sha256);
       if (conflict) {
         cleanupTemp();
         return {
@@ -1646,11 +1649,11 @@ async function executeNativeImportItem(store, actorKey, normalized, {
         operationType: 'file.import',
         sourcePath: tempFilePath,
         targetPath: `${fileTarget.root.absolutePath}/${targetRelativePath}`,
-        payload: { rootId: fileTarget.root.id, targetDir: archiveDir, filename: fileTarget.filename }
+        payload: { rootId: effectiveFileTarget.root.id, targetDir: archiveDir, filename: fileTarget.filename }
       });
       store.startFileOperation(operation.id);
       try {
-        placeFileIntoRoot(fileTarget.root.absolutePath, targetRelativePath, tempFilePath);
+        placeFileIntoRoot(effectiveFileTarget.root.absolutePath, targetRelativePath, tempFilePath);
       } catch (placeErr) {
         cleanupTemp();
         if (placeErr instanceof NativePathError) {
@@ -1673,8 +1676,8 @@ async function executeNativeImportItem(store, actorKey, normalized, {
       }
       filePlacement = {
         operationId: operation.id,
-        rootId: fileTarget.root.id,
-        rootAbsolutePath: fileTarget.root.absolutePath,
+        rootId: effectiveFileTarget.root.id,
+        rootAbsolutePath: effectiveFileTarget.root.absolutePath,
         relativePath: targetRelativePath,
         filename: fileTarget.filename,
         archiveDir,
@@ -1698,7 +1701,7 @@ async function executeNativeImportItem(store, actorKey, normalized, {
   }
 
   // Phase 3: transactional database write.
-  if (fileTarget && !filePlacement) {
+  if (effectiveFileTarget && !filePlacement) {
     // Metadata-only web import: no downloadable PDF -> create the Native
     // document (marked 无 PDF) WITHOUT fabricating a source_file. It never
     // appears in the original-files view and may gain a PDF later.
@@ -1714,12 +1717,12 @@ async function executeNativeImportItem(store, actorKey, normalized, {
       arxivId,
       externalRefs,
       attachment: null,
-      targetWorkspaceId: (fileTarget.topicIds && fileTarget.topicIds[0]) || targetWorkspaceId,
+      targetWorkspaceId: (effectiveFileTarget.topicIds && effectiveFileTarget.topicIds[0]) || targetWorkspaceId,
       forceNew: normalized.forceNew,
       confirmFuzzy: normalized.confirmFuzzy
     });
     if (metadataResult.outcome === 'created' || metadataResult.outcome === 'reused') {
-      const extraTopics = (fileTarget.topicIds || []).slice(metadataResult.topicDocument ? 1 : 0);
+      const extraTopics = (effectiveFileTarget.topicIds || []).slice(metadataResult.topicDocument ? 1 : 0);
       for (const workspaceId of extraTopics) {
         try {
           store.addDocumentTopics(actorKey, metadataResult.document.id, [workspaceId], { origin: 'canvas_import' });
@@ -1779,12 +1782,14 @@ async function executeNativeImportItem(store, actorKey, normalized, {
     }
   } catch (dbErr) {
     if (filePlacement) {
-      // Compensation: remove the just-placed file; the op journal records it.
+      // Compensation: remove the just-placed file ONLY if content matches expected SHA.
+      // A failed unlink leaves the operation marked as compensation_failed.
       try {
-        fs.unlinkSync(path.join(filePlacement.rootAbsolutePath, filePlacement.relativePath));
-      } catch {}
-      try { store.completeFileOperation(filePlacement.operationId); } catch {}
-      store.markFileOperationRolledBack(filePlacement.operationId);
+        await safeUnlinkWithExpectedSha(filePlacement.rootAbsolutePath, filePlacement.relativePath, filePlacement.sha256);
+        store.markFileOperationRolledBack(filePlacement.operationId);
+      } catch (unlinkErr) {
+        store.failFileOperation(filePlacement.operationId, 'compensation_failed');
+      }
     }
     if (promotion?.newlyCreated) {
       compensatePromotedBlob(store, attachment.sha256, promotion.targetBlobPath);
@@ -1800,16 +1805,21 @@ async function executeNativeImportItem(store, actorKey, normalized, {
       store.completeFileOperation(filePlacement.operationId);
     } else {
       // duplicate_content / filename_conflict resolved after placement lost a race:
-      // remove the placed file and roll the operation back.
+      // verify expected SHA before unlinking; failure marks compensation_failed.
       try {
-        fs.unlinkSync(path.join(filePlacement.rootAbsolutePath, filePlacement.relativePath));
-      } catch {}
-      store.markFileOperationRolledBack(filePlacement.operationId);
+        await safeUnlinkWithExpectedSha(filePlacement.rootAbsolutePath, filePlacement.relativePath, filePlacement.sha256);
+        store.markFileOperationRolledBack(filePlacement.operationId);
+      } catch (unlinkErr) {
+        store.failFileOperation(filePlacement.operationId, 'compensation_failed');
+      }
     }
   } else if (diverged && promotion?.newlyCreated) {
     compensatePromotedBlob(store, attachment.sha256, promotion.targetBlobPath);
   }
 
+  if (!attachment && !result.attachment && result.hasPdf === undefined) {
+    result.hasPdf = false;
+  }
   return { result, warning };
 }
 
@@ -2126,13 +2136,29 @@ export function createCanvasHandler(store, {
             normalized.confirmFuzzy = true;
           }
           const fallbackTitle = normalized.title || normalized.input || '';
+          // [P1 Fix] Construct an independent fileTarget per item so that filename
+          // derivation never mutates a shared object across items, and merge
+          // targetWorkspaceId so batch items always join the requested topic.
+          const itemTopicIds = Array.from(new Set([
+            ...(Array.isArray(body.topicIds) ? body.topicIds : []),
+            ...(targetWorkspaceId ? [targetWorkspaceId] : []),
+            ...(normalized.targetWorkspaceId ? [normalized.targetWorkspaceId] : [])
+          ])).filter(Boolean);
+
+          const itemFileTarget = batchFileTarget ? {
+            root: batchFileTarget.root,
+            targetDir: batchFileTarget.targetDir,
+            filename: normalized.filename || undefined,
+            topicIds: itemTopicIds
+          } : null;
+
           try {
             const { result, warning } = await executeNativeImportItem(store, actor.actorKey, normalized, {
               downloadPdfFn,
               promoteBlobFn,
               fallbackTargetWorkspaceId: targetWorkspaceId,
               translationServerFn,
-              fileTarget: batchFileTarget,
+              fileTarget: itemFileTarget,
               webImportArchive: true
             });
             if (result.outcome === 'requires_confirmation') {
