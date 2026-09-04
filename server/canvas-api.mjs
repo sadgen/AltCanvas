@@ -1644,15 +1644,27 @@ async function executeNativeImportItem(store, actorKey, normalized, {
           // as a reuse so the client still sees the real file. When this request
           // adopted pre-existing identical bytes (placed nothing), that file is
           // not ours to remove — the scanner classifies it as a duplicate.
+          let compensationPending = false;
           if (placedOnDisk) {
             try {
               await safeUnlinkWithExpectedSha(effectiveFileTarget.root.absolutePath, targetRelativePath, attachment.sha256);
               store.markFileOperationRolledBack(operation.id);
             } catch (compensationErr) {
               store.failFileOperation(operation.id, 'compensation_failed');
+              compensationPending = true;
             }
           } else {
             store.markFileOperationRolledBack(operation.id);
+          }
+          if (compensationPending) {
+            // NEVER report success while this request's stray file still sits
+            // unremovable in the archive directory: the operation journal is
+            // failed/compensation_failed and recovery could not clean it either.
+            // The client must see a hard failure, not a fabricated reuse.
+            const err = new Error('归档目录分叉补偿失败：本次落盘文件无法安全删除（内容核验未通过），已保留待人工处理');
+            err.status = 500;
+            err.code = 'compensation_failed';
+            throw err;
           }
           const currentAtt = store.getAttachment(actorKey, legacyAtt.id);
           const currentSource = currentAtt && currentAtt.sourceFileId

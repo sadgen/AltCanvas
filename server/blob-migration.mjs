@@ -74,25 +74,6 @@ function findReusableSourceFile(store, actorKey, sha256, documentId) {
   `).get(actorKey, sha256, documentId) || null;
 }
 
-// Flips one attachment IN PLACE to an existing source_file row belonging to the
-// same document. Preserves the attachment ID so annotations and topic bindings
-// survive intact.
-function flipAttachmentInPlace(store, actorKey, attachment, sourceFileId) {
-  const timestamp = new Date().toISOString();
-  store.transaction(() => {
-    store.db.prepare(`
-      UPDATE attachments SET storage_kind = 'source_file', blob_hash = NULL, source_file_id = ?,
-        version = version + 1, updated_at = ?
-      WHERE id = ? AND deleted_at IS NULL
-    `).run(sourceFileId, timestamp, attachment.attachment_id);
-    store.db.prepare(`
-      UPDATE source_files SET attachment_id = ?, version = version + 1, updated_at = ?
-      WHERE id = ? AND owner_key = ? AND deleted_at IS NULL
-    `).run(attachment.attachment_id, timestamp, sourceFileId, actorKey);
-    store.decrementBlobRef(attachment.blob_hash);
-  });
-}
-
 function isPromotionTargetDiverged(err) {
   return Boolean(err) && err.code === 'promotion_target_diverged';
 }
@@ -121,9 +102,24 @@ async function migrateOneBlobOnlyAttachment(store, actorKey, root, attachment, t
   const rootReal = resolveRootRealPath(root.absolutePath);
 
   // 1. Reuse this document's own enrolled source_file if one already exists.
+  // The flip goes through the store's atomic transaction method so the
+  // attachment version bump and the topic_documents.attachment_version sync
+  // can never diverge (the raw-SQL shortcut that skipped the sync is gone).
   const reusable = findReusableSourceFile(store, actorKey, sha256, attachment.document_id);
   if (reusable) {
-    flipAttachmentInPlace(store, actorKey, attachment, reusable.id);
+    try {
+      store.promoteBlobAttachmentToExistingSourceFile(actorKey, {
+        attachmentId: attachment.attachment_id,
+        documentId: attachment.document_id,
+        sourceFileId: reusable.id,
+        sha256
+      });
+    } catch (reuseErr) {
+      if (isPromotionTargetDiverged(reuseErr)) {
+        return { outcome: 'reused', relativePath: authoritativeRelativePath(store, actorKey, attachment.attachment_id), raced: true };
+      }
+      return { outcome: 'failed', reason: `reuse_flip_failed:${reuseErr.message}`.slice(0, 120) };
+    }
     return { outcome: 'reused', relativePath: reusable.relative_path };
   }
 

@@ -1866,3 +1866,42 @@ M4 维持 CONDITIONAL PASS——按审计结论，本项补完后进入最后人
 - `git diff --check`：100% 干净，无格式或空白行违规；
 - 服务运行正常：`systemctl --user restart altcanvas.service` 重启成功，`systemctl --user status altcanvas.service` 处于 active (running)，端口 8088 监听正常；
 - 里程碑状态：严格保持 **`M4 CONDITIONAL PASS`**，等待审计通过后启动人工实机验收。
+
+---
+
+## 2026-09-04 会话（M4 七轮终审加固：复用路径版本不变量统一 / 分叉补偿失败硬失败语义 / 恢复审计口径收敛）
+
+### 一、整改背景与根因修复
+
+针对第七轮审计提出的 2 个 P1 数据一致性缺口与 2 个 P2 收敛项：
+
+1. **[P1-1] 复用既有 source_file 的迁移旁路彻底消除，版本不变量全路径覆盖**：
+   - **根因**：`blob-migration.mjs` 的 `flipAttachmentInPlace()` 用裸 SQL `version = version + 1` 直接翻转变换附件，但没有同步 `topic_documents.attachment_version`，绕过了本轮已加固的 `promoteBlobAttachmentToSourceFile()`。独立复现显示 `attachmentVersion: 2` 与 `topicAttachmentVersion: 1` 撕裂；
+   - **修复**：
+     - 删除独立 SQL helper `flipAttachmentInPlace`；
+     - 新增统一 Store 事务方法 `promoteBlobAttachmentToExistingSourceFile(actorKey, { attachmentId, documentId, sourceFileId, sha256 })`：一次性校验 owner、document、attachment、blob SHA、source file（owner/document/status='active'/SHA）五层身份；同事务原子更新 attachment、source_file、topic_documents 并递减 Blob 引用；并发已翻转时统一 `{ attachment, sourceFile, raced: true }` 返回（不同 source file 则 `promotion_target_diverged`）；
+     - 迁移复用路径改走该方法，注释明确"一切绕过主题版本同步的裸 UPDATE 都是被禁止的"。
+
+2. **[P1-2] 路径分叉补偿失败后不再伪报成功**：
+   - **根因**：`canvas-api.mjs` 处理 `promotion_target_diverged` 时，补偿删除失败只标记 `failed / compensation_failed` 却继续返回 `outcome: 'reused'`（HTTP 200），用户误认为导入完成，而残留文件实际上无法被恢复器清理；
+   - **修复**：补偿成功才返回正常 `reused`；补偿失败立即抛出 `status: 500, code: 'compensation_failed'` 的硬失败（外层映射按 `err.status` 输出 500），客户端明确知道归档未干净完成、残留文件待人工处理。
+
+3. **[P2-1] `withPathOperationLock` 文档口径如实收敛**：
+   - 明确其串行化范围仅是 `safeUnlinkWithExpectedSha` 的最终"复核+删除"尾段；rename/move/trash/place 等更大范围的文件操作各自走 `file_operations` 日志与补偿，不参与该锁。文档不再声称"所有本进程破坏性文件操作串行化"。
+
+4. **[P2-2] 二次恢复成功后清除矛盾审计记录**：
+   - **根因**：`compensation_failed` 操作被二次恢复成功后，`completeFileOperation` / `markFileOperationRolledBack` 不清旧错误码，出现 `state=completed/rolled_back` 但 `error_code=compensation_failed` 的矛盾记录；
+   - **修复**：新增 `settleRecoveredFileOperation(fileOpId, outcome)`，恢复器在二次复核得出 `completed`（清空 error_code）或 `rolled_back`（改写为 `recovered_after_compensation_failure`）后调用，审计轨迹保持自洽。
+
+### 二、新增/扩展行为测试（测试组 29 扩展）
+
+1. **29.4 复用路径版本同步**：构造"同文档已有 active source_file + managed_blob 附件 + 主题绑定 + 批注"，运行迁移断言 `reused: 1`、附件 `storage_kind = source_file` 且指向既有 source file、`attachments.version = 2`、`topic_documents.attachment_version = 2`（绝对相等）、批注存活；
+2. **29.5 分叉补偿失败硬失败语义**：赢家经真实方法归档 a.pdf，输家落盘 b.pdf 后、补偿执行前将 b.pdf 替换为外来内容；断言请求返回 **500 compensation_failed**（绝无伪造 reused）、b.pdf 外来内容逐字节保留、a.pdf 完好、操作记录 `failed / compensation_failed`、权威位置仍是 a.pdf；
+3. **29.3 扩展**：二次恢复后断言孤儿回滚项 `error_code = recovered_after_compensation_failure`、已入册完成项 `error_code = NULL`（无矛盾审计行）。
+
+### 三、全套验证与状态
+
+- `npm test`（10 套完整测试套件）**100% 全部通过（exit 0，71 项断言输出）**；
+- `git diff --check`：100% 干净；
+- 服务重启验证通过（active/running，端口 8088 正常）；
+- 里程碑状态：严格保持 **`M4 CONDITIONAL PASS`**，等待最终复审与人工实机验收。

@@ -3527,6 +3527,9 @@ async function testM4AuditSixIdentityDivergenceAndCompensation() {
     assert.equal(fs.existsSync(path.join(rootDir, '网页导入', 'compfail.pdf')), true,
       'the foreign replacement must be preserved, not deleted');
     fs.unlinkSync(path.join(rootDir, '网页导入', 'compfail.pdf'));
+    // Remove the compfail artifact so later migration runs in this group see a clean candidate set.
+    store.db.prepare('DELETE FROM attachments WHERE id = ?').run(compfail.attId);
+    store.db.prepare('DELETE FROM documents WHERE id = ?').run(compfail.doc.id);
 
     // (c) Recovery second chance: failed compensation_failed operations with a
     //     placed-but-unenrolled file are reconciled (removed + rolled_back);
@@ -3565,13 +3568,110 @@ async function testM4AuditSixIdentityDivergenceAndCompensation() {
     await recoverInterruptedFileOperations(store);
     assert.equal(fs.existsSync(path.join(rootDir, '网页导入', 'secondchance.pdf')), false,
       'second-chance recovery must remove the compensable orphan');
-    assert.equal(store.getFileOperation(actor, secondOp.id).state, 'rolled_back');
+    const secondOpRow = store.db.prepare('SELECT state, error_code FROM file_operations WHERE id = ?').get(secondOp.id);
+    assert.equal(secondOpRow.state, 'rolled_back');
+    assert.equal(secondOpRow.error_code, 'recovered_after_compensation_failure',
+      'a rolled-back recovery must not keep the stale compensation_failed code next to its final state');
     assert.equal(fs.existsSync(path.join(rootDir, '网页导入', 'enrolled.pdf')), true,
       'a legitimately enrolled placement must NOT be deleted by second-chance recovery');
-    assert.equal(store.getFileOperation(actor, enrolledOp.id).state, 'completed',
+    const enrolledOpRow = store.db.prepare('SELECT state, error_code FROM file_operations WHERE id = ?').get(enrolledOp.id);
+    assert.equal(enrolledOpRow.state, 'completed',
       'a verified placement transitions failed -> completed instead of lingering');
+    assert.equal(enrolledOpRow.error_code, null,
+      'a completed recovery must clear the stale compensation_failed code (no contradictory audit row)');
 
-    console.log('✅ M4 Audit 6: mandatory SHA identity, promotion target divergence compensation, post-placement failure compensation, and second-chance recovery passed');
+    // --- 29.4 (P1-1) Reuse-path flip keeps topic_documents.attachment_version in lockstep ---
+    const reuse = seedBlobAttachment('reuseflip');
+    store.createAnnotation(actor, reuse.attId, {
+      pageLabel: '1', position: { x: 3, y: 4 }, quote: 'Reuse annotation', comment: 'kept', color: '#00ff00'
+    });
+    const reuseTopic = store.createWorkspace(actor, { name: 'Audit6 Reuse Topic' });
+    store.addTopicDocument(actor, reuseTopic.id, {
+      libraryType: 'native', libraryId: 'local', itemKey: reuse.doc.id,
+      attachmentKey: reuse.attId, attachmentVersion: 1, status: 'accepted'
+    });
+    // The same document ALREADY has an enrolled source_file carrying identical bytes
+    fs.writeFileSync(path.join(rootDir, '网页导入', 'reuseflip-existing.pdf'), reuse.bytes);
+    const reuseSource = store.createSourceFile(actor, root.id, {
+      relativePath: '网页导入/reuseflip-existing.pdf', filename: 'reuseflip-existing.pdf',
+      sha256: reuse.sha, sizeBytes: reuse.bytes.length, modifiedAt: Date.now(),
+      status: 'active', documentId: reuse.doc.id, lastSeenAt: new Date().toISOString()
+    });
+
+    const reuseMig = await runBlobOnlyWebImportMigration(store, actor, {});
+    assert.equal(reuseMig.report.reused, 1, 'the reuse path must classify the flip as reused');
+    assert.equal(reuseMig.report.migrated, 0);
+    const reuseAtt = store.getAttachment(actor, reuse.attId);
+    assert.equal(reuseAtt.storageKind, 'source_file');
+    assert.equal(reuseAtt.sourceFileId, reuseSource.id);
+    assert.equal(reuseAtt.version, 2);
+    const reuseTopicRow = store.db.prepare('SELECT attachment_version FROM topic_documents WHERE attachment_key = ?').get(reuse.attId);
+    assert.equal(reuseTopicRow.attachment_version, 2,
+      'the REUSE path must synchronize topic_documents.attachment_version with attachments.version (no bare-SQL bypass)');
+    const reuseAnnCount = store.db.prepare('SELECT COUNT(*) AS n FROM annotations WHERE attachment_id = ?').get(reuse.attId).n;
+    assert.equal(reuseAnnCount, 1, 'annotations survive the reuse-path flip');
+
+    // --- 29.5 (P1-2) Divergence compensation failure must NOT report success ---
+    const diverge3 = seedBlobAttachment('diverge3');
+    pdfByUrl.set('https://example.org/diverge3.pdf', diverge3.bytes);
+    let diverge3Calls = 0;
+    const tamperStore = new Proxy(store, {
+      get(target, prop) {
+        if (prop === 'promoteBlobAttachmentToSourceFile') {
+          return (...args) => {
+            diverge3Calls += 1;
+            if (diverge3Calls === 1) {
+              // The competing winner archives under a.pdf through the REAL method.
+              const winnerRel = '网页导入/diverge3-a.pdf';
+              fs.writeFileSync(path.join(rootDir, winnerRel), diverge3.bytes);
+              target.promoteBlobAttachmentToSourceFile(actor, {
+                ...args[1],
+                relativePath: winnerRel,
+                filename: 'diverge3-a.pdf',
+                modifiedAt: Math.round(fs.statSync(path.join(rootDir, winnerRel)).mtimeMs)
+              });
+              // Replace the loser's placed b.pdf with FOREIGN content BEFORE its
+              // compensation runs: the verified unlink must refuse to delete it.
+              fs.writeFileSync(path.join(rootDir, '网页导入', 'diverge3-b.pdf'), makePdfBytes('replaced-loser-content'));
+            }
+            return target.promoteBlobAttachmentToSourceFile(...args); // throws promotion_target_diverged
+          };
+        }
+        const v = target[prop];
+        return typeof v === 'function' ? v.bind(target) : v;
+      }
+    });
+    const tamperHandler = createCanvasHandler(tamperStore, { downloadPdfFn: fakeDownload });
+    const tamperRes = await call(tamperHandler, '/canvas/imports/native', {
+      method: 'POST', cookie,
+      body: { title: 'Audit6 diverge3', pdfUrl: 'https://example.org/diverge3.pdf', filename: 'diverge3-b.pdf' }
+    });
+    assert.equal(tamperRes.statusCode, 500,
+      `diverged compensation failure must be a hard 500, got ${tamperRes.statusCode}: ${tamperRes.text}`);
+    assert.equal(tamperRes.payload.error.code, 'compensation_failed',
+      'the response must carry compensation_failed, never a fabricated reused outcome');
+    assert.equal(fs.existsSync(path.join(rootDir, '网页导入', 'diverge3-b.pdf')), true,
+      'the stray file must be preserved when its compensation is refused');
+    assert.equal(
+      sha256Of(fs.readFileSync(path.join(rootDir, '网页导入', 'diverge3-b.pdf'))),
+      sha256Of(makePdfBytes('replaced-loser-content')),
+      'the preserved stray bytes must be the foreign replacement, untouched');
+    assert.equal(fs.existsSync(path.join(rootDir, '网页导入', 'diverge3-a.pdf')), true,
+      "the winner's placement must remain");
+    const tamperOpRow = store.db.prepare(
+      "SELECT state, error_code FROM file_operations WHERE operation_type = 'file.import' AND target_path LIKE '%diverge3-b.pdf%' ORDER BY created_at DESC LIMIT 1"
+    ).get();
+    assert.ok(tamperOpRow, 'the loser request must be journaled');
+    assert.equal(tamperOpRow.state, 'failed');
+    assert.equal(tamperOpRow.error_code, 'compensation_failed');
+    const diverge3Att = store.getAttachment(actor, diverge3.attId);
+    assert.equal(diverge3Att.storageKind, 'source_file');
+    assert.equal(store.getSourceFile(actor, diverge3Att.sourceFileId).relativePath, '网页导入/diverge3-a.pdf',
+      'the authoritative archive location stays the winning a.pdf');
+    fs.unlinkSync(path.join(rootDir, '网页导入', 'diverge3-a.pdf'));
+    fs.unlinkSync(path.join(rootDir, '网页导入', 'diverge3-b.pdf'));
+
+    console.log('✅ M4 Audit 6/7: mandatory SHA identity, promotion target divergence compensation (incl. failed-compensation 500), post-placement failure compensation, reuse-path version sync, second-chance recovery audit hygiene passed');
   } finally {
     try { store.close(); } catch {}
     fs.rmSync(tempDir, { recursive: true, force: true });

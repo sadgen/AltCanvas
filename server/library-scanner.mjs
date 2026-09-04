@@ -141,7 +141,13 @@ export async function recoverInterruptedFileOperations(store) {
   for (const op of store.listCompensationFailedFileOperations()) {
     try {
       if (op.operationType === 'file.import') {
-        summary[await reconcileImport(store, op)] += 1;
+        const outcome = await reconcileImport(store, op);
+        summary[outcome] += 1;
+        // Audit hygiene: a settled operation must not keep the stale
+        // compensation_failed code next to its final state.
+        if (outcome === 'completed' || outcome === 'rolledBack') {
+          store.settleRecoveredFileOperation(op.id, outcome === 'completed' ? 'completed' : 'rolled_back');
+        }
       } else {
         // Rename-back style compensations cannot be re-derived from the journal
         // alone; they stay failed for manual inspection.

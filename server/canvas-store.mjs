@@ -5547,6 +5547,94 @@ export class CanvasStore {
     });
   }
 
+  // Promotes a managed_blob attachment onto a source_files row that ALREADY
+  // exists for the same document and carries the same content (the one-shot
+  // migration's reuse path). Enforces the SAME invariants as
+  // promoteBlobAttachmentToSourceFile — this is the only sanctioned way to
+  // flip an attachment onto an existing row; ad-hoc UPDATEs bypassing the
+  // topic_documents attachment_version sync are forbidden:
+  //   1. Full precondition validation: owner + document + attachment + blob
+  //      SHA + source-file owner/document/status/SHA identity;
+  //   2. Uniform { attachment, sourceFile, raced: true } when another request
+  //      already flipped this attachment onto THIS source file; a flip onto a
+  //      DIFFERENT source file is promotion_target_diverged;
+  //   3. topic_documents.attachment_version synchronized to the new
+  //      attachments.version inside the same transaction;
+  //   4. The managed blob reference is decremented exactly once.
+  promoteBlobAttachmentToExistingSourceFile(actorKey, {
+    attachmentId, documentId, sourceFileId, sha256
+  }) {
+    const timestamp = nowIso();
+    return this.transaction(() => {
+      const att = this.db.prepare(`
+        SELECT a.* FROM attachments a
+        JOIN documents d ON d.id = a.document_id AND d.deleted_at IS NULL
+        WHERE a.id = ? AND a.document_id = ? AND d.owner_key = ? AND a.deleted_at IS NULL
+      `).get(attachmentId, documentId, actorKey);
+      if (!att) throw new CanvasNotFoundError('attachment or document not found or access denied');
+
+      if (att.storage_kind === 'source_file') {
+        if (att.source_file_id === sourceFileId) {
+          return {
+            attachment: this.getAttachment(actorKey, attachmentId),
+            sourceFile: this.getSourceFile(actorKey, sourceFileId),
+            raced: true
+          };
+        }
+        const diverged = new CanvasConflictError('attachment was concurrently promoted to a different archive target');
+        diverged.code = 'promotion_target_diverged';
+        throw diverged;
+      }
+
+      if (att.blob_hash !== sha256) {
+        throw new CanvasConflictError('attachment blob hash mismatch');
+      }
+
+      const sourceFile = this.db.prepare(`
+        SELECT * FROM source_files
+        WHERE id = ? AND owner_key = ? AND document_id = ? AND deleted_at IS NULL
+      `).get(sourceFileId, actorKey, documentId);
+      if (!sourceFile || sourceFile.status !== 'active' || sourceFile.sha256 !== sha256) {
+        const conflict = new CanvasConflictError('existing source file does not match the attachment identity');
+        conflict.code = 'source_file_identity_mismatch';
+        throw conflict;
+      }
+
+      const nextAttachmentVersion = att.version + 1;
+
+      this.db.prepare(`
+        UPDATE attachments SET
+          storage_kind = 'source_file',
+          blob_hash = NULL,
+          source_file_id = ?,
+          version = ?,
+          updated_at = ?
+        WHERE id = ? AND deleted_at IS NULL
+      `).run(sourceFileId, nextAttachmentVersion, timestamp, attachmentId);
+
+      this.db.prepare(`
+        UPDATE source_files SET attachment_id = ?, version = version + 1, updated_at = ?
+        WHERE id = ? AND owner_key = ?
+      `).run(attachmentId, timestamp, sourceFileId, actorKey);
+
+      this.db.prepare(`
+        UPDATE topic_documents SET
+          attachment_version = ?,
+          version = version + 1,
+          updated_at = ?
+        WHERE attachment_key = ? AND deleted_at IS NULL
+      `).run(nextAttachmentVersion, timestamp, attachmentId);
+
+      this.decrementBlobRef(att.blob_hash);
+
+      return {
+        attachment: this.getAttachment(actorKey, attachmentId),
+        sourceFile: this.getSourceFile(actorKey, sourceFileId),
+        raced: false
+      };
+    });
+  }
+
   // Audits all legacy attachments that still reside only in the managed blob
   // store (storage_kind = 'managed_blob'). Both web imports and direct uploads
   // from earlier milestones are eligible for one-shot archiving into library roots.
@@ -5829,6 +5917,21 @@ export class CanvasStore {
       WHERE state = 'failed' AND error_code = 'compensation_failed'
       ORDER BY created_at ASC
     `).all().map(fileOperationRow);
+  }
+
+  // Second-chance recovery bookkeeping: after a compensation_failed operation
+  // has been deterministically re-examined and settled, the stale
+  // compensation_failed code must not survive next to the final state —
+  // that would read as a contradiction in the audit trail. A completed
+  // recovery clears the error code; a rolled-back recovery is annotated.
+  settleRecoveredFileOperation(fileOpId, outcome) {
+    const timestamp = nowIso();
+    this.db.prepare(`
+      UPDATE file_operations
+      SET error_code = CASE WHEN ? = 'completed' THEN NULL ELSE 'recovered_after_compensation_failure' END,
+        updated_at = ?
+      WHERE id = ? AND state IN ('completed', 'rolled_back')
+    `).run(outcome === 'completed' ? 'completed' : 'rolled_back', timestamp, fileOpId);
   }
 
   // Unified attachment content access: Reader, Range serving, full-text

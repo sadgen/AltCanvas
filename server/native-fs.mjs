@@ -404,10 +404,17 @@ export function safeProbeInsideRoot(rootPath, relativePath) {
   return { present: true, absPath: current, realpath: real };
 }
 
-// In-process mutex for destructive filesystem operations targeting the same
-// absolute path. Callers hold the lock across their final identity recheck and
-// the mutation itself, so two operations inside THIS process can never
-// interleave a verify/unlink pair against each other.
+// In-process mutex for the FINAL verify-and-unlink phase of
+// safeUnlinkWithExpectedSha. Two safe-removal calls racing on the same
+// absolute path can no longer interleave one call's (dev, ino) recheck with
+// the other's unlink inside THIS process.
+//
+// Scope note (deliberate, not an oversight): broader filesystem mutations
+// (rename/move/trash/placement) do NOT participate in this lock. They are
+// individually journaled in file_operations, never unlink unverified
+// content, and carry their own compensation. This primitive serializes
+// exactly the destructive tail of verified removals — it is NOT a claim
+// that "all destructive file operations of this process" are serialized.
 //
 // RESIDUAL THREAT (accepted and documented): the final lstat → unlink pair is
 // still not atomic against EXTERNAL processes — Node's stdlib exposes no
