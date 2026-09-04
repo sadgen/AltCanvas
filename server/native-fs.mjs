@@ -404,42 +404,50 @@ export function safeProbeInsideRoot(rootPath, relativePath) {
   return { present: true, absPath: current, realpath: real };
 }
 
-// Recovery-safe removal: the target must be a real non-symlink file whose
-// verified parent chain stays inside the root. Errors propagate so callers
-// can mark the operation failed instead of silently claiming a rollback.
-export function safeUnlinkInsideRoot(rootPath, relativePath) {
-  const probe = safeProbeInsideRoot(rootPath, relativePath);
-  if (!probe.present) {
-    const err = new NativePathError(
-      probe.reason === 'absent' ? 'path does not exist inside the root' : `path is not safely addressable (${probe.reason})`,
-      probe.reason === 'absent' ? 'file_not_found' : probe.reason
-    );
-    err.probeReason = probe.reason;
-    throw err;
-  }
-  const stat = fs.lstatSync(probe.absPath);
-  if (!stat.isFile()) {
-    const err = new NativePathError('only regular files can be removed', 'invalid_path');
-    err.probeReason = 'not_a_file';
-    throw err;
-  }
-  fs.unlinkSync(probe.absPath);
-  return true;
+// In-process mutex for destructive filesystem operations targeting the same
+// absolute path. Callers hold the lock across their final identity recheck and
+// the mutation itself, so two operations inside THIS process can never
+// interleave a verify/unlink pair against each other.
+//
+// RESIDUAL THREAT (accepted and documented): the final lstat → unlink pair is
+// still not atomic against EXTERNAL processes — Node's stdlib exposes no
+// *at()-family unlink, so true directory-fd-anchored removal would require a
+// native binding. An external actor that swaps the path inside that narrow
+// window can make us unlink the swapped-in entry. Everything else is refused:
+// the (dev, ino) anchor plus the mandatory SHA-256 identity check guarantee we
+// never delete content we did not verify through an O_NOFOLLOW fd first.
+const pathOperationLocks = new Map();
+
+export function withPathOperationLock(absolutePath, task) {
+  const key = path.resolve(absolutePath);
+  const prior = pathOperationLocks.get(key) ?? Promise.resolve();
+  const run = prior.then(task, task);
+  const tail = run.then(() => {}, () => {});
+  pathOperationLocks.set(key, tail);
+  tail.then(() => {
+    if (pathOperationLocks.get(key) === tail) pathOperationLocks.delete(key);
+  });
+  return run;
 }
 
-// Safe removal with content verification: verifies the target exists safely
-// inside root (no symlink component), is a regular file, and its SHA-256
-// hash matches expectedSha256 before unlinking. If the file was replaced
-// concurrently by different content, unlinking is refused to prevent deleting
-// foreign data during error compensation.
-// Safe removal with content verification and TOCTOU defense:
+// Safe removal with MANDATORY content verification and TOCTOU defense:
+//   0. Requires a valid 64-hex lowercase SHA-256 — an unlink that cannot prove
+//      which bytes it removes (e.g. legacy journal rows recorded before SHA
+//      pinning) is refused with 'identity_missing' BEFORE anything is touched;
 //   1. Checks path safety and regular file existence via safeProbeInsideRoot;
 //   2. Anchors on an open file descriptor (O_NOFOLLOW) and fstat to record dev/ino;
-//   3. Hashes the file contents directly through the anchored fd to match expectedSha256;
-//   4. Re-checks lstat on the path right before unlinking to assert (dev, ino) identity,
-//      preventing a concurrent swap between hash verification and removal;
+//   3. Hashes the file contents directly through the anchored fd and requires a
+//      match with expectedSha256;
+//   4. Re-checks lstat on the path immediately before unlinking — inside the
+//      per-path operation lock — to assert (dev, ino) identity;
 //   5. Unlinks the file.
 export async function safeUnlinkWithExpectedSha(rootPath, relativePath, expectedSha256) {
+  if (typeof expectedSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(expectedSha256)) {
+    throw new NativePathError(
+      'a valid 64-hex SHA-256 identity is required for compensation removal',
+      'identity_missing'
+    );
+  }
   const probe = safeProbeInsideRoot(rootPath, relativePath);
   if (!probe.present) {
     const err = new NativePathError(
@@ -452,9 +460,6 @@ export async function safeUnlinkWithExpectedSha(rootPath, relativePath, expected
 
   // Open file with O_NOFOLLOW to pin it and verify dev/ino
   const opened = openFileInsideRoot(rootPath, relativePath);
-  const targetDev = opened.stat.dev;
-  const targetIno = opened.stat.ino;
-
   try {
     if (!opened.stat.isFile()) {
       const err = new NativePathError('only regular files can be removed', 'invalid_path');
@@ -462,34 +467,33 @@ export async function safeUnlinkWithExpectedSha(rootPath, relativePath, expected
       throw err;
     }
 
-    if (expectedSha256) {
-      const crypto = await import('node:crypto');
-      const hash = crypto.createHash('sha256');
-      const stream = fs.createReadStream('', { fd: opened.fd, autoClose: false });
-      const { pipeline } = await import('node:stream/promises');
-      await pipeline(stream, hash);
-      const actualSha = hash.digest('hex');
-      if (actualSha !== expectedSha256) {
-        const err = new NativePathError(
-          'file content does not match expected SHA-256 for compensation removal',
-          'content_mismatch'
-        );
-        err.probeReason = 'content_mismatch';
+    const hash = crypto.createHash('sha256');
+    await pipeline(fs.createReadStream('', { fd: opened.fd, autoClose: false }), hash);
+    const actualSha = hash.digest('hex');
+    if (actualSha !== expectedSha256) {
+      const err = new NativePathError(
+        'file content does not match expected SHA-256 for compensation removal',
+        'content_mismatch'
+      );
+      err.probeReason = 'content_mismatch';
+      throw err;
+    }
+
+    const targetDev = opened.stat.dev;
+    const targetIno = opened.stat.ino;
+    // Post-hash TOCTOU verification, serialized against every other destructive
+    // operation of this process on the same path (see withPathOperationLock).
+    await withPathOperationLock(probe.absPath, () => {
+      const finalStat = fs.lstatSync(probe.absPath);
+      if (finalStat.isSymbolicLink() || finalStat.dev !== targetDev || finalStat.ino !== targetIno) {
+        const err = new NativePathError('file inode changed between hash and removal (TOCTOU swap detected)', 'toctou_detected');
+        err.probeReason = 'toctou_detected';
         throw err;
       }
-    }
+      fs.unlinkSync(probe.absPath);
+    });
+    return true;
   } finally {
     try { fs.closeSync(opened.fd); } catch {}
   }
-
-  // Post-hash TOCTOU verification: assert the file on path is still the EXACT same inode
-  const finalStat = fs.lstatSync(probe.absPath);
-  if (finalStat.isSymbolicLink() || finalStat.dev !== targetDev || finalStat.ino !== targetIno) {
-    const err = new NativePathError('file inode changed between hash and removal (TOCTOU swap detected)', 'toctou_detected');
-    err.probeReason = 'toctou_detected';
-    throw err;
-  }
-
-  fs.unlinkSync(probe.absPath);
-  return true;
 }

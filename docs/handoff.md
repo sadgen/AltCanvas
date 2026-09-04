@@ -1820,3 +1820,49 @@ M4 维持 CONDITIONAL PASS——按审计结论，本项补完后进入最后人
 - `git diff --check`：100% 干净，无格式或空白行违规；
 - 服务运行正常：`systemctl --user status altcanvas.service` 处于 active (running)，端口 8088 监听正常；
 - 里程碑状态：保持 **`M4 CONDITIONAL PASS`**，等待审计通过后启动人工实机验收。
+
+---
+
+## 2026-09-04 会话（M4 六轮终审加固：强制 SHA-256 删除身份核对 / 并发目标分叉孤儿闭环 / 落盘立即置位与状态恢复 / 进程内路径互斥）
+
+### 一、整改背景与根因修复
+
+针对第六轮审计提出的 3 个 P1 与 1 个 P2 阻断项，完成彻底加固：
+
+1. **[P1-1] safeUnlinkWithExpectedSha 强制 64 位 SHA-256 身份核验，无 SHA 恢复任务原样保留文件**：
+   - **根因**：`safeUnlinkWithExpectedSha` 过去在 `expectedSha256` 为空时跳过哈希核验直接删除，导致历史无 SHA 的崩溃任务或未校验请求会误删任意同路径外来文件；
+   - **修复**：
+     - `server/native-fs.mjs` 中的 `safeUnlinkWithExpectedSha` 强制校验 `expectedSha256` 必须为合法的 64 位小写十六进制 SHA-256 字符串，否则在触碰任何文件前即抛出 `NativePathError('...', 'identity_missing')` 拒绝执行；
+     - `server/library-scanner.mjs` 的 `reconcileImport` 在缺少合法 SHA 时，绝不执行补偿删除，而是保留磁盘文件原样不变，并将操作标记为 `failed` (`recovery_identity_missing`)；
+     - 彻底删除 `server/native-fs.mjs` 中废弃的 `safeUnlinkInsideRoot` 函数定义。
+2. **[P1-2] 并发升级目标路径分叉（promotion_target_diverged）孤儿闭环**：
+   - **根因**：`promoteBlobAttachmentToSourceFile` 发现附件已被其他并发请求升级为 `source_file` 时，未比较现有记录的 `(rootId, relativePath, sha256)` 是否与本次请求一致，直接返回旧记录，导致本次调用在磁盘落盘的文件（如 `b.pdf`）成为无 DB 关联的孤儿；
+   - **修复**：
+     - `canvas-store.mjs` 在 `raced` 分支严格核对根目录、相对路径与 SHA；三者一致才作为竞态复用返回 `{ attachment, sourceFile, raced: true }`；
+     - 若目标不一致，抛出带有 `promotion_target_diverged` 错误码的 `CanvasConflictError`；
+     - 调用方 `canvas-api.mjs` 与 `blob-migration.mjs` 捕获该异常后，立即通过 `safeUnlinkWithExpectedSha` 补偿删除本次请求落盘的文件，将操作记录置为 `rolled_back`，并向客户端返回赢家已归档的权威位置作为 `reused`，彻底消除磁盘孤儿。
+3. **[P1-3] 消除落盘后部分失败静默遗留文件，闭环二阶段补偿**：
+   - **根因**：`canvas-api.mjs` 中 `placedOnDisk = true` 位于 `fs.statSync` 之后，若 `stat` 失败则不会触发补偿；且 `blob-migration.mjs` 中曾有空 `catch` 掩盖补偿删除失败；
+   - **修复**：
+     - `canvas-api.mjs` 中 `placeFileIntoRoot` 返回后**立即**置位 `placedOnDisk = true`；
+     - 新增 `statPlacedFileInsideRoot` 助手，通过 `openFileInsideRoot` (O_NOFOLLOW) 安全句柄获取 `stat`，避免未经锚定的裸路径拼接；后续若校验失败立即补偿；
+     - `blob-migration.mjs` 禁止任何吞并删除异常的空 `catch`，补偿删除失败显式上抛 `compensation_failed`；
+     - 数据库记录扩展：新增 `listCompensationFailedFileOperations()`，崩溃恢复器 `recoverInterruptedFileOperations` 具备二次复核机制，对标记为 `compensation_failed` 的未决操作重新核对磁盘事实并执行确定性补偿。
+4. **[P2] 进程内路径操作互斥锁与残余威胁收敛**：
+   - **实现**：`server/native-fs.mjs` 引入 `withPathOperationLock(absolutePath, task)`，对同一绝对路径的破坏性文件操作执行进程内 Promise 队列串行化，彻底消除进程内两个并发线程在 `lstat` 与 `unlinkSync` 之间的微小交错；
+   - **残余威胁明确记录**：由于 Node.js 标准库未暴露 `unlinkat` 原语，跨进程极端原子偷换在理论上存在极微小窗口。当前实现通过 `openFileInsideRoot` fd 锚定、流式 SHA 校验、(dev, ino) 偷换检测与路径互斥，已将该窗口压缩至单一系统调用级别；
+   - **静态扫描范围扩大**：测试组 28.4 与 29 的静态断言覆盖 `server/` 下全部 `.mjs` 文件（包括定义文件自身），断言零裸 `unlinkSync(targetAbs)`、零 `safeUnlinkInsideRoot` 引用与零残留。
+
+### 二、新增行为测试（测试组 29 闭环）
+
+在 `test/native-m4.test.mjs` 中新增测试组 29（`testM4AuditSixIdentityDivergenceAndCompensation`）：
+1. **29.1 缺少/非法 SHA 拒绝删除与外来文件保护**：断言 `null`/空串/非十六进制/大小写错误的身份均被 `safeUnlinkWithExpectedSha` 拒绝（`identity_missing`），外来文件完整保留；构造无 SHA 的历史恢复记录，断言恢复器拒绝删除文件并标记 `recovery_identity_missing`；
+2. **29.2 目标路径分叉并发处理**：构造两请求、不同文件名、同附件的真实并发交错：断言底层抛出 `promotion_target_diverged`，调用方安全删除自身落盘文件并将操作标记 `rolled_back`，成功返回赢家已归档的权威位置；批注与主题关联 100% 存活；
+3. **29.3 落盘后失败补偿与二次恢复**：模拟落盘后句柄校验异常，断言文件被安全补偿删除、操作置为 `rolled_back`；模拟迁移补偿失败，断言显式报告 `compensation_failed` 且外来替换文件完好；断言恢复器对 `compensation_failed` 的孤儿文件执行二次安全回收并置 `rolled_back`。
+
+### 三、全套验证与状态
+
+- `npm test`（10 套完整测试套件）**100% 全部通过（exit 0）**；
+- `git diff --check`：100% 干净，无格式或空白行违规；
+- 服务运行正常：`systemctl --user restart altcanvas.service` 重启成功，`systemctl --user status altcanvas.service` 处于 active (running)，端口 8088 监听正常；
+- 里程碑状态：严格保持 **`M4 CONDITIONAL PASS`**，等待审计通过后启动人工实机验收。

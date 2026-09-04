@@ -7,6 +7,7 @@ import {
   ensureParentInsideRoot,
   assertWrittenInsideRoot,
   safeProbeInsideRoot,
+  openFileInsideRoot,
   safeUnlinkWithExpectedSha,
   hashFileInsideRoot
 } from './native-fs.mjs';
@@ -17,15 +18,18 @@ import {
 // and topic bindings), and the managed blob is left to the existing
 // reference-counted cleanup.
 //
-// Key invariants (P1 fixes):
+// Key invariants:
 //   1. Attachment identity continuity: promoteBlobAttachmentToSourceFile is
 //      used in place, keeping the SAME attachment ID so annotations and
 //      topic_documents remain 100% continuous.
-//   2. Compensation safety: safeUnlinkWithExpectedSha verifies expected SHA
-//      before removing any placed file on failure; failed unlinks mark the
-//      operation failed (never rolled_back).
-//   3. EEXIST race resolution: a concurrent placement requires verifying that
-//      the target file matches the expected hash and its DB binding completed.
+//   2. Compensation safety: safeUnlinkWithExpectedSha REQUIRES a valid SHA-256
+//      identity and refuses removal on any mismatch; a refused or failed
+//      compensation is surfaced as compensation_failed — never swallowed and
+//      never reported as a generic placement failure.
+//   3. Concurrent promotion divergence: when the attachment was concurrently
+//      archived under a different target (promotion_target_diverged), this
+//      migration's own placement is removed with verified identity and the
+//      authoritative location is reported as a reuse.
 //   4. Loop pagination: runBlobOnlyWebImportMigration loops in batches until
 //      the pending count reaches 0 or only unresolvable conflicts remain.
 
@@ -89,6 +93,20 @@ function flipAttachmentInPlace(store, actorKey, attachment, sourceFileId) {
   });
 }
 
+function isPromotionTargetDiverged(err) {
+  return Boolean(err) && err.code === 'promotion_target_diverged';
+}
+
+// The authoritative archive location after a concurrent promotion won.
+function authoritativeRelativePath(store, actorKey, attachmentId) {
+  const att = store.db.prepare(
+    'SELECT source_file_id FROM attachments WHERE id = ? AND deleted_at IS NULL'
+  ).get(attachmentId);
+  if (!att || !att.source_file_id) return null;
+  const row = store.getSourceFile(actorKey, att.source_file_id);
+  return row ? row.relativePath : null;
+}
+
 // Migrates one attachment. Outcome: migrated | reused | conflict | failed.
 async function migrateOneBlobOnlyAttachment(store, actorKey, root, attachment, targetDir) {
   const blobRow = store.getBlob(attachment.blob_hash);
@@ -142,13 +160,18 @@ async function migrateOneBlobOnlyAttachment(store, actorKey, root, attachment, t
       });
       return { outcome: 'migrated', relativePath, adoptedExisting: true };
     } catch (err) {
+      if (isPromotionTargetDiverged(err)) {
+        // Archived concurrently under a different name; nothing of ours was
+        // placed on disk (this file predates the call), so it stays for the
+        // scanner to classify as duplicate content.
+        return { outcome: 'reused', relativePath: authoritativeRelativePath(store, actorKey, attachment.attachment_id), raced: true };
+      }
       return { outcome: 'failed', reason: `adopt_failed:${err.message}`.slice(0, 120) };
     }
   }
 
   // 3. Target path is vacant: perform atomic placement from verified blob.
   const targetAbs = resolveInsideRoot(rootReal, relativePath);
-  let placedPath = null;
   try {
     ensureParentInsideRoot(rootReal, relativePath, { create: true });
     const staged = path.join(path.dirname(targetAbs),
@@ -168,40 +191,73 @@ async function migrateOneBlobOnlyAttachment(store, actorKey, root, attachment, t
             return { outcome: 'conflict', reason: 'filename_conflict' };
           }
           // Same bytes were placed by the competitor; adopt in-place
-          store.promoteBlobAttachmentToSourceFile(actorKey, {
-            attachmentId: attachment.attachment_id,
-            documentId: attachment.document_id,
-            rootId: root.id,
-            relativePath,
-            filename: finalName,
-            sha256,
-            sizeBytes: racedHash.sizeBytes,
-            modifiedAt: Math.round(racedHash.mtimeMs)
-          });
-          return { outcome: 'reused', relativePath, raced: true };
+          try {
+            store.promoteBlobAttachmentToSourceFile(actorKey, {
+              attachmentId: attachment.attachment_id,
+              documentId: attachment.document_id,
+              rootId: root.id,
+              relativePath,
+              filename: finalName,
+              sha256,
+              sizeBytes: racedHash.sizeBytes,
+              modifiedAt: Math.round(racedHash.mtimeMs)
+            });
+            return { outcome: 'reused', relativePath, raced: true };
+          } catch (racedErr) {
+            if (isPromotionTargetDiverged(racedErr)) {
+              return { outcome: 'reused', relativePath: authoritativeRelativePath(store, actorKey, attachment.attachment_id), raced: true };
+            }
+            return { outcome: 'failed', reason: `adopt_failed:${racedErr.message}`.slice(0, 120) };
+          }
         }
         throw linkErr;
       }
       try { fs.unlinkSync(staged); } catch {}
       assertWrittenInsideRoot(rootReal, targetAbs);
-      placedPath = targetAbs;
     } catch (innerErr) {
       try { fs.unlinkSync(staged); } catch {}
+      // The staged temp is always ours to drop; the TARGET is only removed when
+      // it carries exactly the expected bytes. A refused or failed removal MUST
+      // surface: swallowing it would leave an orphan the journal cannot
+      // describe and misreport it as a generic placement failure.
       try {
         await safeUnlinkWithExpectedSha(root.absolutePath, relativePath, sha256);
-      } catch {}
+      } catch (compensationErr) {
+        if (compensationErr.code !== 'file_not_found') {
+          const compensated = new Error(`placement compensation failed: ${compensationErr.message}`);
+          compensated.code = 'compensation_failed';
+          throw compensated;
+        }
+        // file_not_found: this attempt never created the target — nothing to remove.
+      }
       throw innerErr;
     }
   } catch (placeErr) {
     if (placeErr && typeof placeErr.code === 'string' && placeErr.code.startsWith('unsafe_path')) {
       return { outcome: 'conflict', reason: placeErr.code };
     }
+    if (placeErr && placeErr.code === 'compensation_failed') {
+      return { outcome: 'failed', reason: `compensation_failed:${placeErr.message}`.slice(0, 120) };
+    }
     return { outcome: 'failed', reason: `placement_failed:${placeErr.code || placeErr.message}`.slice(0, 120) };
   }
 
-  // 4. In-place database upgrade preserving the SAME attachment ID.
+  // 4. In-place database upgrade preserving the SAME attachment ID. The stat
+  // comes from the anchored fd path (O_NOFOLLOW + containment), never a raw
+  // path stat; an unverifiable placement is compensated, not enrolled.
+  let placedStat = null;
   try {
-    const stat = fs.statSync(placedPath);
+    const opened = openFileInsideRoot(rootReal, relativePath);
+    try { placedStat = opened.stat; } finally { try { fs.closeSync(opened.fd); } catch {} }
+  } catch (statErr) {
+    try {
+      await safeUnlinkWithExpectedSha(root.absolutePath, relativePath, sha256);
+      return { outcome: 'failed', reason: `placement_verify_failed:${statErr.code || statErr.message}`.slice(0, 120) };
+    } catch (compensationErr) {
+      return { outcome: 'failed', reason: `compensation_failed:${compensationErr.message}`.slice(0, 120) };
+    }
+  }
+  try {
     store.promoteBlobAttachmentToSourceFile(actorKey, {
       attachmentId: attachment.attachment_id,
       documentId: attachment.document_id,
@@ -209,11 +265,21 @@ async function migrateOneBlobOnlyAttachment(store, actorKey, root, attachment, t
       relativePath,
       filename: finalName,
       sha256,
-      sizeBytes: attachment.size_bytes || stat.size,
-      modifiedAt: Math.round(stat.mtimeMs)
+      sizeBytes: attachment.size_bytes || placedStat.size,
+      modifiedAt: Math.round(placedStat.mtimeMs)
     });
     return { outcome: 'migrated', relativePath };
   } catch (dbErr) {
+    if (isPromotionTargetDiverged(dbErr)) {
+      // Concurrently archived under a different name: remove OUR placement with
+      // verified identity and report the authoritative location as a reuse.
+      try {
+        await safeUnlinkWithExpectedSha(root.absolutePath, relativePath, sha256);
+      } catch (compensationErr) {
+        return { outcome: 'failed', reason: `compensation_failed:${compensationErr.message}`.slice(0, 120) };
+      }
+      return { outcome: 'reused', relativePath: authoritativeRelativePath(store, actorKey, attachment.attachment_id), raced: true };
+    }
     // Compensation safety: unlink ONLY with verified expected SHA
     try {
       await safeUnlinkWithExpectedSha(root.absolutePath, relativePath, sha256);

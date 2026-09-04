@@ -1390,12 +1390,13 @@ async function testM4AuditFixDeterministicRecovery() {
       'a missing trash file must never be restored as bookkeeping-only active');
 
     // --- 14.7 import: file placed but DB write never happened -> compensate.
+    const orphanBytes = makePdfBytes('recovery-orphan');
     const opI = startOp({
       operationType: 'file.import', sourcePath: path.join(tempDir, 'never-downloaded.pdf'),
       targetPath: `${rootAbs}/rec-orphan.pdf`,
-      payload: { rootId: root.id, targetDir: '', filename: 'rec-orphan.pdf' }
+      payload: { rootId: root.id, targetDir: '', filename: 'rec-orphan.pdf', sha256: sha256Of(orphanBytes) }
     });
-    fs.writeFileSync(path.join(rootDir, 'rec-orphan.pdf'), makePdfBytes('recovery-orphan'));
+    fs.writeFileSync(path.join(rootDir, 'rec-orphan.pdf'), orphanBytes);
     summary = await recoverInterruptedFileOperations(store);
     assert.equal(summary.rolledBack, 1);
     assert.equal(store.getFileOperation(actor, opI.id).state, 'rolled_back');
@@ -1901,12 +1902,13 @@ async function testRecoverySafePaths() {
 
     // 20.2 import compensation unlink fails (parent dir read-only): operation
     // must end failed, never rolled_back, and the file must still exist.
+    const stuckBytes = makePdfBytes('stuck');
     fs.mkdirSync(path.join(rootDir, 'd2'));
-    fs.writeFileSync(path.join(rootDir, 'd2', 'stuck.pdf'), makePdfBytes('stuck'));
+    fs.writeFileSync(path.join(rootDir, 'd2', 'stuck.pdf'), stuckBytes);
     const op2 = store.createFileOperation(actor, {
       operationType: 'file.import',
       targetPath: `${rootDir}/d2/stuck.pdf`,
-      payload: { rootId: root.id, targetDir: 'd2', filename: 'stuck.pdf' }
+      payload: { rootId: root.id, targetDir: 'd2', filename: 'stuck.pdf', sha256: sha256Of(stuckBytes) }
     });
     store.startFileOperation(op2.id);
     fs.chmodSync(path.join(rootDir, 'd2'), 0o500);
@@ -3131,7 +3133,7 @@ async function testM4AuditFiveStrictSafetyAndPagination() {
       operationType: 'file.import',
       sourcePath: 'tmp-crashed',
       targetPath: `${rootDir}/网页导入/crash-promo.pdf`,
-      payload: { rootId: root.id, targetDir: '网页导入', filename: 'crash-promo.pdf', kind: 'blob_promotion' }
+      payload: { rootId: root.id, targetDir: '网页导入', filename: 'crash-promo.pdf', kind: 'blob_promotion', sha256: blobSha1 }
     });
     store.startFileOperation(crashOp.id);
 
@@ -3252,22 +3254,324 @@ async function testM4AuditFiveStrictSafetyAndPagination() {
     fs.unlinkSync(path.join(rootDir, '网页导入', 'sync.pdf'));
 
     // --- 28.4 Static Security Assertions ---
-    // Assert zero occurrences of naked unlinkSync(targetAbs) across server code
-    const serverFiles = [
-      'server/blob-migration.mjs',
-      'server/canvas-api.mjs',
-      'server/native-file-ops.mjs',
-      'server/library-scanner.mjs'
-    ];
+    // The scan covers EVERY .mjs file under server/ — including the module
+    // that defines the filesystem primitives — so a retired helper cannot
+    // survive merely by living in its definition file.
+    const serverDir = path.join(new URL('../', import.meta.url).pathname, 'server');
+    const serverFiles = fs.readdirSync(serverDir).filter(f => f.endsWith('.mjs')).map(f => `server/${f}`);
+    assert.ok(serverFiles.length >= 5, 'server module scan must actually find the server sources');
     for (const rel of serverFiles) {
       const content = fs.readFileSync(path.join(new URL('../', import.meta.url).pathname, rel), 'utf8');
       assert.equal(content.includes('unlinkSync(targetAbs)'), false,
         `${rel} must not contain naked unlinkSync(targetAbs)`);
-      assert.equal(content.includes('safeUnlinkInsideRoot('), false,
-        `${rel} must not reference removed safeUnlinkInsideRoot`);
+      assert.equal(content.includes('safeUnlinkInsideRoot'), false,
+        `${rel} must not reference the removed safeUnlinkInsideRoot (definition included)`);
     }
 
     console.log('✅ M4 Audit 5: P1-1 auto-archive compensation, P1-2 starvation-free cursor pagination, P1-3 in-place version sync & uniform race shape, P1-4 TOCTOU safeUnlinkWithExpectedSha, static code safety passed');
+  } finally {
+    try { store.close(); } catch {}
+    fs.rmSync(tempDir, { recursive: true, force: true });
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+}
+
+
+// ============================================================
+// 29. M4 Audit 6 Suite:
+//     - P1-1 Missing-SHA recovery records PRESERVE the file (identity_missing) and are
+//           marked recovery_identity_missing; safeUnlinkWithExpectedSha demands a valid
+//           64-hex SHA-256 identity before touching anything
+//     - P1-2 Concurrent promotion to a DIFFERENT target throws promotion_target_diverged;
+//           the caller compensates its own placement and reports the authoritative state
+//     - P1-3 Post-placement failures (anchored stat, refused compensation) leave zero
+//           orphans and surface compensation_failed; recovery re-examines failed
+//           compensation operations (second-chance reconciliation)
+// ============================================================
+async function testM4AuditSixIdentityDivergenceAndCompensation() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-audit6-store-'));
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-audit6-root-'));
+  const store = new CanvasStore(path.join(tempDir, 'canvas.sqlite'));
+  const actor = canvasActorKey('local', 'm4-audit6');
+  const session = createSession({
+    userId: 'm4-audit6-1', subject: 'm4-audit6', authMode: 'local',
+    username: 'audit6', role: 'admin', actorKey: actor
+  });
+  const cookie = `altcanvas_session=${session.id}`;
+  const [root] = store.ensureLibraryRootsFromConfig(actor, [{ absolutePath: rootDir, displayName: 'Audit6 Root' }]);
+
+  const pdfByUrl = new Map();
+  let dlCount = 0;
+  const fakeDownload = async (url, targetDir) => {
+    const bytes = pdfByUrl.get(url);
+    if (!bytes) { const err = new Error('not found'); err.status = 404; throw err; }
+    dlCount++;
+    fs.mkdirSync(targetDir, { recursive: true, mode: 0o700 });
+    const p = path.join(targetDir, `dl6-${dlCount}.pdf`);
+    fs.writeFileSync(p, bytes);
+    return { tempFilePath: p, sha256: sha256Of(bytes), sizeBytes: bytes.length, mimeType: 'application/pdf' };
+  };
+
+  // Seeds a managed_blob attachment (optionally web-import flavored) bound to a
+  // fresh document, plus its blob-store backing file.
+  function seedBlobAttachment(label, { webImport = true } = {}) {
+    const bytes = makePdfBytes(`audit6-${label}`);
+    const sha = sha256Of(bytes);
+    const blobPath = store.resolveBlobPath(sha, '.pdf');
+    fs.mkdirSync(path.dirname(blobPath), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(blobPath, bytes, { mode: 0o600 });
+    store.upsertBlob({ sha256: sha, relativePath: path.relative(store.getBlobStorageDir(), blobPath), sizeBytes: bytes.length, mimeType: 'application/pdf' });
+    const doc = store.createDocument(actor, { title: `Audit6 ${label}` });
+    const attId = crypto.randomUUID();
+    store.db.prepare(`
+      INSERT INTO attachments
+        (id, document_id, blob_hash, mime_type, original_filename, title, source_url, size_bytes, storage_kind, version, created_at, updated_at)
+      VALUES (?, ?, ?, 'application/pdf', ?, ?, ?, ?, 'managed_blob', 1, ?, ?)
+    `).run(attId, doc.id, sha, `${label}.pdf`, `Audit6 ${label}`,
+      webImport ? `https://example.org/${label}.pdf` : null,
+      bytes.length, new Date().toISOString(), new Date().toISOString());
+    return { doc, attId, bytes, sha };
+  }
+
+  const { safeUnlinkWithExpectedSha, withPathOperationLock } = await import('../server/native-fs.mjs');
+
+  try {
+    // --- 29.1 (P1-1) Missing/invalid SHA identity refuses deletion, file preserved ---
+    fs.mkdirSync(path.join(rootDir, '网页导入'), { recursive: true });
+    const foreignBytes = makePdfBytes('foreign-content-at-legacy-path');
+    const legacyRel = '网页导入/legacy-nosha.pdf';
+    fs.writeFileSync(path.join(rootDir, legacyRel), foreignBytes);
+
+    for (const badIdentity of [null, undefined, '', 'deadbeef', sha256Of(foreignBytes).toUpperCase()]) {
+      await assert.rejects(
+        () => safeUnlinkWithExpectedSha(rootDir, legacyRel, badIdentity),
+        (err) => err.code === 'identity_missing',
+        `safeUnlinkWithExpectedSha must reject identity ${String(badIdentity)}`
+      );
+    }
+    assert.equal(fs.existsSync(path.join(rootDir, legacyRel)), true,
+      'refused unlink must leave the file untouched');
+
+    // Wrong (but valid) identity: refused with content_mismatch, file preserved.
+    await assert.rejects(
+      () => safeUnlinkWithExpectedSha(rootDir, legacyRel, sha256Of(makePdfBytes('different'))),
+      (err) => err.code === 'content_mismatch'
+    );
+    assert.equal(fs.existsSync(path.join(rootDir, legacyRel)), true);
+
+    // Correct identity: removed.
+    await safeUnlinkWithExpectedSha(rootDir, legacyRel, sha256Of(foreignBytes));
+    assert.equal(fs.existsSync(path.join(rootDir, legacyRel)), false);
+
+    // Historical recovery record WITHOUT sha256: the recovery must PRESERVE the
+    // foreign file at the recorded path and fail the operation explicitly.
+    fs.writeFileSync(path.join(rootDir, legacyRel), foreignBytes);
+    const legacyOp = store.createFileOperation(actor, {
+      operationType: 'file.import',
+      sourcePath: 'tmp-legacy',
+      targetPath: `${rootDir}/${legacyRel}`,
+      payload: { rootId: root.id, targetDir: '网页导入', filename: 'legacy-nosha.pdf', kind: 'blob_promotion' }
+    });
+    store.startFileOperation(legacyOp.id);
+    await recoverInterruptedFileOperations(store);
+    assert.equal(fs.existsSync(path.join(rootDir, legacyRel)), true,
+      'recovery must NOT delete a file it cannot prove ownership of');
+    const legacyOpRow = store.db.prepare('SELECT * FROM file_operations WHERE id = ?').get(legacyOp.id);
+    assert.equal(legacyOpRow.state, 'failed');
+    assert.equal(legacyOpRow.error_code, 'recovery_identity_missing');
+    fs.unlinkSync(path.join(rootDir, legacyRel));
+
+    // The per-path operation mutex primitive is exported (in-process TOCTOU serialization).
+    assert.equal(typeof withPathOperationLock, 'function');
+
+    // --- 29.2 (P1-2) Concurrent promotion to a different target diverges ---
+    const diverge = seedBlobAttachment('diverge');
+    store.createAnnotation(actor, diverge.attId, {
+      pageLabel: '1', position: { x: 1, y: 2 }, quote: 'Divergence annotation', comment: 'kept', color: '#ff0000'
+    });
+    const divergeTopic = store.createWorkspace(actor, { name: 'Audit6 Divergence Topic' });
+    store.addTopicDocument(actor, divergeTopic.id, {
+      libraryType: 'native', libraryId: 'local', itemKey: diverge.doc.id,
+      attachmentKey: diverge.attId, attachmentVersion: 1, status: 'accepted'
+    });
+
+    // Store level: same-target race is acknowledged, different target diverges.
+    fs.writeFileSync(path.join(rootDir, '网页导入', 'diverge-a.pdf'), diverge.bytes);
+    const winnerPromo = store.promoteBlobAttachmentToSourceFile(actor, {
+      attachmentId: diverge.attId, documentId: diverge.doc.id, rootId: root.id,
+      relativePath: '网页导入/diverge-a.pdf', filename: 'diverge-a.pdf', sha256: diverge.sha,
+      sizeBytes: diverge.bytes.length, modifiedAt: Date.now()
+    });
+    assert.equal(winnerPromo.raced, false);
+    assert.throws(
+      () => store.promoteBlobAttachmentToSourceFile(actor, {
+        attachmentId: diverge.attId, documentId: diverge.doc.id, rootId: root.id,
+        relativePath: '网页导入/diverge-c.pdf', filename: 'diverge-c.pdf', sha256: diverge.sha,
+        sizeBytes: diverge.bytes.length, modifiedAt: Date.now()
+      }),
+      (err) => err.code === 'promotion_target_diverged'
+    );
+
+    // Executor level, interleaved: a competing request wins the promotion under
+    // a DIFFERENT filename while this request sits between placement and
+    // promotion. This request must clean up its own b.pdf, mark the operation
+    // rolled_back, and still report the authoritative archived state.
+    const diverge2 = seedBlobAttachment('diverge2');
+    store.createAnnotation(actor, diverge2.attId, {
+      pageLabel: '1', position: { x: 1, y: 2 }, quote: 'Divergence2 annotation', comment: 'kept', color: '#ff0000'
+    });
+    pdfByUrl.set('https://example.org/diverge2.pdf', diverge2.bytes);
+    let promoteCalls = 0;
+    const racingStore = new Proxy(store, {
+      get(target, prop) {
+        if (prop === 'promoteBlobAttachmentToSourceFile') {
+          return (...args) => {
+            promoteCalls += 1;
+            if (promoteCalls === 1) {
+              const winnerRel = '网页导入/diverge2-a.pdf';
+              fs.writeFileSync(path.join(rootDir, winnerRel), diverge2.bytes);
+              target.promoteBlobAttachmentToSourceFile(actor, {
+                ...args[1],
+                relativePath: winnerRel,
+                filename: 'diverge2-a.pdf',
+                modifiedAt: Math.round(fs.statSync(path.join(rootDir, winnerRel)).mtimeMs)
+              });
+            }
+            return target.promoteBlobAttachmentToSourceFile(...args);
+          };
+        }
+        const v = target[prop];
+        return typeof v === 'function' ? v.bind(target) : v;
+      }
+    });
+    const racingHandler = createCanvasHandler(racingStore, { downloadPdfFn: fakeDownload });
+    const divergeRes = await call(racingHandler, '/canvas/imports/native', {
+      method: 'POST', cookie,
+      body: { title: 'Audit6 diverge2', pdfUrl: 'https://example.org/diverge2.pdf', filename: 'diverge2-b.pdf' }
+    });
+    assert.equal(divergeRes.statusCode, 200, `diverged race must still return the authoritative reuse, got ${divergeRes.statusCode}: ${divergeRes.text}`);
+    assert.equal(divergeRes.payload.data.outcome, 'reused');
+    assert.equal(divergeRes.payload.data.promotionTargetDiverged, true);
+    assert.equal(divergeRes.payload.data.sourceFile.relativePath, '网页导入/diverge2-a.pdf',
+      'the authoritative (winning) target must be reported');
+    assert.equal(fs.existsSync(path.join(rootDir, '网页导入', 'diverge2-b.pdf')), false,
+      "this request's own placement must be compensated away");
+    assert.equal(fs.existsSync(path.join(rootDir, '网页导入', 'diverge2-a.pdf')), true,
+      "the winner's placement must remain");
+    const divergeOpRow = store.db.prepare(
+      "SELECT * FROM file_operations WHERE operation_type = 'file.import' AND target_path LIKE '%diverge2-b.pdf%' ORDER BY created_at DESC LIMIT 1"
+    ).get();
+    assert.ok(divergeOpRow, 'diverged request must be journaled');
+    assert.equal(divergeOpRow.state, 'rolled_back');
+    const attAfterDiverge = store.getAttachment(actor, diverge2.attId);
+    assert.equal(attAfterDiverge.storageKind, 'source_file');
+    const annCount = store.db.prepare('SELECT COUNT(*) AS n FROM annotations WHERE attachment_id = ?').get(diverge2.attId).n;
+    assert.equal(annCount, 1, 'annotations survive the diverged promotion');
+    fs.unlinkSync(path.join(rootDir, '网页导入', 'diverge2-a.pdf'));
+
+    // --- 29.3 (P1-3) Post-placement failures compensate and surface compensation_failed ---
+    // (a) Anchored-stat failure right after a successful placement: the placed
+    //     file is compensated, the operation is rolled_back, no orphan remains.
+    const statfail = seedBlobAttachment('statfail');
+    pdfByUrl.set('https://example.org/statfail.pdf', statfail.bytes);
+    const statFailStore = new Proxy(store, {
+      get(target, prop) {
+        const v = target[prop];
+        return typeof v === 'function' ? v.bind(target) : v;
+      }
+    });
+    const statFailHandler = createCanvasHandler(statFailStore, {
+      downloadPdfFn: fakeDownload,
+      statPlacedFileFn: () => { const err = new Error('simulated anchored-stat failure'); throw err; }
+    });
+    const statFailRes = await call(statFailHandler, '/canvas/imports/native', {
+      method: 'POST', cookie,
+      body: { title: 'Audit6 statfail', pdfUrl: 'https://example.org/statfail.pdf', filename: 'statfail.pdf' }
+    });
+    assert.equal(statFailRes.statusCode, 500);
+    assert.equal(fs.existsSync(path.join(rootDir, '网页导入', 'statfail.pdf')), false,
+      'post-placement stat failure must compensate the placed file');
+    const statFailOpRow = store.db.prepare(
+      "SELECT * FROM file_operations WHERE operation_type = 'file.import' AND target_path LIKE '%statfail.pdf%' ORDER BY created_at DESC LIMIT 1"
+    ).get();
+    assert.ok(statFailOpRow);
+    assert.equal(statFailOpRow.state, 'rolled_back');
+    assert.equal(store.getAttachment(actor, statfail.attId).storageKind, 'managed_blob',
+      'failed promotion must leave the attachment on managed_blob');
+
+    // (b) blob-migration: a refused compensation (foreign content replaced the
+    //     placed file) is reported as compensation_failed, never swallowed and
+    //     never misreported as a generic placement failure.
+    store.db.prepare('DELETE FROM attachments WHERE id = ?').run(statfail.attId);
+    store.db.prepare('DELETE FROM documents WHERE id = ?').run(statfail.doc.id);
+    const compfail = seedBlobAttachment('compfail');
+    const compFailStore = new Proxy(store, {
+      get(target, prop) {
+        if (prop === 'promoteBlobAttachmentToSourceFile') {
+          return (...args) => {
+            // The DB step fails AND the placed file was replaced concurrently:
+            // compensation must refuse to delete the foreign bytes.
+            fs.writeFileSync(path.join(rootDir, args[1].relativePath), makePdfBytes('replaced-foreign-content'));
+            throw new Error('simulated DB promotion failure');
+          };
+        }
+        const v = target[prop];
+        return typeof v === 'function' ? v.bind(target) : v;
+      }
+    });
+    const { runBlobOnlyWebImportMigration } = await import('../server/blob-migration.mjs');
+    const compFailMig = await runBlobOnlyWebImportMigration(compFailStore, actor, {});
+    assert.equal(compFailMig.report.failed, 1);
+    assert.ok(compFailMig.report.failedDetail[0].reason.startsWith('compensation_failed'),
+      `refused compensation must surface compensation_failed, got: ${compFailMig.report.failedDetail[0].reason}`);
+    assert.equal(fs.existsSync(path.join(rootDir, '网页导入', 'compfail.pdf')), true,
+      'the foreign replacement must be preserved, not deleted');
+    fs.unlinkSync(path.join(rootDir, '网页导入', 'compfail.pdf'));
+
+    // (c) Recovery second chance: failed compensation_failed operations with a
+    //     placed-but-unenrolled file are reconciled (removed + rolled_back);
+    //     when the row actually exists and the hash matches, the operation is
+    //     completed instead of lingering failed forever.
+    const secondBytes = makePdfBytes('second-chance-orphan');
+    const secondSha = sha256Of(secondBytes);
+    fs.writeFileSync(path.join(rootDir, '网页导入', 'secondchance.pdf'), secondBytes);
+    const secondOp = store.createFileOperation(actor, {
+      operationType: 'file.import',
+      sourcePath: 'tmp-second',
+      targetPath: `${rootDir}/网页导入/secondchance.pdf`,
+      payload: { rootId: root.id, targetDir: '网页导入', filename: 'secondchance.pdf', kind: 'blob_promotion', sha256: secondSha }
+    });
+    store.startFileOperation(secondOp.id);
+    store.failFileOperation(secondOp.id, 'compensation_failed');
+
+    const enrolledBytes = makePdfBytes('second-chance-enrolled');
+    const enrolledSha = sha256Of(enrolledBytes);
+    fs.writeFileSync(path.join(rootDir, '网页导入', 'enrolled.pdf'), enrolledBytes);
+    const enrolledDoc = store.createDocument(actor, { title: 'Second Chance Enrolled' });
+    store.createSourceFile(actor, root.id, {
+      relativePath: '网页导入/enrolled.pdf', filename: 'enrolled.pdf', sha256: enrolledSha,
+      sizeBytes: enrolledBytes.length, modifiedAt: Date.now(), status: 'active',
+      documentId: enrolledDoc.id, lastSeenAt: new Date().toISOString()
+    });
+    const enrolledOp = store.createFileOperation(actor, {
+      operationType: 'file.import',
+      sourcePath: 'tmp-enrolled',
+      targetPath: `${rootDir}/网页导入/enrolled.pdf`,
+      payload: { rootId: root.id, targetDir: '网页导入', filename: 'enrolled.pdf', sha256: enrolledSha }
+    });
+    store.startFileOperation(enrolledOp.id);
+    store.failFileOperation(enrolledOp.id, 'compensation_failed');
+
+    await recoverInterruptedFileOperations(store);
+    assert.equal(fs.existsSync(path.join(rootDir, '网页导入', 'secondchance.pdf')), false,
+      'second-chance recovery must remove the compensable orphan');
+    assert.equal(store.getFileOperation(actor, secondOp.id).state, 'rolled_back');
+    assert.equal(fs.existsSync(path.join(rootDir, '网页导入', 'enrolled.pdf')), true,
+      'a legitimately enrolled placement must NOT be deleted by second-chance recovery');
+    assert.equal(store.getFileOperation(actor, enrolledOp.id).state, 'completed',
+      'a verified placement transitions failed -> completed instead of lingering');
+
+    console.log('✅ M4 Audit 6: mandatory SHA identity, promotion target divergence compensation, post-placement failure compensation, and second-chance recovery passed');
   } finally {
     try { store.close(); } catch {}
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -3281,6 +3585,7 @@ async function testM4FinalRemediation() {
   await testReimportAutoArchivingAndBackfill();
   await testM4AuditFourContinuousReconciliation();
   await testM4AuditFiveStrictSafetyAndPagination();
+  await testM4AuditSixIdentityDivergenceAndCompensation();
 }
 
 try {

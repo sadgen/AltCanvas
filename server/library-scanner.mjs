@@ -132,8 +132,27 @@ export function enrollScannedFile(store, actorKey, rootId, entry) {
 //   mkdir        idempotently ensure the directory
 //   library.scan nothing to reconcile; the next scan redoes it safely
 export async function recoverInterruptedFileOperations(store) {
-  const resumable = store.listResumableFileOperations();
   const summary = { completed: 0, rolledBack: 0, failed: 0, scansReset: 0 };
+  // Second-chance compensation: operations whose RUNTIME compensation itself
+  // failed (state failed, error_code compensation_failed) may still hold a
+  // placed file on disk. They are re-examined with the same deterministic
+  // disk-facts reconciliation as interrupted operations — a failed operation
+  // is only final when its target is provably absent or legitimately enrolled.
+  for (const op of store.listCompensationFailedFileOperations()) {
+    try {
+      if (op.operationType === 'file.import') {
+        summary[await reconcileImport(store, op)] += 1;
+      } else {
+        // Rename-back style compensations cannot be re-derived from the journal
+        // alone; they stay failed for manual inspection.
+        summary.failed += 1;
+      }
+    } catch (err) {
+      store.failFileOperation(op.id, `recovery_failed: ${err.message}`.slice(0, 120));
+      summary.failed += 1;
+    }
+  }
+  const resumable = store.listResumableFileOperations();
   for (const op of resumable) {
     try {
       switch (op.operationType) {
@@ -392,15 +411,29 @@ async function reconcileImport(store, op) {
   }
   const dbRow = store.getSourceFileByPath(root.owner_key, root.id, relativePath);
 
+  // Content identity is MANDATORY for import compensation: legacy journal rows
+  // recorded before SHA pinning cannot prove which bytes they placed. The file
+  // sitting at the target is PRESERVED untouched and the operation is failed
+  // with recovery_identity_missing for manual inspection — never blindly
+  // deleted as an "orphan".
+  const expectedSha = typeof op.payload?.sha256 === 'string' && /^[0-9a-f]{64}$/.test(op.payload.sha256)
+    ? op.payload.sha256
+    : null;
+
   if (probe.present && !dbRow) {
     // FS placed the file, the DB write never happened: compensate by removing
     // the placed file so no unmanaged content leaks. A failed removal is a
     // failed operation — never a rolled-back one.
+    if (!expectedSha) {
+      store.failFileOperation(op.id, 'recovery_identity_missing');
+      return 'failed';
+    }
     try {
       // Re-hash to ensure the file is our orphan placement before deleting
-      await safeUnlinkWithExpectedSha(root.absolute_path, relativePath, op.payload?.sha256 || null);
+      await safeUnlinkWithExpectedSha(root.absolute_path, relativePath, expectedSha);
     } catch (unlinkErr) {
-      store.failFileOperation(op.id, 'compensation_failed');
+      store.failFileOperation(op.id,
+        unlinkErr?.code === 'identity_missing' ? 'recovery_identity_missing' : 'compensation_failed');
       return 'failed';
     }
     store.markFileOperationRolledBack(op.id);

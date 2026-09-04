@@ -1391,13 +1391,22 @@ function deriveWebImportFilename({ download, pdfUrl, title, sha256 }) {
   return sanitizeWebImportFilename(`import-${String(sha256 || '').slice(0, 16)}.pdf`, 'import');
 }
 
+// Anchored stat for a freshly placed file: the descriptor comes from
+// openFileInsideRoot (O_NOFOLLOW + realpath containment + regular-file check),
+// never from a raw path stat — the fd IS the TOCTOU anchor.
+function statPlacedFileInsideRoot(rootAbsolutePath, relativePath) {
+  const opened = openFileInsideRoot(rootAbsolutePath, relativePath);
+  try { return opened.stat; } finally { try { fs.closeSync(opened.fd); } catch {} }
+}
+
 async function executeNativeImportItem(store, actorKey, normalized, {
   downloadPdfFn,
   promoteBlobFn = defaultPromoteBlob,
   fallbackTargetWorkspaceId = null,
   translationServerFn = null,
   fileTarget = null,
-  webImportArchive = false
+  webImportArchive = false,
+  statPlacedFileFn = statPlacedFileInsideRoot
 }) {
   // Defensive shallow clone: per-item derived filenames must NEVER mutate
   // the caller's shared target object (e.g. batch imports).
@@ -1565,18 +1574,31 @@ async function executeNativeImportItem(store, actorKey, normalized, {
       try {
         if (!conflict) {
           const placedTarget = placeFileIntoRoot(effectiveFileTarget.root.absolutePath, targetRelativePath, tempFilePath);
-          targetStat = fs.statSync(placedTarget);
+          // Set IMMEDIATELY after placement: any later failure in this block
+          // (anchored stat, containment recheck) must still compensate the
+          // placed file instead of silently leaving it behind.
           placedOnDisk = true;
+          targetStat = statPlacedFileFn(effectiveFileTarget.root.absolutePath, targetRelativePath);
         } else {
-          // conflict.type === 'duplicate_content': identical file already on disk, adopt stat safely
-          const { openFileInsideRoot } = await import('./native-fs.mjs');
-          const opened = openFileInsideRoot(effectiveFileTarget.root.absolutePath, targetRelativePath);
-          targetStat = opened.stat;
-          try { fs.closeSync(opened.fd); } catch {}
+          // conflict.type === 'duplicate_content': identical bytes already at the
+          // target (NOT placed by this request) — adopt its anchored stat.
+          targetStat = statPlacedFileFn(effectiveFileTarget.root.absolutePath, targetRelativePath);
         }
       } catch (placeErr) {
         cleanupTemp();
-        store.failFileOperation(operation.id, placeErr.code || 'placement_failed');
+        if (placedOnDisk) {
+          // The file landed but a post-placement step failed: compensate it now,
+          // with verified content identity. A refused/failed compensation is
+          // compensation_failed — recovery re-examines exactly those operations.
+          try {
+            await safeUnlinkWithExpectedSha(effectiveFileTarget.root.absolutePath, targetRelativePath, attachment.sha256);
+            store.markFileOperationRolledBack(operation.id);
+          } catch (compensationErr) {
+            store.failFileOperation(operation.id, 'compensation_failed');
+          }
+        } else {
+          store.failFileOperation(operation.id, placeErr.code || 'placement_failed');
+        }
         if (placeErr instanceof FileOpError || placeErr instanceof NativePathError) {
           return { result: { outcome: placeErr.code, targetPath: targetRelativePath }, warning };
         }
@@ -1615,6 +1637,43 @@ async function executeNativeImportItem(store, actorKey, normalized, {
           warning
         };
       } catch (promoteErr) {
+        if (promoteErr.code === 'promotion_target_diverged') {
+          // A concurrent request archived this attachment under a DIFFERENT
+          // target. This request's own placement (if any) is compensated with
+          // verified identity; the authoritative archived state is then reported
+          // as a reuse so the client still sees the real file. When this request
+          // adopted pre-existing identical bytes (placed nothing), that file is
+          // not ours to remove — the scanner classifies it as a duplicate.
+          if (placedOnDisk) {
+            try {
+              await safeUnlinkWithExpectedSha(effectiveFileTarget.root.absolutePath, targetRelativePath, attachment.sha256);
+              store.markFileOperationRolledBack(operation.id);
+            } catch (compensationErr) {
+              store.failFileOperation(operation.id, 'compensation_failed');
+            }
+          } else {
+            store.markFileOperationRolledBack(operation.id);
+          }
+          const currentAtt = store.getAttachment(actorKey, legacyAtt.id);
+          const currentSource = currentAtt && currentAtt.sourceFileId
+            ? store.getSourceFile(actorKey, currentAtt.sourceFileId)
+            : null;
+          const divergedDoc = store.backfillDocumentAndTopics(actorKey, blobHolder.id, {
+            doi, isbn, url, abstract, year, creators, topicIds: allTopicIds
+          });
+          return {
+            result: {
+              outcome: 'reused',
+              match: { strategy: 'sha256', documentId: blobHolder.id },
+              document: divergedDoc,
+              sourceFile: currentSource,
+              attachment: currentAtt,
+              promotedFromBlob: true,
+              promotionTargetDiverged: true
+            },
+            warning
+          };
+        }
         if (placedOnDisk) {
           try {
             await safeUnlinkWithExpectedSha(effectiveFileTarget.root.absolutePath, targetRelativePath, attachment.sha256);
@@ -1701,6 +1760,25 @@ async function executeNativeImportItem(store, actorKey, normalized, {
         err.code = 'file_placement_failed';
         throw err;
       }
+      // The placed file must be verifiable through the anchored fd path. A
+      // post-placement verification failure compensates the placement instead
+      // of enrolling a phantom row (or leaking an orphan file).
+      let placedStat;
+      try {
+        placedStat = statPlacedFileFn(effectiveFileTarget.root.absolutePath, targetRelativePath);
+      } catch (statErr) {
+        cleanupTemp();
+        try {
+          await safeUnlinkWithExpectedSha(effectiveFileTarget.root.absolutePath, targetRelativePath, attachment.sha256);
+          store.markFileOperationRolledBack(operation.id);
+        } catch (compensationErr) {
+          store.failFileOperation(operation.id, 'compensation_failed');
+        }
+        const err = new Error(`PDF 落盘后校验失败: ${statErr.message}`);
+        err.status = 500;
+        err.code = 'placement_verify_failed';
+        throw err;
+      }
       filePlacement = {
         operationId: operation.id,
         rootId: effectiveFileTarget.root.id,
@@ -1710,7 +1788,7 @@ async function executeNativeImportItem(store, actorKey, normalized, {
         archiveDir,
         sha256: attachment.sha256,
         sizeBytes: attachment.sizeBytes,
-        modifiedAt: Math.round(fs.statSync(path.join(effectiveFileTarget.root.absolutePath, targetRelativePath)).mtimeMs)
+        modifiedAt: Math.round(placedStat.mtimeMs)
       };
       cleanupTemp();
     }
@@ -1883,6 +1961,7 @@ export function createCanvasHandler(store, {
   downloadPdfFn = safeDownloadPdfFile,
   promoteBlobFn = defaultPromoteBlob,
   translationServerFn = null,
+  statPlacedFileFn = statPlacedFileInsideRoot,
 } = {}) {
   recoverQueuedAndRunningJobs(store);
   // NOTE: recoverBlobConsistency is intentionally NOT invoked here. It must only run on
@@ -2055,6 +2134,7 @@ export function createCanvasHandler(store, {
             downloadPdfFn,
             promoteBlobFn,
             translationServerFn,
+            statPlacedFileFn,
             fileTarget: webImportFileTarget,
             webImportArchive: true
           });
@@ -2185,6 +2265,7 @@ export function createCanvasHandler(store, {
               promoteBlobFn,
               fallbackTargetWorkspaceId: targetWorkspaceId,
               translationServerFn,
+              statPlacedFileFn,
               fileTarget: itemFileTarget,
               webImportArchive: true
             });
@@ -2469,6 +2550,7 @@ export function createCanvasHandler(store, {
             downloadPdfFn,
             promoteBlobFn,
             translationServerFn,
+            statPlacedFileFn,
             fileTarget: { root, targetDir, filename, topicIds }
           });
         } catch (execErr) {

@@ -5470,14 +5470,27 @@ export class CanvasStore {
 
       if (!att) throw new CanvasNotFoundError('attachment or document not found or access denied');
 
-      // Concurrent race condition: already promoted by another competing process
+      // Concurrent race condition: already promoted by another competing
+      // request. A race is only acknowledged when the EXISTING source file is
+      // the same target this caller asked for (root + relative path + SHA);
+      // returning a different target's row would orphan this caller's placed
+      // file, so a divergent target is an explicit conflict the caller must
+      // compensate (safe unlink of its own placement + rolled_back).
       if (att.storage_kind === 'source_file') {
         const existingSourceFile = att.source_file_id ? this.getSourceFile(actorKey, att.source_file_id) : null;
-        return {
-          attachment: this.getAttachment(actorKey, attachmentId),
-          sourceFile: existingSourceFile,
-          raced: true
-        };
+        if (existingSourceFile
+          && existingSourceFile.rootId === rootId
+          && existingSourceFile.relativePath === relativePath
+          && existingSourceFile.sha256 === sha256) {
+          return {
+            attachment: this.getAttachment(actorKey, attachmentId),
+            sourceFile: existingSourceFile,
+            raced: true
+          };
+        }
+        const diverged = new CanvasConflictError('attachment was concurrently promoted to a different archive target');
+        diverged.code = 'promotion_target_diverged';
+        throw diverged;
       }
 
       // Verify blob hash matches
@@ -5773,9 +5786,13 @@ export class CanvasStore {
 
   completeFileOperation(fileOpId) {
     const timestamp = nowIso();
+    // 'failed' is included for recovery only: a compensation_failed operation
+    // whose second-chance reconciliation proves the placement is legitimately
+    // enrolled transitions to completed instead of lingering forever. Runtime
+    // executors never complete an operation after failing it.
     this.db.prepare(`
       UPDATE file_operations SET state = 'completed', completed_at = ?, updated_at = ?
-      WHERE id = ? AND state IN ('queued', 'running')
+      WHERE id = ? AND state IN ('queued', 'running', 'failed')
     `).run(timestamp, timestamp, fileOpId);
   }
 
@@ -5783,7 +5800,7 @@ export class CanvasStore {
     const timestamp = nowIso();
     this.db.prepare(`
       UPDATE file_operations SET state = 'failed', error_code = ?, updated_at = ?
-      WHERE id = ? AND state IN ('queued', 'running')
+      WHERE id = ? AND state IN ('queued', 'running', 'failed')
     `).run(errorCode ? String(errorCode).slice(0, 128) : 'operation_failed', timestamp, fileOpId);
   }
 
@@ -5800,6 +5817,17 @@ export class CanvasStore {
   listResumableFileOperations() {
     return this.db.prepare(`
       SELECT * FROM file_operations WHERE state IN ('queued', 'running') ORDER BY created_at ASC
+    `).all().map(fileOperationRow);
+  }
+
+  // Second-chance compensation set: operations whose runtime compensation
+  // itself failed may still hold placed files on disk. Recovery re-examines
+  // exactly these; every other failed operation is final.
+  listCompensationFailedFileOperations() {
+    return this.db.prepare(`
+      SELECT * FROM file_operations
+      WHERE state = 'failed' AND error_code = 'compensation_failed'
+      ORDER BY created_at ASC
     `).all().map(fileOperationRow);
   }
 
