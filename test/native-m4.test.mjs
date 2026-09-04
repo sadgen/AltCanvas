@@ -841,13 +841,16 @@ async function testM4FileOps() {
     assert.equal(ops[0].state, 'completed');
 
     // --- 12.2 Same content import: duplicate_content, no second file/document.
+    // [M4 UX upgrade] Re-importing identical content succeeds with 200 reused:
+    // reuses existing document, preserves single instance, no copy in targetDir.
     res = await call(handler, '/canvas/native/source-files/import', {
       method: 'POST', cookie, body: importPayload({ targetDir: '其他', filename: 'again.pdf' })
     });
-    assert.equal(res.statusCode, 409);
-    assert.equal(res.payload.error.code, 'duplicate_content');
+    assert.equal(res.statusCode, 200, 'RES: ' + res.statusCode + ' ' + res.text);
+    assert.equal(res.payload.data.outcome, 'reused');
+    assert.equal(res.payload.data.reusedSourceFile, true);
     assert.equal(res.payload.data.document.id, documentId);
-    assert.equal(fs.existsSync(path.join(rootDir, '其他')), false, 'no copy must be created');
+    assert.equal(fs.existsSync(path.join(rootDir, '其他')), false, 'no copy must be created in targetDir');
 
     // --- 12.3 Target occupied by a different file: filename_conflict, no overwrite.
     pdfByUrl.set('http://pdf-source.test/other.pdf', makePdfBytes('different-treatise'));
@@ -1495,6 +1498,8 @@ async function testM4AuditFixForceNewDedupe() {
 
     // Identical content with forceNew: true is STILL duplicate_content:
     // the SHA-256 rule outranks forceNew and the metadata chain.
+    // [M4 UX upgrade] forceNew with identical SHA-256 succeeds with 200 reused:
+    // reuses existing document, preserves single instance, forceNew cannot create duplicate.
     res = await call(handler, '/canvas/native/source-files/import', {
       method: 'POST', cookie,
       body: payload({
@@ -1504,8 +1509,8 @@ async function testM4AuditFixForceNewDedupe() {
         forceNew: true
       })
     });
-    assert.equal(res.statusCode, 409, res.text);
-    assert.equal(res.payload.error.code, 'duplicate_content');
+    assert.equal(res.statusCode, 200, res.text);
+    assert.equal(res.payload.data.outcome, 'reused');
     assert.equal(res.payload.data.document.id, documentId);
     assert.equal(fs.existsSync(path.join(rootDir, 'force-b.pdf')), false, 'no second copy may be placed');
 
@@ -2456,8 +2461,8 @@ async function testWebImportDefaultArchiving() {
     assert.equal(fileRes.statusCode, 200);
     assert.equal(fileRes.buffer.equals(makePdfBytes('web-doi-pdf')), true);
 
-    // 24.2 Same SHA import (different DOI metadata): reused/duplicate_content,
-    // no second file in the archive directory.
+    // 24.2 Same SHA import (different DOI metadata): 200 reused,
+    // metadata backfilled, no second file in the archive directory.
     res = await call(handler, '/canvas/imports/native', {
       method: 'POST', cookie,
       body: {
@@ -2465,9 +2470,9 @@ async function testWebImportDefaultArchiving() {
         pdfUrl: 'https://doi.org/10.9999/web-doi.pdf'
       }
     });
-    assert.equal(res.statusCode, 409);
-    assert.equal(res.payload.error.code, 'duplicate_content');
-    assert.equal(res.payload.data.document.id, res.payload.data ? res.payload.data.document.id : null, 'sanity');
+    assert.equal(res.statusCode, 200, res.text);
+    assert.equal(res.payload.data.outcome, 'reused');
+    assert.equal(res.payload.data.reusedSourceFile, true);
     assert.equal(fs.readdirSync(path.join(rootDir, '网页导入')).length, 2, 'no second file for identical content (2 files from Case A + Case B)');
 
     // 24.3 Different SHA, same derived filename -> 409 filename_conflict.
@@ -2586,11 +2591,12 @@ async function testBlobOnlyWebImportMigration() {
 
     const auditedCount = store.countBlobOnlyWebImports(actor);
     const auditedList = store.listBlobOnlyWebImportAttachments(actor);
-    assert.equal(auditedCount, 2, 'audit must count exactly the two web imports');
+    // [M4 UX upgrade] All legacy managed_blobs (both web and uploaded) are audited
+    assert.equal(auditedCount, 3, 'audit covers all 3 legacy managed_blobs');
 
     const result = await runBlobOnlyWebImportMigration(store, actor, {});
-    assert.equal(result.report.scanned, 2);
-    assert.equal(result.report.migrated, 2);
+    assert.equal(result.report.scanned, 3);
+    assert.equal(result.report.migrated, 3);
     assert.equal(result.report.conflicts, 0);
     assert.equal(result.report.failed, 0);
 
@@ -2609,8 +2615,9 @@ async function testBlobOnlyWebImportMigration() {
     // Archived under 网页导入/ with derived names.
     assert.equal(fs.existsSync(path.join(rootDir, '网页导入', 'Legacy Web Paper A.pdf')), true);
     assert.equal(fs.existsSync(path.join(rootDir, '网页导入', 'Legacy Web Paper B.pdf')), true);
-    // The uploaded (non-web) blob attachment is untouched.
-    assert.equal(store.getAttachment(actor, uploadKeep.attachmentId).storageKind, 'managed_blob');
+    // The uploaded blob attachment is also successfully migrated to source_file.
+    const uploadDoc = store.getDocument(actor, uploadKeep.document.id);
+    assert.equal(uploadDoc.attachments[0].storageKind, 'source_file');
 
     // Range reads keep working through the unified endpoint.
     const session = createSession({
@@ -2675,9 +2682,143 @@ async function testBlobOnlyWebImportMigration() {
   }
 }
 
+// ============================================================
+// 26. M4 UX Upgrade: Re-importing identical PDF content (same SHA-256)
+//     automatically archives legacy managed_blobs to real root directories,
+//     backfills missing metadata, and idempotently binds new research topics
+//     with 200 OK (no 409 error, no duplicate document, zero duplicate disk file).
+// ============================================================
+async function testReimportAutoArchivingAndBackfill() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-reimp-store-'));
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-reimp-root-'));
+  const store = new CanvasStore(path.join(tempDir, 'canvas.sqlite'));
+  const actor = canvasActorKey('local', 'm4-reimp');
+  const session = createSession({
+    userId: 'm4-reimp-1', subject: 'm4-reimp', authMode: 'local',
+    username: 'reimp', role: 'admin', actorKey: actor
+  });
+  const cookie = `altcanvas_session=${session.id}`;
+  const topic1 = store.createWorkspace(actor, { name: '主题一' });
+  const topic2 = store.createWorkspace(actor, { name: '主题二' });
+
+  const pdfByUrl = new Map();
+  let downloadCounter = 0;
+  const fakeDownloadPdf = async (pdfUrl, tempDirForDownload) => {
+    const bytes = pdfByUrl.get(pdfUrl);
+    if (!bytes) {
+      const err = new Error('not found');
+      err.status = 404;
+      throw err;
+    }
+    downloadCounter += 1;
+    fs.mkdirSync(tempDirForDownload, { recursive: true, mode: 0o700 });
+    const tempFilePath = path.join(tempDirForDownload, `dl-${downloadCounter}.pdf`);
+    fs.writeFileSync(tempFilePath, bytes);
+    return { tempFilePath, sha256: sha256Of(bytes), sizeBytes: bytes.length, mimeType: 'application/pdf' };
+  };
+  const handler = createCanvasHandler(store, { downloadPdfFn: fakeDownloadPdf });
+
+  try {
+    const [root] = store.ensureLibraryRootsFromConfig(actor, [{ absolutePath: rootDir, displayName: '研究文库' }]);
+
+    // 1. Seed a legacy managed_blob document (simulating pre-M4 upload/import)
+    const pdfBytes = makePdfBytes('reimport-test-pdf-content');
+    const sha = sha256Of(pdfBytes);
+    const blobPath = store.resolveBlobPath(sha, '.pdf');
+    fs.mkdirSync(path.dirname(blobPath), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(blobPath, pdfBytes, { mode: 0o600 });
+    const relPath = path.relative(store.getBlobStorageDir(), blobPath);
+    store.upsertBlob({ sha256: sha, relativePath: relPath, sizeBytes: pdfBytes.length, mimeType: 'application/pdf' });
+    const initialDoc = store.createDocument(actor, {
+      title: 'Legacy Managed Doc (No Abstract, No Year)',
+      abstract: ''
+    });
+    const initialAttId = crypto.randomUUID();
+    store.db.prepare(`
+      INSERT INTO attachments
+        (id, document_id, blob_hash, mime_type, original_filename, title, size_bytes, storage_kind, version, created_at, updated_at)
+      VALUES (?, ?, ?, 'application/pdf', 'legacy.pdf', 'Legacy Managed Doc', ?, 'managed_blob', 1, ?, ?)
+    `).run(initialAttId, initialDoc.id, sha, pdfBytes.length, new Date().toISOString(), new Date().toISOString());
+
+    // Precondition: not in original files yet
+    assert.equal(store.listSourceFiles(actor, { rootId: root.id }).length, 0);
+
+    // 2. Re-import the exact same PDF via web import with complete metadata and topic1
+    pdfByUrl.set('https://doi.org/10.8888/reimport.pdf', pdfBytes);
+    const res1 = await call(handler, '/canvas/imports/native', {
+      method: 'POST', cookie,
+      body: {
+        sourceType: 'doi',
+        title: 'Updated Title Should Not Overwrite',
+        abstract: 'Newly resolved abstract for this document',
+        year: 2026,
+        doi: '10.8888/reimport',
+        pdfUrl: 'https://doi.org/10.8888/reimport.pdf',
+        targetWorkspaceId: topic1.id
+      }
+    });
+
+    assert.equal(res1.statusCode, 200, 'Re-importing identical PDF must succeed with 200 OK');
+    assert.equal(res1.payload.data.outcome, 'reused');
+    assert.equal(res1.payload.data.promotedFromBlob, true, 'Legacy blob must be promoted to source_file');
+    assert.equal(res1.payload.data.document.id, initialDoc.id, 'Must reuse the existing document identity');
+
+    // Verify metadata backfill: missing fields filled, existing title preserved
+    const docAfter1 = store.getDocument(actor, initialDoc.id);
+    assert.equal(docAfter1.title, 'Legacy Managed Doc (No Abstract, No Year)', 'Existing title must not be overwritten');
+    assert.equal(docAfter1.abstract, 'Newly resolved abstract for this document', 'Missing abstract must be backfilled');
+    assert.equal(docAfter1.year, 2026, 'Missing year must be backfilled');
+    assert.equal(docAfter1.doi, '10.8888/reimport', 'Missing DOI must be backfilled');
+
+    // Verify disk placement: file now exists in 网页导入/
+    const archivedFilePath = path.join(rootDir, '网页导入', res1.payload.data.sourceFile.filename);
+    assert.equal(fs.existsSync(archivedFilePath), true, 'PDF must now exist in library root directory');
+    assert.equal(fs.readFileSync(archivedFilePath).equals(pdfBytes), true);
+
+    // Verify attachment switched to source_file
+    const attAfter1 = store.getAttachment(actor, initialAttId);
+    assert.equal(attAfter1.storageKind, 'source_file');
+    assert.equal(attAfter1.sourceFileId, res1.payload.data.sourceFile.id);
+
+    // Verify topic1 binding was created
+    const boundTopics1 = store.listNativeLibraryDocuments(actor, { topicId: topic1.id }).documents;
+    assert.ok(boundTopics1.some(d => d.id === initialDoc.id), 'Must be bound to topic1');
+
+    // 3. Re-import yet again with topic2: zero disk copy, joins topic2 cleanly
+    const res2 = await call(handler, '/canvas/imports/native', {
+      method: 'POST', cookie,
+      body: {
+        sourceType: 'doi',
+        title: 'Another Attempt',
+        doi: '10.8888/reimport',
+        pdfUrl: 'https://doi.org/10.8888/reimport.pdf',
+        targetWorkspaceId: topic2.id
+      }
+    });
+
+    assert.equal(res2.statusCode, 200);
+    assert.equal(res2.payload.data.outcome, 'reused');
+    assert.equal(res2.payload.data.reusedSourceFile, true, 'Already in source_file: zero copy reuse');
+
+    // Disk still has exactly one file in 网页导入
+    assert.equal(fs.readdirSync(path.join(rootDir, '网页导入')).length, 1, 'Never duplicates file on disk');
+
+    // Now bound to topic2 as well
+    const boundTopics2 = store.listNativeLibraryDocuments(actor, { topicId: topic2.id }).documents;
+    assert.ok(boundTopics2.some(d => d.id === initialDoc.id), 'Must be bound to topic2');
+
+    console.log('✅ Re-import UX upgrade: legacy blob auto-promoted to real directory, metadata backfilled, multi-topic binding, zero file duplication passed');
+  } finally {
+    try { store.close(); } catch {}
+    fs.rmSync(tempDir, { recursive: true, force: true });
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+}
+
 async function testM4FinalRemediation() {
   await testWebImportDefaultArchiving();
   await testBlobOnlyWebImportMigration();
+  await testReimportAutoArchivingAndBackfill();
 }
 
 try {

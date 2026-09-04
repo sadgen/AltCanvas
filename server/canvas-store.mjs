@@ -5409,12 +5409,97 @@ export class CanvasStore {
     });
   }
 
+  // Backfills missing metadata into a document and idempotently binds topics.
+  // Existing non-null fields on the document are preserved unconditionally.
+  backfillDocumentAndTopics(actorKey, documentId, {
+    doi = null, isbn = null, url = null, abstract = '', year = null, creators = [], topicIds = []
+  } = {}) {
+    const document = this.requireDocument(actorKey, documentId);
+    const updates = {};
+    if (doi && !document.doi) updates.doi = doi;
+    if (isbn && !document.isbn) updates.isbn = isbn;
+    if (url && !document.url) updates.url = url;
+    if (abstract && !document.abstract) updates.abstract = abstract;
+    if (year && !document.year) updates.year = Number(year);
+    const creatorsInput = (Array.isArray(creators) ? creators : []).map(c => ({
+      creatorType: c.creatorType || 'author',
+      firstName: c.firstName || '',
+      lastName: c.lastName || '',
+      name: c.name || ''
+    }));
+    if (creatorsInput.length && (!document.creators || !document.creators.length)) {
+      updates.creators = creatorsInput;
+    }
+    if (Object.keys(updates).length) {
+      this.updateDocument(actorKey, document.id, undefined, updates);
+    }
+    if (Array.isArray(topicIds) && topicIds.length > 0) {
+      this.addDocumentTopics(actorKey, document.id, topicIds, { origin: 'canvas_import' });
+    }
+    return this.getDocument(actorKey, document.id);
+  }
+
   // --- M4 blob-only web-import migration ---
   // Web imports (DOI/arXiv/URL/BibTeX/RIS/TS) that ran before archiving was
   // mandatory left PDF attachments bound to the managed blob store only.
   // This audit finds them: managed-blob PDF attachments whose document came
   // from a web import (external_refs exist or the attachment recorded a
   // source_url) and that are still blob-only.
+  // Promotes an existing managed_blob attachment to a source_file-backed
+  // attachment residing in a real library root. Atomically creates the
+  // source_files row, flips the attachment storage_kind, and decrements the
+  // blob reference count.
+  promoteBlobAttachmentToSourceFile(actorKey, {
+    attachmentId, documentId, rootId, relativePath, filename, sha256, sizeBytes, modifiedAt
+  }) {
+    const timestamp = nowIso();
+    return this.transaction(() => {
+      // Re-read to guard against races
+      const att = this.db.prepare('SELECT * FROM attachments WHERE id = ? AND deleted_at IS NULL').get(attachmentId);
+      if (!att) throw new CanvasNotFoundError('attachment not found');
+      if (att.storage_kind === 'source_file') {
+        return this.getAttachment(actorKey, attachmentId);
+      }
+      // Stale takeover if the path row was vacant on disk
+      this.releaseSourceFilePath(actorKey, rootId, relativePath, 'blob_promotion');
+
+      const sourceFile = this.createSourceFile(actorKey, rootId, {
+        relativePath,
+        filename,
+        sha256,
+        sizeBytes,
+        modifiedAt,
+        status: 'active',
+        documentId,
+        attachmentId,
+        lastSeenAt: timestamp
+      });
+
+      this.db.prepare(`
+        UPDATE attachments SET
+          storage_kind = 'source_file',
+          blob_hash = NULL,
+          source_file_id = ?,
+          original_filename = ?,
+          version = version + 1,
+          updated_at = ?
+        WHERE id = ? AND deleted_at IS NULL
+      `).run(sourceFile.id, filename, timestamp, attachmentId);
+
+      if (att.blob_hash) {
+        this.decrementBlobRef(att.blob_hash);
+      }
+
+      return {
+        attachment: this.getAttachment(actorKey, attachmentId),
+        sourceFile: this.getSourceFile(actorKey, sourceFile.id)
+      };
+    });
+  }
+
+  // Audits all legacy attachments that still reside only in the managed blob
+  // store (storage_kind = 'managed_blob'). Both web imports and direct uploads
+  // from earlier milestones are eligible for one-shot archiving into library roots.
   listBlobOnlyWebImportAttachments(actorKey, { limit = 500 } = {}) {
     return this.db.prepare(`
       SELECT a.id AS attachment_id, a.document_id, a.blob_hash, a.original_filename,
@@ -5423,10 +5508,6 @@ export class CanvasStore {
       JOIN documents d ON d.id = a.document_id AND d.deleted_at IS NULL
       WHERE d.owner_key = ? AND a.deleted_at IS NULL
         AND a.storage_kind = 'managed_blob'
-        AND (
-          a.source_url IS NOT NULL
-          OR EXISTS (SELECT 1 FROM external_refs er WHERE er.document_id = d.id)
-        )
       ORDER BY a.created_at ASC
       LIMIT ?
     `).all(actorKey, Math.max(1, Math.min(5000, limit)));
@@ -5439,10 +5520,6 @@ export class CanvasStore {
       JOIN documents d ON d.id = a.document_id AND d.deleted_at IS NULL
       WHERE d.owner_key = ? AND a.deleted_at IS NULL
         AND a.storage_kind = 'managed_blob'
-        AND (
-          a.source_url IS NOT NULL
-          OR EXISTS (SELECT 1 FROM external_refs er WHERE er.document_id = d.id)
-        )
     `).get(actorKey);
     return row?.c || 0;
   }

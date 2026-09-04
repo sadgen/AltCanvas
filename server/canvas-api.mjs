@@ -1494,35 +1494,109 @@ async function executeNativeImportItem(store, actorKey, normalized, {
     try { if (tempFilePath && fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath); } catch {}
   };
 
-  // Phase 0 (file-target imports only): the SHA-256 content rule outranks the
-  // metadata identity chain AND forceNew — identical content never joins the
-  // library twice, whether held as a managed blob or as a root source file.
-  // forceNew only ever relaxes the fuzzy metadata match, never content dedupe.
+  // Phase 0 (file-target imports only): Content identity check & auto-archiving.
+  // When an identical PDF (same SHA-256) is imported again:
+  //   1. If already archived as a source_file: zero disk copy, backfill missing
+  //      metadata (abstract/creators/year/doi) and bind to new topics cleanly.
+  //   2. If currently a legacy managed_blob: promote the attachment to a real
+  //      source_file in the target directory, backfill metadata and topics.
+  // This satisfies single-instance storage while allowing re-imports to refresh
+  // metadata and organize into research topics without a 409 error.
   if (fileTarget && attachment && tempFilePath) {
-    const blobHolder = store.findDocumentByBlobHash(actorKey, attachment.sha256);
-    if (blobHolder) {
+    const allTopicIds = Array.from(new Set([
+      ...(fileTarget.topicIds || []),
+      ...(targetWorkspaceId ? [targetWorkspaceId] : [])
+    ])).filter(Boolean);
+
+    // Case 1: Already has an enrolled source_file in a real directory
+    const holder = store.findEnrolledSourceFileBySha(actorKey, attachment.sha256);
+    if (holder) {
       cleanupTemp();
+      const updatedDoc = store.backfillDocumentAndTopics(actorKey, holder.documentId, {
+        doi, isbn, url, abstract, year, creators, topicIds: allTopicIds
+      });
       return {
         result: {
-          outcome: 'duplicate_content',
-          match: { strategy: 'sha256', documentId: blobHolder.id },
-          document: blobHolder
+          outcome: 'reused',
+          match: { strategy: 'sha256', documentId: holder.documentId },
+          document: updatedDoc,
+          sourceFile: holder,
+          reusedSourceFile: true
         },
         warning
       };
     }
-    const holder = store.findEnrolledSourceFileBySha(actorKey, attachment.sha256);
-    if (holder) {
+
+    // Case 2: Exists as a legacy managed_blob -> promote to source_file in root directory
+    const blobHolder = store.findDocumentByBlobHash(actorKey, attachment.sha256);
+    if (blobHolder) {
+      const targetFilename = fileTarget.filename || deriveWebImportFilename({
+        download: { filename: downloadDispositionName },
+        pdfUrl,
+        title: blobHolder.title || title,
+        sha256: attachment.sha256
+      });
+      const archiveDir = fileTarget.targetDir || WEB_IMPORT_DEFAULT_DIR;
+      const targetRelativePath = archiveDir ? `${archiveDir}/${targetFilename}` : targetFilename;
+
+      const conflict = await probeTargetPath(store, actorKey, fileTarget.root, targetRelativePath, attachment.sha256);
+      if (conflict && conflict.type === 'filename_conflict') {
+        cleanupTemp();
+        return {
+          result: { outcome: 'filename_conflict', targetPath: targetRelativePath, existingSha256: conflict.sha256 },
+          warning
+        };
+      }
+
+      let placedOnDisk = false;
+      try {
+        if (!conflict) {
+          placeFileIntoRoot(fileTarget.root.absolutePath, targetRelativePath, tempFilePath);
+          placedOnDisk = true;
+        }
+      } catch (placeErr) {
+        cleanupTemp();
+        if (placeErr instanceof FileOpError || placeErr instanceof NativePathError) {
+          return { result: { outcome: placeErr.code, targetPath: targetRelativePath }, warning };
+        }
+        throw placeErr;
+      }
       cleanupTemp();
-      return {
-        result: {
-          outcome: 'duplicate_content',
-          match: { strategy: 'sha256', documentId: holder.documentId },
-          document: store.getDocument(actorKey, holder.documentId),
-          sourceFile: holder
-        },
-        warning
-      };
+
+      const legacyAtt = (blobHolder.attachments || []).find(a => a.blobHash === attachment.sha256) || blobHolder.attachments?.[0];
+      try {
+        const promotion = store.promoteBlobAttachmentToSourceFile(actorKey, {
+          attachmentId: legacyAtt.id,
+          documentId: blobHolder.id,
+          rootId: fileTarget.root.id,
+          relativePath: targetRelativePath,
+          filename: targetFilename,
+          sha256: attachment.sha256,
+          sizeBytes: attachment.sizeBytes,
+          modifiedAt: Math.round(fs.statSync(path.join(fileTarget.root.absolutePath, targetRelativePath)).mtimeMs)
+        });
+
+        const updatedDoc = store.backfillDocumentAndTopics(actorKey, blobHolder.id, {
+          doi, isbn, url, abstract, year, creators, topicIds: allTopicIds
+        });
+
+        return {
+          result: {
+            outcome: 'reused',
+            match: { strategy: 'sha256', documentId: blobHolder.id },
+            document: updatedDoc,
+            sourceFile: promotion.sourceFile,
+            attachment: promotion.attachment,
+            promotedFromBlob: true
+          },
+          warning
+        };
+      } catch (promoteErr) {
+        if (placedOnDisk) {
+          try { safeUnlinkInsideRoot(fileTarget.root.absolutePath, targetRelativePath); } catch {}
+        }
+        throw promoteErr;
+      }
     }
   }
 
@@ -2369,7 +2443,7 @@ export function createCanvasHandler(store, {
         }
         if (sourceFileConflictResponse(result, warning)) return;
 
-        json(res, 201, {
+        json(res, result.outcome === 'reused' ? 200 : 201, {
           data: warning ? { ...result, warning } : result,
           message: result.outcome === 'reused'
             ? '已复用文库中的既有文献，并将 PDF 归档到目标目录'

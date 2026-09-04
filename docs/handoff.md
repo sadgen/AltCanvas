@@ -1674,3 +1674,48 @@ M4 维持 CONDITIONAL PASS——按审计结论，本项补完后进入最后人
 
 - **M4 状态**：保持 **`M4 CONDITIONAL PASS`**，不自行宣布 PASS；
 - 待用户按终审 Prompt 第七节进行最短人工实机验收，由 Agent 复查日志确认无异常后最终关闭。
+
+---
+
+## 2026-09-04 会话（M4 用户体验闭环：解除相同 SHA 再次导入 409 阻断 / 自动归档与元数据回填 / 全覆盖 Blob 归档）
+
+### 一、痛点背景与问题根因
+用户在实机操作中提出关键体验问题：
+1. **文库中已有的历史文献，未在“原始文件”中出现**：
+   - 根因：这 3 篇文献是在 M1–M3 阶段通过本地上传或旧导入进库的，当时系统仅生成内部内容寻址的 `managed_blob`，没有 `source_files` 记录；
+   - 之前的 Blob-only 归档审计仅排除了没有 `source_url` 的条目，导致历史上传的 PDF 无法被一键归档发现。
+2. **对于已导入的文献再次导入会弹 409 红色报错**：
+   - 根因：终审为落实“不产生重复文件”规则，遇到相同 SHA-256 时直接在入口抛出了 `409 duplicate_content`，中断了流程；
+   - 导致用户无法通过再次导入同一文献来“刷新补齐元数据”或“纳入新研究主题”，也无法通过再次导入触发将旧 Blob 提升到真实目录。
+
+### 二、实施与修复（提交哈希待生成）
+
+#### 1. 相同 SHA 再次导入无缝复用与提升（200 OK，解除 409 阻断）
+- **Case 1：已在真实文库目录中的文献（已是 `source_file`）**：
+  - 磁盘文件**零复制**（目录文件数量保持不变）；
+  - **安全元数据回填**（`store.backfillDocumentAndTopics`）：自动补齐新解析出但原文档空缺的摘要、年份、DOI、ISBN、作者列表等字段；已有非空字段严格保护不被覆盖；
+  - **主题幂等关联**：若本次导入指定了新的研究主题，自动加入新主题（多主题使用单份文件）；
+  - 返回 `200 OK`（`outcome: 'reused'`, `reusedSourceFile: true`）。
+- **Case 2：仍在内部存储的文献（当前为 `managed_blob`）**：
+  - **自动排他提升落盘**：将临时下载文件以原子 hard-link 落盘到目标真实目录（默认 `网页导入/`）；
+  - **附件升级**（`store.promoteBlobAttachmentToSourceFile`）：将原附件的 `storage_kind` 切换为 `source_file`，创建 `source_files` 记录，扣减旧 Blob 引用计数；
+  - **元数据回填与新主题关联**；
+  - 返回 `200 OK`（`outcome: 'reused'`, `promotedFromBlob: true`）；
+  - 遇到同名异内容文件时仍安全返回 409 `filename_conflict` 要求改名。
+
+#### 2. 放宽 Blob 归档审计范围
+- `store.listBlobOnlyWebImportAttachments` 与 `store.countBlobOnlyWebImports` 移除 `source_url IS NOT NULL` 限制，**覆盖全库所有处于 `storage_kind = 'managed_blob'` 的历史附件**；
+- 用户当前真实库里的 3 篇文献全部纳入待归档列表；
+- 前端“原始文件”Tab 顶部提醒条现在能准确发现这 3 篇文献，并提供“一键归档”批量挪入 `网页导入/`。
+
+#### 3. 前端交互细节增强
+- 导入成功或复用成功后，若当前处于“原始文件”面板，自动联动触发 `loadSourceFiles()` 刷新目录列表；
+- 相同 SHA 再次导入成功后展示友好 Toast：`✨ 已复用文库中的既有文献，已归档到文库目录并补齐元数据`。
+
+### 三、自动化测试与回归
+- `test/native-m4.test.mjs` 新增测试组 26（`testReimportAutoArchivingAndBackfill`）：
+  - 验证历史 `managed_blob` 再次导入相同 PDF 自动提升为 `source_file`、补齐空缺摘要/年份/DOI、绑定主题一；
+  - 验证同一文献再次导入并指定主题二，磁盘零重复复制，绑定到主题二；
+  - 验证 25.1 审计数量正确识别全部 3 篇并完成迁移。
+- `test/canvas.test.mjs` 适配单篇与批量再次导入相同 PDF 均返回 200 `reused` 的新契约。
+- `npm test`（全部 10 套测试）**100% 通过（exit 0）**；`git diff --check` 通过。

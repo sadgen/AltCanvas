@@ -2928,11 +2928,13 @@ try {
       pdfUrl: 'https://arxiv.org/pdf/2501.99999.pdf'
     }
   });
-  // [M4 final] same SHA-256 web import -> duplicate_content, no second file.
-  assert.equal(samePdfReusedRes.statusCode, 409);
-  assert.equal(samePdfReusedRes.payload.error.code, 'duplicate_content');
+  // [M4 UX upgrade] same SHA-256 re-import now succeeds with 200 reused:
+  // no second file, missing metadata backfilled, document reused cleanly.
+  assert.equal(samePdfReusedRes.statusCode, 200, samePdfReusedRes.text);
+  assert.equal(samePdfReusedRes.payload.data.outcome, 'reused');
   assert.equal(samePdfReusedRes.payload.data.match.strategy, 'sha256');
   assert.equal(samePdfReusedRes.payload.data.document.id, pdfDownloadHttpRes.payload.data.document.id);
+  assert.equal(samePdfReusedRes.payload.data.reusedSourceFile, true);
 
   // 7c. HTTP API: explicit body.pdfUrl download failure must FAIL the request (non-silent)
   const explicitFailHandler = createCanvasHandler(store, {
@@ -3106,7 +3108,7 @@ try {
     // [M4 final] The duplicate lands as a recorded duplicate_content item —
     // a resolved dedupe decision, not a failure.
     assert.equal(batchItem.ok, true);
-    assert.equal(batchItem.outcome, 'duplicate_content', 'same PDF bytes must hit the SHA-256 duplicate gate (never a second file)');
+    assert.equal(batchItem.outcome, 'reused', 'same PDF bytes reuse document and backfill metadata (never a second file)');
     const batchDoc = store.getDocument(m2Actor, batchItem.documentId);
     assert.ok(batchDoc, 'Batch report must reference the matched document');
     assert.ok(batchDoc.attachments.some(a => a.storageKind === 'source_file'),

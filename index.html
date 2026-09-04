@@ -6295,8 +6295,9 @@
           : '已成功导入至 Native 文库！', 'success');
         closeQuickImportModal();
 
-        // Refresh the native library after a successful import.
+        // Refresh the native library and source files after import.
         loadCollectionsAndLibrary();
+        if (typeof loadSourceFiles === 'function') loadSourceFiles().catch(() => {});
       } catch (err) {
         showToast(`导入失败: ${errorMessage(err)}`, 'error');
         btnTopic.disabled = false;
@@ -6409,10 +6410,11 @@
 
         const outcome = result.data?.outcome;
         showToast(outcome === 'reused'
-          ? '已复用文库中的既有文献，并将 PDF 归档到目标目录'
+          ? '已复用文库中的既有文献，已归档到文库目录并补齐元数据'
           : '已解析并归档到文库目录！', 'success');
         closeQuickImportModal();
         loadCollectionsAndLibrary();
+        if (typeof loadSourceFiles === 'function') loadSourceFiles().catch(() => {});
       } catch (err) {
         showToast(`目录归档失败: ${errorMessage(err)}`, 'error');
         resetQuickDirectoryButton();
