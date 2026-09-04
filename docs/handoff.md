@@ -2097,3 +2097,30 @@ M4 维持 CONDITIONAL PASS——按审计结论，本项补完后进入最后人
 - AI 中文名（document_metas.clean_title）只在 AI 主题归类/元数据提取时
   生成，仅作显示层覆盖（文库列表、主题分类、Reader 标题），文档 title 与
   磁盘文件名永不自动改名；manual 来源的元数据不会被 AI 覆盖。
+
+---
+
+## 2026-09-05 会话四（产品规则落地：扫描完成自动触发 AI 刷新元数据，`93b65c7`）
+
+用户重申产品规则：**分类与标题识别都由 AI 做，且在同一次调用中完成——这就是
+"刷新元数据"**。据此把扫描闭环打通：
+
+1. `scanPhaseC` 收集新入册文档 id 进 `report.enrolledDocumentIds`（上限 200，
+   与 classify 端点 documentIds 上限一致）；
+2. `scanLibraryRoot` 完成时把 report 写入 file_operations payload（顺带修复：
+   此前 payload 从未写入 report，前端轮询拿到的计数 toast 一直是兜底文案）；
+3. 前端 `sourceScanFlow`：扫描发现新增 → 自动调用
+   `refreshLibraryMetadataWithAi(enrolledIds)`（按钮进入"⏳ AI 刷新元数据..."），
+   AI 一次性完成 提炼/复用主题 + 分类建议（≥0.7 自动采纳）+ 规范中文名；
+   AI 未配置时优雅降级（提示"暂以文件名作为文库文件名"）；
+4. `libraryAiClassifyFlow`（✨ AI 主题归类按钮）重构为复用同一共享流程。
+
+实测（8089）：放入 arXiv 1810.04805 (BERT) → 扫描 → report 携带
+`enrolledDocumentIds` → AI 自动生成 `ai_classification` 元数据（未知字段按新
+规则留空）→ 自动绑定主题（topic_documents 4→5）→ 文库列表正常显示。
+`npm test` 10 套全绿（exit 0）。
+
+**注意**：AI 命名/分类的输入是文献元数据（文件名、摘要等），不含 PDF 全文；
+文件名语义清晰时 AI 直接沿用。若要"读 PDF 前 1-2 页取名"的更深识别，需在
+刷新流程中接入既有 `/canvas/documents/extract-metadata` 的文本提取链路，
+列为后续增强。
