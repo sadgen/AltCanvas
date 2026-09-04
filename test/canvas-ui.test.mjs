@@ -1883,6 +1883,15 @@ assert.ok(html.includes('openAddToTopicModal(item)'), 'library row clicks must w
 assert.ok(html.includes('btn-confirm-add-to-topic'), 'add-to-topic confirm button must exist');
 assert.ok(!html.includes('可在“收件箱”中先完成 AI 分类'), 'topic-tab empty state must not reference the retired inbox');
 
+// [M4 UX] 扫描 → AI 刷新元数据（分类 + 标题识别同一次调用）自动闭环。
+assert.ok(html.includes('refreshLibraryMetadataWithAi(enrolledIds)'),
+  'a scan with newly enrolled documents must trigger the AI metadata refresh');
+assert.ok(html.includes("AI 刷新元数据"), 'the scan button must surface the metadata-refresh phase');
+assert.ok(html.includes('ai_not_configured') && html.includes('暂以文件名作为文库文件名'),
+  'an unconfigured AI must degrade gracefully after enrollment');
+assert.ok(/async function libraryAiClassifyFlow[\s\S]*?refreshLibraryMetadataWithAi\(null\)/.test(html),
+  'the manual AI button must reuse the shared metadata-refresh flow');
+
 assert.match(devServer, /style-src-attr 'unsafe-inline'/, 'CSP must permit dynamic Canvas geometry styles');
 assert.match(devServer, /script-src 'self'/, 'script CSP must remain restricted');
 

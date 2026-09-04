@@ -2640,6 +2640,24 @@
           }
         }
         await Promise.all([loadSourceFiles(), loadNativeLibrary().catch(() => {})]);
+        // 产品规则：新入册文献的元数据（AI 中文名）与主题归类由 AI 一次性完成。
+        const enrolledIds = payload?.data?.report?.enrolledDocumentIds
+          || (await m4Fetch(`/native/file-operations/${operationId}`).catch(() => null))?.data?.payload?.report?.enrolledDocumentIds
+          || [];
+        if (enrolledIds.length) {
+          if (btn) { btn.textContent = '⏳ AI 刷新元数据...'; }
+          try {
+            const res = await refreshLibraryMetadataWithAi(enrolledIds);
+            if (res.analyzed) {
+              showToast(`已刷新元数据：AI 识别命名 ${res.analyzed} 篇，自动归类 ${res.applied} 条（低置信度可用文献行的「📚 主题」手动归入）`, 'success');
+            }
+            await Promise.all([loadSourceFiles(), loadNativeLibrary().catch(() => {})]);
+            if (userWorkspaces) userWorkspaces = await canvasFetch('/workspaces').catch(() => userWorkspaces);
+          } catch (aiErr) {
+            if (aiErr.code === 'ai_not_configured') showToast(`新增 ${enrolledIds.length} 篇已入册；AI 未配置，暂以文件名作为文库文件名`, 'info');
+            else showToast(`元数据刷新失败: ${errorMessage(aiErr)}`, 'error');
+          }
+        }
       } catch (err) {
         if (err.code === 'library_root_unavailable') showToast('文库根目录当前不可用（离线或无权限），未做任何改动', 'error');
         else showToast(`扫描失败: ${errorMessage(err)}`, 'error');
@@ -2757,36 +2775,45 @@
     }
 
     // M4: 文库级 AI 主题归类（提炼主题体系 + 高置信度建议一键采纳）
+    // 产品规则：分类与标题识别由 AI 在同一次调用中完成（即"刷新元数据"）。
+    // documentIds 为空时分析全库（≤50 篇），否则只刷新指定文献。
+    async function refreshLibraryMetadataWithAi(documentIds = null) {
+      const body = Array.isArray(documentIds) && documentIds.length ? { documentIds } : {};
+      const gen = await m4Fetch('/native/classify/generate-topics', { method: 'POST', body });
+      const data = gen.data || {};
+      const created = (data.createdWorkspaces || []).length;
+      const suggestions = [];
+      const analyzedDocs = Object.keys(data.classifications || {});
+      for (const [documentId, list] of Object.entries(data.classifications || {})) {
+        for (const s of (list || [])) {
+          if (s && typeof s.confidence === 'number' && s.confidence >= 0.7) {
+            suggestions.push({ documentId, workspaceId: s.workspaceId });
+          }
+        }
+      }
+      let applied = 0;
+      if (suggestions.length) {
+        const byWorkspace = new Map();
+        for (const sug of suggestions) {
+          if (!byWorkspace.has(sug.workspaceId)) byWorkspace.set(sug.workspaceId, []);
+          byWorkspace.get(sug.workspaceId).push(sug.documentId);
+        }
+        for (const [workspaceId, ids] of byWorkspace) {
+          const res = await m4Fetch('/native/documents/batch-topics', {
+            method: 'POST', body: { documentIds: ids, topicIds: [workspaceId] }
+          });
+          applied += (res.data || []).filter(r => r.ok).length;
+        }
+      }
+      return { created, applied, analyzed: analyzedDocs.length };
+    }
+
     async function libraryAiClassifyFlow() {
       const btn = document.getElementById('btn-library-ai-classify');
       if (btn) { btn.disabled = true; btn.textContent = '⏳ AI 分析中...'; }
       try {
-        const gen = await m4Fetch('/native/classify/generate-topics', { method: 'POST', body: {} });
-        const data = gen.data || {};
-        const created = (data.createdWorkspaces || []).length;
-        const suggestions = [];
-        for (const [documentId, list] of Object.entries(data.classifications || {})) {
-          for (const s of (list || [])) {
-            if (s && typeof s.confidence === 'number' && s.confidence >= 0.7) {
-              suggestions.push({ documentId, workspaceId: s.workspaceId });
-            }
-          }
-        }
-        let applied = 0;
-        if (suggestions.length) {
-          const byWorkspace = new Map();
-          for (const sug of suggestions) {
-            if (!byWorkspace.has(sug.workspaceId)) byWorkspace.set(sug.workspaceId, []);
-            byWorkspace.get(sug.workspaceId).push(sug.documentId);
-          }
-          for (const [workspaceId, documentIds] of byWorkspace) {
-            const res = await m4Fetch('/native/documents/batch-topics', {
-              method: 'POST', body: { documentIds, topicIds: [workspaceId] }
-            });
-            applied += (res.data || []).filter(r => r.ok).length;
-          }
-        }
-        showToast(`AI 完成：提炼 ${created} 个新主题，采纳 ${applied} 条高置信度归类建议`, 'success');
+        const { created, applied, analyzed } = await refreshLibraryMetadataWithAi(null);
+        showToast(`AI 完成：分析 ${analyzed} 篇（已刷新中文名等元数据），提炼 ${created} 个新主题，采纳 ${applied} 条归类建议`, 'success');
         if (userWorkspaces) {
           userWorkspaces = await canvasFetch('/workspaces').catch(() => userWorkspaces);
         }

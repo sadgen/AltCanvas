@@ -4078,6 +4078,8 @@ async function testM4NativeListCarriesAttachments() {
     const { documents } = store.listNativeLibraryDocuments(actor, { limit: 10 });
     const doc = documents.find(d => d.title === 'List Fixture');
     assert.ok(doc, 'the enrolled document must be listed');
+    assert.deepEqual(scan.report.enrolledDocumentIds, [doc.id],
+      'the scan report must expose newly enrolled document ids for the AI metadata refresh');
     assert.equal(Array.isArray(doc.attachments), true, 'list rows must carry attachments');
     assert.equal(doc.attachments.length, 1, 'the enrolled PDF attachment must ride along');
     assert.equal(doc.attachments[0].mimeType, 'application/pdf');

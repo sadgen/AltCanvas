@@ -553,6 +553,10 @@ export async function scanLibraryRoot(store, actorKey, rootId, {
   try {
     const report = await performScan(store, actorKey, root, { hashFn, batchDelayMs, scanSignal, entryIteratorFn });
     store.completeFileOperation(operation.id);
+    // The client polls this operation while the scan runs and reads the report
+    // from its payload; persist it so counters and enrolled ids survive there.
+    store.db.prepare('UPDATE file_operations SET payload_json = ?, updated_at = ? WHERE id = ?')
+      .run(JSON.stringify({ rootId, report }), new Date().toISOString(), operation.id);
     store.setLibraryRootScanState(actorKey, rootId, { status: 'ok', at: new Date().toISOString() });
     return { operationId: operation.id, state: 'completed', alreadyRunning: false, report };
   } catch (err) {
@@ -589,7 +593,8 @@ async function performScan(store, actorKey, root, { hashFn, batchDelayMs, scanSi
     missing: 0,
     restored: 0,
     changed: 0,
-    unreadable: 0
+    unreadable: 0,
+    enrolledDocumentIds: []
   };
 
   try {
@@ -783,7 +788,7 @@ async function scanPhaseC(store, actorKey, root, scanId, report, { batchDelayMs,
           report.duplicates += 1;
           continue;
         }
-        enrollScannedFile(store, actorKey, rootId, {
+        const enrolled = enrollScannedFile(store, actorKey, rootId, {
           relativePath: st.relative_path,
           filename: st.filename,
           sha256: st.sha256,
@@ -791,6 +796,13 @@ async function scanPhaseC(store, actorKey, root, scanId, report, { batchDelayMs,
           mtimeMs: st.modified_at
         });
         report.newDocuments += 1;
+        // Per product rule the AI owns classification + title recognition in a
+        // single pass ("刷新元数据"); the scan hands freshly enrolled ids to the
+        // client so it can trigger that pass automatically. Cap aligns with the
+        // classify endpoint's documentIds limit.
+        if (report.enrolledDocumentIds.length < 200) {
+          report.enrolledDocumentIds.push(enrolled.document.id);
+        }
       }
     });
     afterPath = staged[staged.length - 1].relative_path;
