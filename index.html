@@ -2797,7 +2797,7 @@
     const AI_REFRESH_TEXT_CHARS = 8000;
     // 网关（nginx）默认 60s 读超时会切断长请求：按小批分次调用，
     // 每批独立完成「正文提取 → 分类/取名 → 采纳」，任何一批都远小于 60s。
-    const AI_REFRESH_BATCH_SIZE = 5;
+    const AI_REFRESH_BATCH_SIZE = 10;
 
     async function extractAttachmentPdfText(attachmentId, { maxPages = 3, maxChars = AI_REFRESH_TEXT_CHARS } = {}) {
       if (!attachmentId) return '';

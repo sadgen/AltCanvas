@@ -1899,7 +1899,7 @@ assert.ok(html.includes('extractAttachmentPdfText('),
 assert.ok(html.includes('documentTexts'),
   'classification must receive the client-extracted document texts');
 // 网关（nginx 60s）超时防御：刷新必须分批，任何单请求都远小于 60s。
-assert.ok(html.includes('AI_REFRESH_BATCH_SIZE = 5'),
+assert.ok(html.includes('AI_REFRESH_BATCH_SIZE = 10'),
   'the metadata refresh must run in small batches under the gateway timeout');
 assert.ok(html.includes("'/native/documents/classify'"),
   'follow-up batches must reuse the classify-only endpoint instead of re-minting topics');
