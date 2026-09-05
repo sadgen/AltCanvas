@@ -1293,7 +1293,7 @@ async function runAiTopicGeneration({ store, actorKey, targetEntries, maxTopics 
     '      "name": "全球宏观与市场策略",',
     '      "researchQuestion": "全球宏观经济波动、利率汇率周期及大类资产价格形成机制",',
     '      "inclusionRules": "宏观经济展望、央行货币政策、流动性与大类资产配置研报",',
-    '      "exclusionRules": "纯个股微观财报"'
+    '      "exclusionRules": "纯个股微观财报"',
     '    }',
     '  ],',
     '  "classifications": {',
