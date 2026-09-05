@@ -239,7 +239,6 @@
       <div class="p-2 border-b border-slate-800">
         <div class="flex gap-1 p-1 rounded-lg bg-slate-900/80" role="tablist" aria-label="文献导航方式">
           <button id="btn-library-view-all" type="button" role="tab" aria-selected="true" aria-controls="library-all-panel" class="library-view-tab flex-1 px-2.5 py-1.5 rounded bg-blue-600 text-white text-xs font-medium transition">文库</button>
-          <button id="btn-library-view-topics" type="button" role="tab" aria-selected="false" aria-controls="library-topics-panel" class="library-view-tab flex-1 px-2.5 py-1.5 rounded text-slate-400 hover:text-slate-200 text-xs font-medium transition">主题分类</button>
           <button id="btn-library-view-files" type="button" role="tab" aria-selected="false" aria-controls="library-files-panel" class="library-view-tab flex-1 px-2.5 py-1.5 rounded text-slate-400 hover:text-slate-200 text-xs font-medium transition">原始文件</button>
         </div>
       </div>
@@ -265,29 +264,32 @@
           <button id="btn-library-ai-classify" type="button" class="px-2.5 py-1 rounded bg-purple-950/70 text-purple-300 border border-purple-800/60 hover:bg-purple-900/70 whitespace-nowrap transition" title="AI 提炼主题体系并推荐归类（可直接采纳）">✨ AI 主题归类</button>
         </div>
 
+        <!-- 主题筛选（合并原「主题分类」Tab）：选择主题即只显示该主题下可阅读的 PDF -->
+        <div class="flex items-center gap-1.5">
+          <select id="select-library-topic" class="flex-1 min-w-0 bg-slate-900 text-slate-200 border border-slate-700 rounded px-2 py-1.5 text-xs focus:outline-none focus:border-indigo-500" title="按主题筛选：只显示该主题下可阅读的 PDF；切换主题会同步画板">
+            <option value="">全部主题</option>
+          </select>
+          <button id="btn-manage-library-topic" type="button" class="text-[11px] text-slate-400 hover:text-indigo-300 whitespace-nowrap">管理</button>
         </div>
-      </div>
 
-      <div id="library-topics-panel" class="hidden p-3 border-b border-slate-800 space-y-2">
-        <div class="flex items-center justify-between gap-2">
-          <label for="select-library-topic" class="text-xs font-semibold text-indigo-300 whitespace-nowrap">选择主题</label>
-          <button id="btn-manage-library-topic" type="button" class="text-[11px] text-slate-400 hover:text-indigo-300">管理</button>
+        <!-- 排序 -->
+        <div class="flex items-center gap-1.5">
+          <label for="select-library-sort" class="text-[10px] text-slate-500 whitespace-nowrap">排序</label>
+          <select id="select-library-sort" class="flex-1 min-w-0 bg-slate-900 text-slate-400 border border-slate-800 rounded px-2 py-1 text-[11px] focus:outline-none focus:border-indigo-500">
+            <option value="recent">最近更新（新→旧）</option>
+            <option value="oldest">时间（旧→新）</option>
+            <option value="title">名称 A→Z</option>
+            <option value="title-desc">名称 Z→A</option>
+          </select>
+          <span id="topic-library-count" class="text-[10px] text-slate-500 whitespace-nowrap"></span>
         </div>
-        <select id="select-library-topic" class="w-full bg-slate-900 text-slate-200 border border-slate-700 rounded px-2 py-1.5 text-xs focus:outline-none focus:border-indigo-500" title="只显示所选主题下含 PDF 的文献">
-          <option value="">加载主题中...</option>
-        </select>
-        <div class="flex items-center justify-between text-[10px] text-slate-500">
-          <span>仅显示该主题下可阅读的 PDF</span>
-          <span id="topic-library-count">0 篇</span>
+
         </div>
       </div>
 
       <!-- Items List -->
       <div id="items-container" class="flex-1 overflow-y-auto custom-scrollbar p-2 space-y-1">
         <div class="text-center text-slate-500 py-12 text-xs">正在加载文库...</div>
-      </div>
-      <div id="topic-library-items" class="hidden flex-1 overflow-y-auto custom-scrollbar p-2 space-y-1">
-        <div class="text-center text-slate-500 py-12 text-xs">请选择研究主题</div>
       </div>
 
       <!-- M4: 原始文件（真实磁盘目录）视图 -->
@@ -1076,6 +1078,9 @@
 
     let allItems = [];
     let currentLibraryView = 'all';
+    // 文库列表的主题筛选（'' = 全部主题）。独立于画板当前主题，避免
+    // renderTopicWorkspaceSelector 重建下拉时覆盖用户的筛选选择。
+    let libraryTopicFilter = '';
     let topicLibraryLoadToken = 0;
     let currentItem = null;
     let currentAttachment = null;
@@ -1830,7 +1835,6 @@
       switchTopicWorkspace(e.target.value);
     });
     document.getElementById('btn-library-view-all')?.addEventListener('click', () => switchLibraryView('all'));
-    document.getElementById('btn-library-view-topics')?.addEventListener('click', () => switchLibraryView('topics'));
     document.getElementById('btn-library-view-files')?.addEventListener('click', () => switchLibraryView('files'));
     document.getElementById('source-files-root-select')?.addEventListener('change', event => {
       sourceFilesState.rootId = event.target.value || null;
@@ -1843,15 +1847,27 @@
       loadSourceFiles(idx > 0 ? sourceFilesState.path.slice(0, idx) : '');
     });
     document.querySelectorAll('.lib-filter-chip').forEach(chip => {
-      chip.addEventListener('click', () => applyLibraryFilter(chip.dataset.libFilter).catch(err => {
-        showToast(`文库筛选失败: ${errorMessage(err)}`, 'error');
-      }));
+      chip.addEventListener('click', () => {
+        // 筛选 chips 与主题筛选互斥：点 chip 即退出主题筛选模式。
+        libraryTopicFilter = '';
+        const topicSelect = document.getElementById('select-library-topic');
+        if (topicSelect) topicSelect.value = '';
+        applyLibraryFilter(chip.dataset.libFilter).catch(err => {
+          showToast(`文库筛选失败: ${errorMessage(err)}`, 'error');
+        });
+      });
+    });
+    document.getElementById('select-library-sort')?.addEventListener('change', () => {
+      refreshCurrentLibraryView().catch(err => {
+        showToast(`排序失败: ${errorMessage(err)}`, 'error');
+      });
     });
     document.getElementById('btn-library-ai-classify')?.addEventListener('click', () => libraryAiClassifyFlow());
     document.getElementById('select-library-topic')?.addEventListener('change', async event => {
-      const workspaceId = event.target.value;
+      libraryTopicFilter = event.target.value;
+      const workspaceId = libraryTopicFilter;
       if (workspaceId && workspaceId !== canvasWorkspace?.id) await switchTopicWorkspace(workspaceId);
-      else await loadTopicLibraryDocuments();
+      else await refreshCurrentLibraryView();
     });
     document.getElementById('btn-manage-library-topic')?.addEventListener('click', () => openTopicSettingsModal('docs'));
     document.getElementById('btn-close-add-to-topic')?.addEventListener('click', closeAddToTopicModal);
@@ -1875,8 +1891,7 @@
         closeAddToTopicModal();
         showToast('已加入研究主题', 'success');
         await loadNativeLibrary().catch(() => {});
-        if (currentLibraryView === 'topics') await loadTopicLibraryDocuments().catch(() => {});
-        else await applyLibraryFilter(libraryFilterState).catch(() => {});
+        await refreshCurrentLibraryView().catch(() => {});
       } catch (err) {
         errEl.textContent = errorMessage(err);
         errEl.classList.remove('hidden');
@@ -1920,6 +1935,8 @@
         libraryType: 'native',
         libraryId: 'local',
         isNative: true,
+        createdAt: doc.createdAt || doc.created_at || '',
+        updatedAt: doc.updatedAt || doc.updated_at || '',
         sourceFile: doc.sourceFile ? {
           id: doc.sourceFile.id,
           status: doc.sourceFile.status,
@@ -2078,6 +2095,10 @@
 
       allItems = nativeDocs.map(nativeDocumentToLibraryItem).filter(Boolean);
       renderItems();
+      // 主题筛选与画板主题联动：若筛选了主题（非"全部主题"），列表切到该主题的 PDF 视图。
+      if (libraryTopicFilter) {
+        void loadTopicLibraryDocuments().catch(() => {});
+      }
     }
 
     async function loadCollectionsAndLibrary() {
@@ -2107,7 +2128,7 @@
 
     function renderItems() {
       const container = document.getElementById('items-container');
-      const filtered = allItems;
+      const filtered = sortLibraryItems(allItems);
 
       container.innerHTML = '';
       if (filtered.length === 0) {
@@ -2924,7 +2945,7 @@
         if (userWorkspaces) {
           userWorkspaces = await canvasFetch('/workspaces').catch(() => userWorkspaces);
         }
-        await applyLibraryFilter(libraryFilterState === 'all' ? 'all' : libraryFilterState).catch(() => {});
+        await refreshCurrentLibraryView().catch(() => {});
       } catch (err) {
         if (err.code === 'ai_not_configured') showToast('AI 模型尚未配置', 'error');
         else showToast(`AI 主题归类失败: ${errorMessage(err)}`, 'error');
@@ -2968,24 +2989,55 @@
     // ============================================================
 
     function switchLibraryView(view) {
-      currentLibraryView = view === 'topics' ? 'topics' : (view === 'files' ? 'files' : 'all');
-      const showingTopics = currentLibraryView === 'topics';
+      currentLibraryView = view === 'files' ? 'files' : 'all';
       const showingFiles = currentLibraryView === 'files';
-      document.getElementById('library-all-panel').classList.toggle('hidden', showingTopics || showingFiles);
-      document.getElementById('items-container').classList.toggle('hidden', showingTopics || showingFiles);
-      document.getElementById('library-topics-panel').classList.toggle('hidden', !showingTopics);
-      document.getElementById('topic-library-items').classList.toggle('hidden', !showingTopics);
+      document.getElementById('library-all-panel').classList.toggle('hidden', showingFiles);
+      document.getElementById('items-container').classList.toggle('hidden', showingFiles);
       switchSourceFilesView(showingFiles);
       document.querySelectorAll('.library-view-tab').forEach(button => {
-        const selected = button.id === (showingFiles ? 'btn-library-view-files'
-          : showingTopics ? 'btn-library-view-topics' : 'btn-library-view-all');
+        const selected = button.id === (showingFiles ? 'btn-library-view-files' : 'btn-library-view-all');
         button.setAttribute('aria-selected', String(selected));
         button.className = `library-view-tab flex-1 px-2.5 py-1.5 rounded text-xs font-medium transition ${selected
-          ? (showingFiles ? 'bg-emerald-600 text-white' : showingTopics ? 'bg-indigo-600 text-white' : 'bg-blue-600 text-white')
+          ? (showingFiles ? 'bg-emerald-600 text-white' : 'bg-blue-600 text-white')
           : 'text-slate-400 hover:text-slate-200'}`;
       });
       if (showingFiles) void openLibraryFilesView();
-      else if (showingTopics) void loadTopicLibraryDocuments();
+      else void refreshCurrentLibraryView();
+    }
+
+    // 文库与主题分类合并后的统一刷新入口：主题下拉有值 → 主题 PDF 视图；
+    // 否则按筛选 chips 渲染全库。
+    function refreshCurrentLibraryView() {
+      if (libraryTopicFilter) return loadTopicLibraryDocuments();
+      return applyLibraryFilter(libraryFilterState === 'all' ? 'all' : libraryFilterState);
+    }
+
+    // 文库列表排序（当前排序模式下对 native 条目排序）。
+    function libraryItemDisplayTitle(item) {
+      const libType = item.libraryType || (item.isNative ? 'native' : currentDocumentLibrary?.libraryType) || 'user';
+      const libId = item.libraryId || (item.isNative ? 'local' : currentDocumentLibrary?.libraryId) || config.userId;
+      const meta = documentMetas.get(docMetaKey(libType, libId, item.key));
+      return String(meta?.cleanTitle || item.data?.title || item.data?.filename || item.key || '').toLowerCase();
+    }
+
+    function libraryItemTimestamp(item, kind) {
+      const source = kind === 'created' ? (item.createdAt || item.data?.createdAt) : (item.updatedAt || item.data?.updatedAt);
+      return String(source || '');
+    }
+
+    function sortLibraryItems(items) {
+      const mode = document.getElementById('select-library-sort')?.value || 'recent';
+      const sorted = [...items];
+      if (mode === 'title') {
+        sorted.sort((a, b) => libraryItemDisplayTitle(a).localeCompare(libraryItemDisplayTitle(b), 'zh-Hans-CN'));
+      } else if (mode === 'title-desc') {
+        sorted.sort((a, b) => libraryItemDisplayTitle(b).localeCompare(libraryItemDisplayTitle(a), 'zh-Hans-CN'));
+      } else if (mode === 'oldest') {
+        sorted.sort((a, b) => libraryItemTimestamp(a, 'created').localeCompare(libraryItemTimestamp(b, 'created')));
+      } else {
+        sorted.sort((a, b) => libraryItemTimestamp(b, 'updated').localeCompare(libraryItemTimestamp(a, 'updated')));
+      }
+      return sorted;
     }
 
     async function resolveTopicLibraryPdf(doc) {
@@ -3021,24 +3073,29 @@
     }
 
     async function loadTopicLibraryDocuments() {
-      const container = document.getElementById('topic-library-items');
+      const container = document.getElementById('items-container');
       const count = document.getElementById('topic-library-count');
       if (!container || !canvasWorkspace) return;
       const loadToken = ++topicLibraryLoadToken;
       container.innerHTML = '<div class="text-center text-slate-500 py-12 text-xs animate-pulse">正在筛选主题 PDF…</div>';
-      count.textContent = '加载中';
+      if (count) count.textContent = '加载中';
       try {
         const docs = await canvasFetch(`/workspaces/${canvasWorkspace.id}/documents`);
         const resolved = (await Promise.all(docs.map(doc => resolveTopicLibraryPdf(doc).catch(() => null)))).filter(Boolean);
         if (loadToken !== topicLibraryLoadToken) return;
-        count.textContent = `${resolved.length} 篇`;
+        if (count) count.textContent = `${resolved.length} 篇`;
         container.replaceChildren();
         if (!resolved.length) {
-          container.innerHTML = '<div class="text-center text-slate-500 py-12 px-3 text-xs leading-relaxed">该主题下暂无可阅读的 PDF。<br>可在文库列表将文献归入本主题，或用「✨ AI 主题归类」批量采纳。</div>';
+          container.innerHTML = '<div class="text-center text-slate-500 py-12 px-3 text-xs leading-relaxed">该主题下暂无可阅读的 PDF。<br>可在文库列表将文献归入本主题（行内「📚 主题」），或用「✨ AI 主题归类」批量采纳。</div>';
           return;
         }
 
-        for (const { doc, item, attachment } of resolved) {
+        // 与文库列表共用同一排序模式（对解析出的 item 排序）。
+        const sortedResolved = sortLibraryItems(resolved.map(r => r.item))
+          .map(item => resolved.find(r => r.item === item))
+          .filter(Boolean);
+
+        for (const { doc, item, attachment } of sortedResolved) {
           const docLib = normalizeLibraryContext(doc);
           const meta = documentMetas.get(docMetaKey(docLib.libraryType, docLib.libraryId, doc.itemKey));
           const rawTitle = item.data?.title || item.data?.filename || `文献 #${doc.itemKey}`;
@@ -4176,11 +4233,22 @@
         const select = document.getElementById(selectId);
         if (!select) continue;
         select.replaceChildren();
+        if (selectId === 'select-library-topic') {
+          // 文库筛选保留"全部主题"空选项，选中态跟随 libraryTopicFilter
+          //（而不是画板主题），否则用户的筛选会被重建覆盖。
+          const allOption = document.createElement('option');
+          allOption.value = '';
+          allOption.textContent = '全部主题';
+          select.appendChild(allOption);
+        }
         for (const ws of userWorkspaces) {
           const option = document.createElement('option');
           option.value = ws.id;
           option.textContent = ws.name;
-          if (ws.id === currentId) option.selected = true;
+          const isSelected = selectId === 'select-library-topic'
+            ? ws.id === libraryTopicFilter
+            : ws.id === currentId;
+          if (isSelected) option.selected = true;
           select.appendChild(option);
         }
       }
@@ -4206,7 +4274,7 @@
 
         await loadCanvasSnapshot();
         renderTopicWorkspaceSelector(workspaceId);
-        if (currentLibraryView === 'topics') await loadTopicLibraryDocuments();
+        if (currentLibraryView !== 'files') await refreshCurrentLibraryView();
         showToast(`已切换至主题「${canvasWorkspace.name}」`, 'info');
       } catch (err) {
         reportApplicationError('topics.switch', err);

@@ -1905,6 +1905,17 @@ assert.ok(html.includes("'/native/documents/classify'"),
   'follow-up batches must reuse the classify-only endpoint instead of re-minting topics');
 assert.ok(html.includes('批失败'),
   'partial batch failure must be surfaced instead of a fake success');
+// [M4 UX] 文库与主题分类合并为一个 Tab：主题筛选内联到文库面板，
+// 排序控件（时间/名称）作用于文库列表与主题视图。
+assert.ok(!html.includes('btn-library-view-topics'), 'the separate 主题分类 tab must be merged away');
+assert.ok(!html.includes('library-topics-panel') && !html.includes('topic-library-items'),
+  'removed topic-tab panels must not linger in the DOM');
+assert.ok(html.includes('let libraryTopicFilter'), 'the topic filter must keep its own selection state');
+assert.ok(html.includes("allOption.textContent = '全部主题'"), 'the topic filter must offer an all-topics empty state');
+assert.ok(html.includes('id="select-library-sort"'), 'the library must expose a sort control');
+assert.ok(html.includes('function sortLibraryItems'), 'library items must be sortable');
+assert.ok(html.includes('libraryItemTimestamp'), 'sorting must support timestamp modes');
+assert.ok(html.includes('zh-Hans-CN'), 'title sorting must use Chinese-aware collation');
 
 assert.match(devServer, /style-src-attr 'unsafe-inline'/, 'CSP must permit dynamic Canvas geometry styles');
 assert.match(devServer, /script-src 'self'/, 'script CSP must remain restricted');
