@@ -1898,6 +1898,13 @@ assert.ok(html.includes('extractAttachmentPdfText('),
   'the refresh flow must extract real page text per document');
 assert.ok(html.includes('documentTexts'),
   'classification must receive the client-extracted document texts');
+// 网关（nginx 60s）超时防御：刷新必须分批，任何单请求都远小于 60s。
+assert.ok(html.includes('AI_REFRESH_BATCH_SIZE = 5'),
+  'the metadata refresh must run in small batches under the gateway timeout');
+assert.ok(html.includes("'/native/documents/classify'"),
+  'follow-up batches must reuse the classify-only endpoint instead of re-minting topics');
+assert.ok(html.includes('批失败'),
+  'partial batch failure must be surfaced instead of a fake success');
 
 assert.match(devServer, /style-src-attr 'unsafe-inline'/, 'CSP must permit dynamic Canvas geometry styles');
 assert.match(devServer, /script-src 'self'/, 'script CSP must remain restricted');

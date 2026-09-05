@@ -2645,11 +2645,14 @@
           || (await m4Fetch(`/native/file-operations/${operationId}`).catch(() => null))?.data?.payload?.report?.enrolledDocumentIds
           || [];
         if (enrolledIds.length) {
-          if (btn) { btn.textContent = '⏳ AI 刷新元数据...'; }
           try {
-            const res = await refreshLibraryMetadataWithAi(enrolledIds);
+            const res = await refreshLibraryMetadataWithAi(enrolledIds, { onProgress: t => { if (btn) btn.textContent = t; } });
             if (res.analyzed) {
-              showToast(`已刷新元数据：AI 识别命名 ${res.analyzed} 篇，自动归类 ${res.applied} 条（低置信度可用文献行的「📚 主题」手动归入）`, 'success');
+              if (res.failedBatches) {
+                showToast(`元数据部分刷新：${res.failedBatches} 批失败（网关超时可重试），成功批次已生效`, 'error');
+              } else {
+                showToast(`已刷新元数据：AI 识别命名 ${res.analyzed} 篇，自动归类 ${res.applied} 条（低置信度可用文献行的「📚 主题」手动归入）`, 'success');
+              }
             }
             await Promise.all([loadSourceFiles(), loadNativeLibrary().catch(() => {})]);
             if (userWorkspaces) userWorkspaces = await canvasFetch('/workspaces').catch(() => userWorkspaces);
@@ -2792,6 +2795,9 @@
 
     const AI_REFRESH_TEXT_MAX_DOCS = 25;
     const AI_REFRESH_TEXT_CHARS = 8000;
+    // 网关（nginx）默认 60s 读超时会切断长请求：按小批分次调用，
+    // 每批独立完成「正文提取 → 分类/取名 → 采纳」，任何一批都远小于 60s。
+    const AI_REFRESH_BATCH_SIZE = 5;
 
     async function extractAttachmentPdfText(attachmentId, { maxPages = 3, maxChars = AI_REFRESH_TEXT_CHARS } = {}) {
       if (!attachmentId) return '';
@@ -2821,7 +2827,7 @@
       }
     }
 
-    async function refreshLibraryMetadataWithAi(documentIds = null) {
+    async function refreshLibraryMetadataWithAi(documentIds = null, { onProgress = null } = {}) {
       // Resolve the target documents (native items carry the attachment children
       // needed for real-content extraction). Aligned with the server-side
       // analyze cap of 50 documents.
@@ -2833,60 +2839,88 @@
       }
       targets = targets.slice(0, 50);
 
-      // Extract real PDF content for as many documents as the request budget
-      // allows; the rest fall back to metadata (and the AI is told so).
+      // Pre-extract real PDF content per document (budget-capped).
       const texts = {};
       let extracted = 0;
-      const btnScan = document.getElementById('btn-source-rescan');
-      const btnClassify = document.getElementById('btn-library-ai-classify');
       for (const item of targets) {
         if (extracted >= AI_REFRESH_TEXT_MAX_DOCS) break;
         const attachment = (item.children || []).find(c => c.data?.contentType === 'application/pdf');
         if (!attachment) continue;
         extracted += 1;
         const progressText = `⏳ 读取正文 ${extracted}...`;
-        if (btnScan) btnScan.textContent = progressText;
-        if (btnClassify) btnClassify.textContent = progressText;
+        if (onProgress) onProgress(progressText);
         texts[item.key] = await extractAttachmentPdfText(attachment.key || attachment.data?.key);
       }
 
-      const body = { documentIds: targets.map(t => t.key) };
-      if (Object.keys(texts).length) body.documentTexts = texts;
-      const gen = await m4Fetch('/native/classify/generate-topics', { method: 'POST', body });
-      const data = gen.data || {};
-      const created = (data.createdWorkspaces || []).length;
-      const suggestions = [];
-      const analyzedDocs = Object.keys(data.classifications || {});
-      for (const [documentId, list] of Object.entries(data.classifications || {})) {
-        for (const s of (list || [])) {
-          if (s && typeof s.confidence === 'number' && s.confidence >= 0.7) {
-            suggestions.push({ documentId, workspaceId: s.workspaceId });
+      // Batched execution: every request stays well under gateway timeouts.
+      // Batch 1 may mint the topic taxonomy (generate-topics); later batches
+      // only classify + name against the existing topics (documents/classify).
+      const totals = { created: 0, applied: 0, analyzed: 0, extracted: Object.keys(texts).length, batches: 0, failedBatches: 0 };
+      const batches = [];
+      for (let i = 0; i < targets.length; i += AI_REFRESH_BATCH_SIZE) {
+        batches.push(targets.slice(i, i + AI_REFRESH_BATCH_SIZE));
+      }
+      if (!batches.length) return totals;
+
+      let lastError = null;
+      for (let b = 0; b < batches.length; b++) {
+        const batch = batches[b];
+        if (onProgress) onProgress(`⏳ AI 分析第 ${b + 1}/${batches.length} 批...`);
+        const documentIds = batch.map(t => t.key);
+        const batchTexts = {};
+        for (const id of documentIds) {
+          if (texts[id]) batchTexts[id] = texts[id];
+        }
+        const endpoint = b === 0 ? '/native/classify/generate-topics' : '/native/documents/classify';
+        try {
+          const gen = await m4Fetch(endpoint, { method: 'POST', body: { documentIds, documentTexts: batchTexts } });
+          const data = gen.data || {};
+          totals.created += (data.createdWorkspaces || []).length;
+          totals.batches += 1;
+          const suggestions = [];
+          for (const [documentId, list] of Object.entries(data.classifications || {})) {
+            totals.analyzed += 1;
+            for (const s of (list || [])) {
+              if (s && typeof s.confidence === 'number' && s.confidence >= 0.7) {
+                suggestions.push({ documentId, workspaceId: s.workspaceId });
+              }
+            }
           }
+          if (suggestions.length) {
+            const byWorkspace = new Map();
+            for (const sug of suggestions) {
+              if (!byWorkspace.has(sug.workspaceId)) byWorkspace.set(sug.workspaceId, []);
+              byWorkspace.get(sug.workspaceId).push(sug.documentId);
+            }
+            for (const [workspaceId, ids] of byWorkspace) {
+              const res = await m4Fetch('/native/documents/batch-topics', {
+                method: 'POST', body: { documentIds: ids, topicIds: [workspaceId] }
+              });
+              totals.applied += (res.data || []).filter(r => r.ok).length;
+            }
+          }
+        } catch (err) {
+          // 一批失败不拖垮整体：已完成批次的命名与归类都已生效。
+          if (err.code === 'ai_not_configured') throw err;
+          totals.failedBatches += 1;
+          lastError = err;
         }
       }
-      let applied = 0;
-      if (suggestions.length) {
-        const byWorkspace = new Map();
-        for (const sug of suggestions) {
-          if (!byWorkspace.has(sug.workspaceId)) byWorkspace.set(sug.workspaceId, []);
-          byWorkspace.get(sug.workspaceId).push(sug.documentId);
-        }
-        for (const [workspaceId, ids] of byWorkspace) {
-          const res = await m4Fetch('/native/documents/batch-topics', {
-            method: 'POST', body: { documentIds: ids, topicIds: [workspaceId] }
-          });
-          applied += (res.data || []).filter(r => r.ok).length;
-        }
-      }
-      return { created, applied, analyzed: analyzedDocs.length, extracted: Object.keys(texts).length };
+      if (lastError && totals.batches === 0) throw lastError;
+      if (lastError) totals.error = lastError.message;
+      return totals;
     }
 
     async function libraryAiClassifyFlow() {
       const btn = document.getElementById('btn-library-ai-classify');
       if (btn) { btn.disabled = true; btn.textContent = '⏳ AI 分析中...'; }
       try {
-        const { created, applied, analyzed } = await refreshLibraryMetadataWithAi(null);
-        showToast(`AI 完成：分析 ${analyzed} 篇（已刷新中文名等元数据），提炼 ${created} 个新主题，采纳 ${applied} 条归类建议`, 'success');
+        const totals = await refreshLibraryMetadataWithAi(null, { onProgress: t => { if (btn) btn.textContent = t; } });
+        if (totals.failedBatches) {
+          showToast(`AI 部分完成：已处理 ${totals.batches - totals.failedBatches}/${totals.batches} 批，${totals.failedBatches} 批失败（网关超时或网络波动，可重试续跑）`, 'error');
+        } else {
+          showToast(`AI 完成：分析 ${totals.analyzed} 篇（已刷新中文名），提炼 ${totals.created} 个新主题，采纳 ${totals.applied} 条归类建议`, 'success');
+        }
         if (userWorkspaces) {
           userWorkspaces = await canvasFetch('/workspaces').catch(() => userWorkspaces);
         }
