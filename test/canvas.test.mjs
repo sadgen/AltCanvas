@@ -2072,6 +2072,40 @@ try {
   assert.equal(placeholderMeta.institution, '', 'placeholder institution must be stored empty');
   assert.equal(placeholderMeta.year, '', 'placeholder year must be stored empty');
 
+  // [M4 UX] Classification accepts client-extracted PDF text (documentTexts)
+  // and feeds it into the AI prompt: classification and title recognition run
+  // on REAL page content, matching the per-document 识别标题 depth.
+  let classifyPromptText = '';
+  const textClassifyHandler = createCanvasHandler(store, {
+    aiPublicConfig: () => ({ configured: true, provider: 'mock.example', model: 'mock-model' }),
+    aiCompletion: async ({ messages }) => {
+      classifyPromptText = messages.map(m => m.content).join('\n');
+      return JSON.stringify({ classifications: {}, documentMetadata: {} });
+    }
+  });
+  const textRes = await call(textClassifyHandler, '/canvas/native/documents/classify', {
+    method: 'POST', cookie,
+    body: {
+      documentIds: [classifyDoc.id],
+      documentTexts: {
+        [classifyDoc.id]: '--- Page 1 ---\nBERT: Pre-training of Deep Bidirectional Transformers for Language Understanding. Google AI Language.'
+      }
+    }
+  });
+  assert.equal(textRes.statusCode, 200);
+  assert.ok(classifyPromptText.includes('正文节选'), 'the AI prompt must carry the PDF text excerpt section');
+  assert.ok(classifyPromptText.includes('Bidirectional Transformers'),
+    'the AI prompt must include the real first-page text');
+  assert.ok(!classifyPromptText.includes('【未注明机构】'), 'placeholder text must not be fabricated');
+  // text values are hard-capped before they reach the prompt
+  await assert.rejects(
+    call(textClassifyHandler, '/canvas/native/documents/classify', {
+      method: 'POST', cookie,
+      body: { documentIds: [classifyDoc.id], documentTexts: { [classifyDoc.id]: 42 } }
+    }),
+    /documentTexts values must be strings/
+  );
+
   // Native classify rejects oversized document id lists before any AI call
   const oversizedIds = Array.from({ length: 201 }, () => '00000000-0000-4000-8000-000000000000');
   const oversizedRes = await call(nativeClassifyHandler, '/canvas/native/documents/classify', {

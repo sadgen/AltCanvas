@@ -2776,9 +2776,82 @@
 
     // M4: 文库级 AI 主题归类（提炼主题体系 + 高置信度建议一键采纳）
     // 产品规则：分类与标题识别由 AI 在同一次调用中完成（即"刷新元数据"）。
-    // documentIds 为空时分析全库（≤50 篇），否则只刷新指定文献。
+    // 与页面上方的「✨ 识别标题」同源同深度：客户端经安全附件接口读取 PDF，
+    // 提取前几页真实正文随请求发给 AI，绝不只凭文件名/元数据取名。
+    let hostPdfjsPromise = null;
+    function loadHostPdfjs() {
+      if (!hostPdfjsPromise) {
+        hostPdfjsPromise = (async () => {
+          const lib = await import('/reader/pdf/build/pdf.mjs');
+          lib.GlobalWorkerOptions.workerSrc = '/reader/pdf/build/pdf.worker.mjs';
+          return lib;
+        })();
+      }
+      return hostPdfjsPromise;
+    }
+
+    const AI_REFRESH_TEXT_MAX_DOCS = 25;
+    const AI_REFRESH_TEXT_CHARS = 8000;
+
+    async function extractAttachmentPdfText(attachmentId, { maxPages = 3, maxChars = AI_REFRESH_TEXT_CHARS } = {}) {
+      if (!attachmentId) return '';
+      try {
+        const pdfjs = await loadHostPdfjs();
+        const doc = await pdfjs.getDocument({
+          url: `/canvas/native/attachments/${encodeURIComponent(attachmentId)}/file`,
+          withCredentials: true
+        }).promise;
+        try {
+          let text = '';
+          const pages = Math.min(maxPages, doc.numPages || 1);
+          for (let p = 0; p < pages; p++) {
+            const page = await doc.getPage(p + 1);
+            const textContent = await page.getTextContent();
+            const pageText = textContent.items.map(item => item.str || '').join(' ').replace(/\s+/g, ' ').trim();
+            if (pageText) text += `\n--- Page ${p + 1} ---\n` + pageText;
+            if (text.length >= maxChars) break;
+          }
+          return text.slice(0, maxChars);
+        } finally {
+          try { doc.destroy(); } catch {}
+        }
+      } catch (err) {
+        console.warn('PDF text extraction failed; falling back to metadata-only for this document', err);
+        return '';
+      }
+    }
+
     async function refreshLibraryMetadataWithAi(documentIds = null) {
-      const body = Array.isArray(documentIds) && documentIds.length ? { documentIds } : {};
+      // Resolve the target documents (native items carry the attachment children
+      // needed for real-content extraction). Aligned with the server-side
+      // analyze cap of 50 documents.
+      let targets = [];
+      if (Array.isArray(documentIds) && documentIds.length) {
+        targets = documentIds.map(id => allItems.find(i => i.isNative && i.key === id) || { key: id, isNative: true });
+      } else {
+        targets = allItems.filter(i => i.isNative);
+      }
+      targets = targets.slice(0, 50);
+
+      // Extract real PDF content for as many documents as the request budget
+      // allows; the rest fall back to metadata (and the AI is told so).
+      const texts = {};
+      let extracted = 0;
+      const btnScan = document.getElementById('btn-source-rescan');
+      const btnClassify = document.getElementById('btn-library-ai-classify');
+      for (const item of targets) {
+        if (extracted >= AI_REFRESH_TEXT_MAX_DOCS) break;
+        const attachment = (item.children || []).find(c => c.data?.contentType === 'application/pdf');
+        if (!attachment) continue;
+        extracted += 1;
+        const progressText = `⏳ 读取正文 ${extracted}...`;
+        if (btnScan) btnScan.textContent = progressText;
+        if (btnClassify) btnClassify.textContent = progressText;
+        texts[item.key] = await extractAttachmentPdfText(attachment.key || attachment.data?.key);
+      }
+
+      const body = { documentIds: targets.map(t => t.key) };
+      if (Object.keys(texts).length) body.documentTexts = texts;
       const gen = await m4Fetch('/native/classify/generate-topics', { method: 'POST', body });
       const data = gen.data || {};
       const created = (data.createdWorkspaces || []).length;
@@ -2805,7 +2878,7 @@
           applied += (res.data || []).filter(r => r.ok).length;
         }
       }
-      return { created, applied, analyzed: analyzedDocs.length };
+      return { created, applied, analyzed: analyzedDocs.length, extracted: Object.keys(texts).length };
     }
 
     async function libraryAiClassifyFlow() {

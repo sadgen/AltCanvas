@@ -1891,6 +1891,13 @@ assert.ok(html.includes('ai_not_configured') && html.includes('暂以文件名�
   'an unconfigured AI must degrade gracefully after enrollment');
 assert.ok(/async function libraryAiClassifyFlow[\s\S]*?refreshLibraryMetadataWithAi\(null\)/.test(html),
   'the manual AI button must reuse the shared metadata-refresh flow');
+// 刷新必须读取 PDF 真实正文（与「✨ 识别标题」同深度），而不是只凭元数据。
+assert.ok(html.includes("import('/reader/pdf/build/pdf.mjs')"),
+  'the refresh flow must reuse the vendored PDF.js build for text extraction');
+assert.ok(html.includes('extractAttachmentPdfText('),
+  'the refresh flow must extract real page text per document');
+assert.ok(html.includes('documentTexts'),
+  'classification must receive the client-extracted document texts');
 
 assert.match(devServer, /style-src-attr 'unsafe-inline'/, 'CSP must permit dynamic Canvas geometry styles');
 assert.match(devServer, /script-src 'self'/, 'script CSP must remain restricted');

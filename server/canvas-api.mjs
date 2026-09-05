@@ -1220,11 +1220,12 @@ async function runAiClassification({ store, actorKey, targetEntries, workspaces,
     '2. reason 简述推荐或不推荐的核心理由（30字以内）；',
     '3. 同一篇文献可同时推荐给多个符合的主题（多对多归类）；',
     '4. 必须在同一次返回中为每篇文献生成 documentMetadata；cleanTitle 必须是准确、自然、可直接展示的简体中文名，保留真实可辨识的机构与年份；',
-    '5. 机构或年份无法从文献信息确定时：cleanTitle 直接省略对应装饰，institution 与 year 字段留空字符串。严禁编造「未注明机构」「未知年份」之类的占位词。'
+    '5. 若文献附带「正文节选」，标题/机构/年份的识别必须优先依据正文内容，元数据仅作辅助；',
+    '6. 机构或年份无法确定时：cleanTitle 直接省略对应装饰，institution 与 year 字段留空字符串。严禁编造「未注明机构」「未知年份」之类的占位词。'
   ].join('\n');
 
   const topicContexts = workspaces.map((w, idx) => `[主题 ${idx + 1}] ID: ${w.id}\n名称: ${w.name}\n研究问题: ${w.researchQuestion || '无'}\n纳入规则: ${w.inclusionRules || '无'}\n排除规则: ${w.exclusionRules || '无'}`).join('\n\n');
-  const docContexts = targetEntries.map(e => `[待分拣文献] ID: ${e.id}\n标题: ${e.title}\n作者: ${(e.creators || []).map(c => typeof c === 'string' ? c : (c.name || `${c.firstName || ''} ${c.lastName || ''}`)).join(', ')}\n年份: ${e.year || '未知'}\n摘要: ${(e.abstractNote || '').slice(0, 800)}\n标签: ${(e.tags || []).join(', ')}`).join('\n\n');
+  const docContexts = targetEntries.map(e => `[待分拣文献] ID: ${e.id}\n标题: ${e.title}\n作者: ${(e.creators || []).map(c => typeof c === 'string' ? c : (c.name || `${c.firstName || ''} ${c.lastName || ''}`)).join(', ')}\n年份: ${e.year || '未知'}\n摘要: ${(e.abstractNote || '').slice(0, 800)}\n标签: ${(e.tags || []).join(', ')}${e.textSnippet ? `\n正文节选（PDF 前几页）:\n${e.textSnippet}` : ''}`).join('\n\n');
 
   const aiResponse = await aiCompletion({
     messages: [
@@ -1274,7 +1275,7 @@ async function runAiTopicGeneration({ store, actorKey, targetEntries, maxTopics 
     '3. 为每个主题提供：`name`（15字以内的凝练中文名称）、`researchQuestion`（核心研究问题）、`inclusionRules`（清晰的纳入规则）、`exclusionRules`（排除规则）；',
     '4. 为每篇待分类文献推荐最契合的主题（可多对多），仅当极个别文献确实与主要主题完全无关时才设立兜底补充主题；',
     '5. 在同一次返回中为每篇文献生成规范中文名与元数据，不要要求第二次模型调用；',
-    '6. 规范中文名必须自然可展示：机构或年份无法确定时直接省略对应装饰并留空字段，严禁编造「未注明机构」「未知年份」等占位词；',
+    '6. 规范中文名必须自然可展示：若文献附带「正文节选」，标题/机构/年份的识别优先依据正文内容；无法确定时直接省略装饰并留空字段，严禁编造「未注明机构」「未知年份」等占位词；',
     '7. 只输出合法的 JSON 对象，严禁 Markdown 代码块。',
     'JSON 格式示例：',
     '{',
@@ -1301,7 +1302,7 @@ async function runAiTopicGeneration({ store, actorKey, targetEntries, maxTopics 
     ? existingWorkspaces.map((w, idx) => `[已有主题 ${idx + 1}] 名称: ${w.name}\n研究问题: ${w.researchQuestion || '无'}\n纳入规则: ${w.inclusionRules || '无'}`).join('\n\n')
     : '（当前尚无已有主题）';
 
-  const docContexts = targetEntries.map(e => `[文献] ID: ${e.id}\n标题: ${e.title}\n作者: ${(e.creators || []).map(c => typeof c === 'string' ? c : (c.name || `${c.firstName || ''} ${c.lastName || ''}`)).join(', ')}\n年份: ${e.year || '未知'}\n摘要: ${(e.abstractNote || '').slice(0, 500)}\n标签: ${(e.tags || []).join(', ')}`).join('\n\n');
+  const docContexts = targetEntries.map(e => `[文献] ID: ${e.id}\n标题: ${e.title}\n作者: ${(e.creators || []).map(c => typeof c === 'string' ? c : (c.name || `${c.firstName || ''} ${c.lastName || ''}`)).join(', ')}\n年份: ${e.year || '未知'}\n摘要: ${(e.abstractNote || '').slice(0, 500)}\n标签: ${(e.tags || []).join(', ')}${e.textSnippet ? `\n正文节选（PDF 前几页）:\n${e.textSnippet}` : ''}`).join('\n\n');
 
   const aiResponse = await aiCompletion({
     messages: [
@@ -3085,7 +3086,27 @@ export function createCanvasHandler(store, {
       }
 
       // --- M4 文库级 AI 主题分类与提炼（不依赖收件箱） ---
-      function nativeDocumentToClassificationEntry(doc) {
+      // documentTexts: { [documentId]: first-pages text } extracted by the web
+      // client through the anchored attachment endpoint — the same depth as the
+      // per-document 识别标题 flow. Per product rule, classification and title
+      // recognition run together ON REAL CONTENT, not just metadata.
+      function parseDocumentTexts(body) {
+        const map = new Map();
+        const raw = body?.documentTexts;
+        if (raw === undefined || raw === null) return map;
+        if (typeof raw !== 'object' || Array.isArray(raw)) {
+          throw new TypeError('documentTexts must be an object of documentId -> text');
+        }
+        for (const [key, value] of Object.entries(raw)) {
+          const id = string(key, 'documentTexts.key', { max: 128 });
+          if (typeof value !== 'string') throw new TypeError('documentTexts values must be strings');
+          const text = value.slice(0, 8000);
+          if (text.trim()) map.set(id, text);
+        }
+        return map;
+      }
+
+      function nativeDocumentToClassificationEntry(doc, textSnippet = null) {
         return {
           id: doc.id,
           itemKey: doc.id,
@@ -3096,15 +3117,17 @@ export function createCanvasHandler(store, {
           year: doc.year || null,
           abstractNote: doc.abstract || '',
           tags: [],
-          attachmentKey: doc.attachments?.[0]?.id || null
+          attachmentKey: doc.attachments?.[0]?.id || null,
+          textSnippet: textSnippet ? String(textSnippet).slice(0, 6000) : null
         };
       }
 
       if (pathname === '/canvas/native/documents/classify' && method === 'POST') {
-        const body = await readJson(req);
+        const body = await readJson(req, MAX_DOCUMENT_BODY_BYTES);
         if (body && (typeof body !== 'object' || Array.isArray(body))) {
           throw new TypeError('request body must be an object');
         }
+        const documentTexts = parseDocumentTexts(body);
         const workspaces = store.listWorkspaces(actor.actorKey);
         if (!workspaces.length) {
           json(res, 200, { data: { classifications: {}, message: '暂无可用的研究主题，请先创建主题' } });
@@ -3115,11 +3138,11 @@ export function createCanvasHandler(store, {
           if (body.documentIds.length > 200) throw new TypeError('documentIds must contain at most 200 ids');
           for (const id of body.documentIds) {
             const doc = store.getDocument(actor.actorKey, string(id, 'documentIds.id', { max: 128 }));
-            if (doc) targetEntries.push(nativeDocumentToClassificationEntry(doc));
+            if (doc) targetEntries.push(nativeDocumentToClassificationEntry(doc, documentTexts.get(doc.id)));
           }
         } else {
           targetEntries = store.listNativeLibraryDocuments(actor.actorKey, { limit: 50 })
-            .documents.map(nativeDocumentToClassificationEntry);
+            .documents.map(doc => nativeDocumentToClassificationEntry(doc, documentTexts.get(doc.id)));
         }
         if (!targetEntries.length) {
           json(res, 200, { data: { classifications: {} } });
@@ -3140,20 +3163,21 @@ export function createCanvasHandler(store, {
       }
 
       if (pathname === '/canvas/native/classify/generate-topics' && method === 'POST') {
-        const body = await readJson(req);
+        const body = await readJson(req, MAX_DOCUMENT_BODY_BYTES);
         if (body && (typeof body !== 'object' || Array.isArray(body))) {
           throw new TypeError('request body must be an object');
         }
+        const documentTexts = parseDocumentTexts(body);
         let targetEntries = [];
         if (Array.isArray(body?.documentIds)) {
           if (body.documentIds.length > 200) throw new TypeError('documentIds must contain at most 200 ids');
           for (const id of body.documentIds) {
             const doc = store.getDocument(actor.actorKey, string(id, 'documentIds.id', { max: 128 }));
-            if (doc) targetEntries.push(nativeDocumentToClassificationEntry(doc));
+            if (doc) targetEntries.push(nativeDocumentToClassificationEntry(doc, documentTexts.get(doc.id)));
           }
         } else {
           targetEntries = store.listNativeLibraryDocuments(actor.actorKey, { limit: 50 })
-            .documents.map(nativeDocumentToClassificationEntry);
+            .documents.map(doc => nativeDocumentToClassificationEntry(doc, documentTexts.get(doc.id)));
         }
         if (!targetEntries.length) {
           json(res, 200, { data: { createdWorkspaces: [], workspaces: store.listWorkspaces(actor.actorKey), classifications: {}, message: '文库中暂无可供提炼的文献' } });
