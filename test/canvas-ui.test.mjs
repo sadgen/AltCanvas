@@ -1916,6 +1916,15 @@ assert.ok(html.includes('id="select-library-sort"'), 'the library must expose a 
 assert.ok(html.includes('function sortLibraryItems'), 'library items must be sortable');
 assert.ok(html.includes('libraryItemTimestamp'), 'sorting must support timestamp modes');
 assert.ok(html.includes('zh-Hans-CN'), 'title sorting must use Chinese-aware collation');
+// [M4 UX] AI 识别分增量与强制两档：✨ 只识别未命名文献（跳过已有 AI 元数据），
+// 🔁 才会全量重识别并覆盖。
+assert.ok(html.includes('btn-library-ai-reclassify'), 'a force re-recognize entry must exist');
+assert.ok(html.includes('refreshLibraryMetadataWithAi(null, { onProgress: t => { if (btn) btn.textContent = t; }, force })'),
+  'the shared refresh must honor the force flag');
+assert.ok(html.includes("meta.source === 'ai_classification'"),
+  'documents with current AI metadata must be skipped on incremental runs');
+assert.ok(html.includes('全部文献均已识别过 AI 元数据'),
+  'an all-recognized library must surface a no-op notice instead of a fake AI run');
 
 assert.match(devServer, /style-src-attr 'unsafe-inline'/, 'CSP must permit dynamic Canvas geometry styles');
 assert.match(devServer, /script-src 'self'/, 'script CSP must remain restricted');

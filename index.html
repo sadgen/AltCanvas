@@ -261,7 +261,8 @@
           <button data-lib-filter="no-pdf" class="lib-filter-chip px-2.5 py-1 rounded bg-slate-900 text-slate-400 hover:text-slate-200 whitespace-nowrap transition">无 PDF</button>
           <button data-lib-filter="file-missing" class="lib-filter-chip px-2.5 py-1 rounded bg-slate-900 text-slate-400 hover:text-slate-200 whitespace-nowrap transition">文件缺失</button>
           <button data-lib-filter="trash" class="lib-filter-chip px-2.5 py-1 rounded bg-slate-900 text-slate-400 hover:text-slate-200 whitespace-nowrap transition">回收站</button>
-          <button id="btn-library-ai-classify" type="button" class="px-2.5 py-1 rounded bg-purple-950/70 text-purple-300 border border-purple-800/60 hover:bg-purple-900/70 whitespace-nowrap transition" title="AI 提炼主题体系并推荐归类（可直接采纳）">✨ AI 主题归类</button>
+          <button id="btn-library-ai-classify" type="button" class="px-2.5 py-1 rounded bg-purple-950/70 text-purple-300 border border-purple-800/60 hover:bg-purple-900/70 whitespace-nowrap transition" title="AI 只识别尚未命名的文献（已有 AI 元数据的自动跳过），并归类到主题">✨ AI 识别新增</button>
+          <button id="btn-library-ai-reclassify" type="button" class="px-2 py-1 rounded bg-slate-900 text-slate-400 border border-slate-800 hover:text-purple-300 whitespace-nowrap transition" title="忽略已有 AI 元数据，强制重新识别全部文献（覆盖 AI 命名并重新归类；手动编辑的不受影响）">🔁 重识别全部</button>
         </div>
 
         <!-- 主题筛选（合并原「主题分类」Tab）：选择主题即只显示该主题下可阅读的 PDF -->
@@ -1862,7 +1863,11 @@
         showToast(`排序失败: ${errorMessage(err)}`, 'error');
       });
     });
-    document.getElementById('btn-library-ai-classify')?.addEventListener('click', () => libraryAiClassifyFlow());
+    document.getElementById('btn-library-ai-classify')?.addEventListener('click', () => libraryAiClassifyFlow(false));
+    document.getElementById('btn-library-ai-reclassify')?.addEventListener('click', () => {
+      if (!confirm('强制重识别将对全部文献重新执行 AI 命名与归类，并覆盖现有 AI 元数据（手动编辑的不受影响）。继续？')) return;
+      libraryAiClassifyFlow(true);
+    });
     document.getElementById('select-library-topic')?.addEventListener('change', async event => {
       libraryTopicFilter = event.target.value;
       const workspaceId = libraryTopicFilter;
@@ -2848,7 +2853,7 @@
       }
     }
 
-    async function refreshLibraryMetadataWithAi(documentIds = null, { onProgress = null } = {}) {
+    async function refreshLibraryMetadataWithAi(documentIds = null, { onProgress = null, force = false } = {}) {
       // Resolve the target documents (native items carry the attachment children
       // needed for real-content extraction). Aligned with the server-side
       // analyze cap of 50 documents.
@@ -2859,6 +2864,20 @@
         targets = allItems.filter(i => i.isNative);
       }
       targets = targets.slice(0, 50);
+
+      // 增量识别：已有 AI 元数据（source=ai_classification）且未被强制重识别的
+      // 文献直接跳过，避免每次点击都重复消耗 AI 调用。手动编辑（manual）不受
+      // 影响——它们不会被覆盖，但也无需重复识别。
+      if (!force) {
+        targets = targets.filter(item => {
+          const meta = documentMetas.get(docMetaKey(
+            item.libraryType || (item.isNative ? 'native' : currentDocumentLibrary?.libraryType) || 'user',
+            item.libraryId || (item.isNative ? 'local' : currentDocumentLibrary?.libraryId) || config.userId,
+            item.key
+          ));
+          return !(meta && meta.source === 'ai_classification');
+        });
+      }
 
       // Pre-extract real PDF content per document (budget-capped).
       const texts = {};
@@ -2932,15 +2951,17 @@
       return totals;
     }
 
-    async function libraryAiClassifyFlow() {
-      const btn = document.getElementById('btn-library-ai-classify');
+    async function libraryAiClassifyFlow(force = false) {
+      const btn = document.getElementById(force ? 'btn-library-ai-reclassify' : 'btn-library-ai-classify');
       if (btn) { btn.disabled = true; btn.textContent = '⏳ AI 分析中...'; }
       try {
-        const totals = await refreshLibraryMetadataWithAi(null, { onProgress: t => { if (btn) btn.textContent = t; } });
-        if (totals.failedBatches) {
+        const totals = await refreshLibraryMetadataWithAi(null, { onProgress: t => { if (btn) btn.textContent = t; }, force });
+        if (!totals.batches) {
+          showToast('全部文献均已识别过 AI 元数据，无需重复识别（确需刷新请用「🔁 重识别全部」）', 'info');
+        } else if (totals.failedBatches) {
           showToast(`AI 部分完成：已处理 ${totals.batches - totals.failedBatches}/${totals.batches} 批，${totals.failedBatches} 批失败（网关超时或网络波动，可重试续跑）`, 'error');
         } else {
-          showToast(`AI 完成：分析 ${totals.analyzed} 篇（已刷新中文名），提炼 ${totals.created} 个新主题，采纳 ${totals.applied} 条归类建议`, 'success');
+          showToast(`AI 完成：识别 ${totals.analyzed} 篇文献（含中文名刷新），提炼 ${totals.created} 个新主题，采纳 ${totals.applied} 条归类建议`, 'success');
         }
         if (userWorkspaces) {
           userWorkspaces = await canvasFetch('/workspaces').catch(() => userWorkspaces);
