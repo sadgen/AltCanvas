@@ -2821,9 +2821,9 @@
 
     const AI_REFRESH_TEXT_MAX_DOCS = 25;
     const AI_REFRESH_TEXT_CHARS = 8000;
-    // 网关（nginx）默认 60s 读超时会切断长请求：按小批分次调用，
-    // 每批独立完成「正文提取 → 分类/取名 → 采纳」，任何一批都远小于 60s。
-    const AI_REFRESH_BATCH_SIZE = 10;
+    // 双重超时约束：应用内 AI 调用超时（AI_TIMEOUT_MS，默认 60s）+ 网关读
+    // 超时（nginx 300s）。批内带正文请求必须远小于两者，失败自动重试一次。
+    const AI_REFRESH_BATCH_SIZE = 4;
 
     async function extractAttachmentPdfText(attachmentId, { maxPages = 3, maxChars = AI_REFRESH_TEXT_CHARS } = {}) {
       if (!attachmentId) return '';
@@ -2913,45 +2913,55 @@
       let lastError = null;
       for (let b = 0; b < batches.length; b++) {
         const batch = batches[b];
-        if (onProgress) onProgress(`⏳ AI 分析第 ${b + 1}/${batches.length} 批...`);
         const documentIds = batch.map(t => t.key);
         const batchTexts = {};
         for (const id of documentIds) {
           if (texts[id]) batchTexts[id] = texts[id];
         }
         const endpoint = b === 0 ? '/native/classify/generate-topics' : '/native/documents/classify';
-        try {
-          const gen = await m4Fetch(endpoint, { method: 'POST', body: { documentIds, documentTexts: batchTexts } });
-          const data = gen.data || {};
-          totals.created += (data.createdWorkspaces || []).length;
-          totals.batches += 1;
-          const suggestions = [];
-          for (const [documentId, list] of Object.entries(data.classifications || {})) {
-            totals.analyzed += 1;
-            for (const s of (list || [])) {
-              if (s && typeof s.confidence === 'number' && s.confidence >= 0.7) {
-                suggestions.push({ documentId, workspaceId: s.workspaceId });
+        // 上游（AI 网关/模型）瞬时 500/超时较常见：每批自动重试一次。
+        for (let attempt = 0; attempt <= 1; attempt++) {
+          try {
+            if (attempt > 0) {
+              if (onProgress) onProgress(`⏳ 第 ${b + 1} 批重试...`);
+              await new Promise(r => setTimeout(r, 2500));
+            } else if (onProgress) {
+              onProgress(`⏳ AI 分析第 ${b + 1}/${batches.length} 批...`);
+            }
+            const gen = await m4Fetch(endpoint, { method: 'POST', body: { documentIds, documentTexts: batchTexts } });
+            const data = gen.data || {};
+            totals.created += (data.createdWorkspaces || []).length;
+            totals.batches += 1;
+            const suggestions = [];
+            for (const [documentId, list] of Object.entries(data.classifications || {})) {
+              totals.analyzed += 1;
+              for (const s of (list || [])) {
+                if (s && typeof s.confidence === 'number' && s.confidence >= 0.7) {
+                  suggestions.push({ documentId, workspaceId: s.workspaceId });
+                }
               }
             }
-          }
-          if (suggestions.length) {
-            const byWorkspace = new Map();
-            for (const sug of suggestions) {
-              if (!byWorkspace.has(sug.workspaceId)) byWorkspace.set(sug.workspaceId, []);
-              byWorkspace.get(sug.workspaceId).push(sug.documentId);
+            if (suggestions.length) {
+              const byWorkspace = new Map();
+              for (const sug of suggestions) {
+                if (!byWorkspace.has(sug.workspaceId)) byWorkspace.set(sug.workspaceId, []);
+                byWorkspace.get(sug.workspaceId).push(sug.documentId);
+              }
+              for (const [workspaceId, ids] of byWorkspace) {
+                const res = await m4Fetch('/native/documents/batch-topics', {
+                  method: 'POST', body: { documentIds: ids, topicIds: [workspaceId] }
+                });
+                totals.applied += (res.data || []).filter(r => r.ok).length;
+              }
             }
-            for (const [workspaceId, ids] of byWorkspace) {
-              const res = await m4Fetch('/native/documents/batch-topics', {
-                method: 'POST', body: { documentIds: ids, topicIds: [workspaceId] }
-              });
-              totals.applied += (res.data || []).filter(r => r.ok).length;
-            }
+            break;
+          } catch (err) {
+            // 一批失败不拖垮整体：已完成批次的命名与归类都已生效。
+            if (err.code === 'ai_not_configured') throw err;
+            if (attempt === 0) continue;
+            totals.failedBatches += 1;
+            lastError = err;
           }
-        } catch (err) {
-          // 一批失败不拖垮整体：已完成批次的命名与归类都已生效。
-          if (err.code === 'ai_not_configured') throw err;
-          totals.failedBatches += 1;
-          lastError = err;
         }
       }
       if (lastError && totals.batches === 0) throw lastError;

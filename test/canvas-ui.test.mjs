@@ -1898,9 +1898,11 @@ assert.ok(html.includes('extractAttachmentPdfText('),
   'the refresh flow must extract real page text per document');
 assert.ok(html.includes('documentTexts'),
   'classification must receive the client-extracted document texts');
-// 网关（nginx 60s）超时防御：刷新必须分批，任何单请求都远小于 60s。
-assert.ok(html.includes('AI_REFRESH_BATCH_SIZE = 10'),
+// 网关（nginx 300s）超时防御：刷新必须分批，任何单请求都远小于网关限制；
+// 上游模型瞬时 500/超时常见，每批自动重试一次。
+assert.ok(html.includes('AI_REFRESH_BATCH_SIZE = 4'),
   'the metadata refresh must run in small batches under the gateway timeout');
+assert.ok(html.includes('批重试'), 'a failed batch must auto-retry once before being counted failed');
 assert.ok(html.includes("'/native/documents/classify'"),
   'follow-up batches must reuse the classify-only endpoint instead of re-minting topics');
 assert.ok(html.includes('批失败'),
