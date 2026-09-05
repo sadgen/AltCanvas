@@ -2124,3 +2124,30 @@ M4 维持 CONDITIONAL PASS——按审计结论，本项补完后进入最后人
 文件名语义清晰时 AI 直接沿用。若要"读 PDF 前 1-2 页取名"的更深识别，需在
 刷新流程中接入既有 `/canvas/documents/extract-metadata` 的文本提取链路，
 列为后续增强。
+
+---
+
+## 2026-09-05 会话五（用户纠正：刷新必须读真实正文，`82d85aa`）
+
+用户指出"识别标题"（`extractDocumentChineseMetadata`）本来就读 PDF 前几页
+真实文本，扫描自动刷新却只喂元数据是自己降级。据此把刷新升级为与「✨ 识别
+标题」同深度：
+
+1. **前端**：`refreshLibraryMetadataWithAi` 对目标文献（≤25 篇、每篇 ≤8k
+   字符的请求预算）经 vendored PDF.js（同源动态 import
+   `/reader/pdf/build/pdf.mjs` + worker，`worker-src 'self'` 已放行）与
+   `GET /canvas/native/attachments/:id/file` 提取前 3 页真实正文，失败单篇
+   降级为元数据并在 console.warn 记录；扫描按钮同步"读取正文 N..."进度。
+2. **服务端**：`/canvas/native/documents/classify` 与
+   `/canvas/native/classify/generate-topics` 接受 `documentTexts`
+   （768KB AI body 上限、单篇截 6000 字符），拼入两个 prompt 的
+   「正文节选（PDF 前几页）」上下文，规则明确"正文优先于元数据识别标题"。
+3. **端到端验证**：以 BERT 论文真实首页文本走 classify →
+   document_metas 从文件名版升级为
+   `【谷歌】BERT：用于语言理解的深度双向Transformer预训练（2019）`
+   （谷歌 / 2019），同时提炼出新主题。`npm test` 10 套全绿（exit 0）。
+
+**调试教训（重要）**：验证期间 IAB 内嵌浏览器 guest 再次进入半残态
+（零网络请求的静态 DOM、`performance` 计数失真、evaluate 受限、截图不可
+用），一度误判"页面 JS 全挂"。教训：guest 的 DOM/performance 观察不可信，
+服务端行为一律用 curl + DB 独立验证；页面 JS 是否执行要以真实浏览器为准。
