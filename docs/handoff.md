@@ -2151,3 +2151,26 @@ M4 维持 CONDITIONAL PASS——按审计结论，本项补完后进入最后人
 （零网络请求的静态 DOM、`performance` 计数失真、evaluate 受限、截图不可
 用），一度误判"页面 JS 全挂"。教训：guest 的 DOM/performance 观察不可信，
 服务端行为一律用 curl + DB 独立验证；页面 JS 是否执行要以真实浏览器为准。
+
+---
+
+## 2026-09-05 会话六（生产日志发现：AI 刷新被网关 60s 超时切断，`498c8d0`）
+
+生产 browser.log 捕获 `POST /canvas/native/classify/generate-topics` 返回
+**nginx 504 Gateway Time-out**：全库刷新作为单个长请求跑，超过反代
+`proxy_read_timeout`（60s）。后果：前端拿不到结果——AI 取名虽在服务端保存，
+**主题采纳（batch-topics 由前端调用）整体丢失**。nginx 反代位于公网入口
+（不在 lxc 上，无法直接调超时），故应用层改为分批防御（`498c8d0`）：
+
+- `refreshLibraryMetadataWithAi` 按 `AI_REFRESH_BATCH_SIZE = 5` 分批执行：
+  第 1 批 `generate-topics`（可提炼主题体系），后续批 `documents/classify`
+  （仅分类+取名，复用既有主题）；每批独立完成正文提取、采纳与进度展示。
+- 部分失败不伪造成功：已完成批次保留生效，失败批计数明确提示"可重试续跑"；
+  AI 未配置仍走优雅降级。
+- 新增 canvas-ui 断言：分批常量、classify-only 复用端点、部分失败文案。
+
+其余日志复核：生产 browser.log 的 401 系列为会话过期后的良性记录；
+历史错误（loadInboxEntries/null disabled/旧 404）均停留在修复前时间戳。
+`npm test` 10 套全绿（exit 0），`498c8d0` 已部署生产与测试实例。
+**建议**：若入口 nginx 可维护，把 altcanvas 站点的 `proxy_read_timeout`
+调至 300s 可让单批更大、整体更快（当前 5 篇/批已可稳定工作）。
