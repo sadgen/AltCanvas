@@ -2172,5 +2172,8 @@ M4 维持 CONDITIONAL PASS——按审计结论，本项补完后进入最后人
 其余日志复核：生产 browser.log 的 401 系列为会话过期后的良性记录；
 历史错误（loadInboxEntries/null disabled/旧 404）均停留在修复前时间戳。
 `npm test` 10 套全绿（exit 0），`498c8d0` 已部署生产与测试实例。
-**建议**：若入口 nginx 可维护，把 altcanvas 站点的 `proxy_read_timeout`
-调至 300s 可让单批更大、整体更快（当前 5 篇/批已可稳定工作）。
+**nginx 已完成调整（router1 = 192.168.5.1）**：
+`/etc/nginx/conf.d/altcanvas.conf` 的 location / 新增
+`proxy_read_timeout 300s` / `proxy_send_timeout 300s`（备份
+altcanvas.conf.bak-20260905，nginx -t 通过后 reload，外网域名验证 200）；
+`AI_REFRESH_BATCH_SIZE` 相应从 5 提到 10（50 篇 = 5 批）。
