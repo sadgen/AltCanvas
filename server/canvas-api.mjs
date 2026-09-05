@@ -407,8 +407,13 @@ function saveClassificationDocumentMetas(store, actorKey, entries, parsed) {
       libraryType: entry.libraryType,
       libraryId: entry.libraryId,
       itemKey: entry.itemKey,
-      attachmentKey: existing?.attachmentKey || entry.attachmentKey || null,
-      attachmentVersion: existing?.attachmentVersion ?? null,
+      // Record WHICH attachment (id + version) this recognition ran against:
+      // the incremental AI refresh uses that marker to skip only documents
+      // that were recognized from their CURRENT content. Classification rows
+      // historically left these null, which made every such row look
+      // "recognized" without the AI ever having read the PDF.
+      attachmentKey: entry.attachmentKey ?? existing?.attachmentKey ?? null,
+      attachmentVersion: entry.attachmentVersion ?? existing?.attachmentVersion ?? null,
       cleanTitle,
       institution: metaFieldValue(candidate.institution).slice(0, 200),
       reportTitle: metaFieldValue(candidate.reportTitle || candidate.chineseTitle).slice(0, 300),
@@ -3118,6 +3123,7 @@ export function createCanvasHandler(store, {
           abstractNote: doc.abstract || '',
           tags: [],
           attachmentKey: doc.attachments?.[0]?.id || null,
+          attachmentVersion: doc.attachments?.[0]?.version ?? null,
           textSnippet: textSnippet ? String(textSnippet).slice(0, 6000) : null
         };
       }

@@ -2072,6 +2072,34 @@ try {
   assert.equal(placeholderMeta.institution, '', 'placeholder institution must be stored empty');
   assert.equal(placeholderMeta.year, '', 'placeholder year must be stored empty');
 
+  // [M4 UX] Classification must record WHICH attachment (id + version) the
+  // recognition ran against — the incremental ✨ run skips only documents
+  // whose meta marks the CURRENT attachment as recognized. Legacy rows with
+  // null attachment_version are re-recognized (with real content) once.
+  store.db.prepare(`
+    INSERT INTO attachments
+      (id, document_id, blob_hash, mime_type, original_filename, title, size_bytes, storage_kind, version, created_at, updated_at)
+    VALUES (?, ?, NULL, 'application/pdf', 'vision-survey.pdf', 'Vision Survey', 10, 'managed_blob', 4, ?, ?)
+  `).run('att-versioned-1', classifyDoc.id, new Date().toISOString(), new Date().toISOString());
+  const versionedHandler = createCanvasHandler(store, {
+    aiPublicConfig: () => ({ configured: true, provider: 'mock.example', model: 'mock-model' }),
+    aiCompletion: async () => JSON.stringify({
+      classifications: {},
+      documentMetadata: { [classifyDoc.id]: { cleanTitle: '视觉语言模型综述', institution: '测试研究院', year: '2025' } }
+    })
+  });
+  const versionedRes = await call(versionedHandler, '/canvas/native/documents/classify', {
+    method: 'POST', cookie, body: { documentIds: [classifyDoc.id] }
+  });
+  assert.equal(versionedRes.statusCode, 200);
+  const versionedMeta = store.getDocumentMeta(canvasActorKey('https://issuer.example', 'api-subject'), {
+    libraryType: 'native', libraryId: 'local', itemKey: classifyDoc.id
+  });
+  assert.equal(versionedMeta.attachmentKey, 'att-versioned-1',
+    'classification must bind the meta to the recognized attachment id');
+  assert.equal(versionedMeta.attachmentVersion, 4,
+    'classification must record the recognized attachment version (null means "never content-recognized")');
+
   // [M4 UX] Classification accepts client-extracted PDF text (documentTexts)
   // and feeds it into the AI prompt: classification and title recognition run
   // on REAL page content, matching the per-document 识别标题 depth.

@@ -2865,9 +2865,11 @@
       }
       targets = targets.slice(0, 50);
 
-      // 增量识别：已有 AI 元数据（source=ai_classification）且未被强制重识别的
-      // 文献直接跳过，避免每次点击都重复消耗 AI 调用。手动编辑（manual）不受
-      // 影响——它们不会被覆盖，但也无需重复识别。
+      // 增量识别：只处理"尚未按当前附件内容识别过"的文献。判定标准不是
+      // "有没有 AI 元数据"，而是元数据是否记录了**当前附件 id + 版本**——
+      // 早期按元数据（未读正文）识别的记录没有附件版本，会在下一次 ✨ 时
+      // 自动补一次正文识别并记录，此后才会被跳过。无 PDF 的纯元数据文献
+      // 没有正文可读，有 AI 元数据即视为已处理。force 忽略一切跳过。
       if (!force) {
         targets = targets.filter(item => {
           const meta = documentMetas.get(docMetaKey(
@@ -2875,7 +2877,13 @@
             item.libraryId || (item.isNative ? 'local' : currentDocumentLibrary?.libraryId) || config.userId,
             item.key
           ));
-          return !(meta && meta.source === 'ai_classification');
+          if (!meta || meta.source !== 'ai_classification') return true;
+          const attachment = (item.children || []).find(c => c.data?.contentType === 'application/pdf');
+          if (!attachment) return false;
+          if (meta.attachmentKey !== (attachment.key || attachment.data?.key)) return true;
+          const recognizedVersion = meta.attachmentVersion;
+          const currentVersion = attachment.version ?? attachment.data?.version ?? null;
+          return !(recognizedVersion != null && currentVersion != null && recognizedVersion >= currentVersion);
         });
       }
 

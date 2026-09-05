@@ -1925,6 +1925,12 @@ assert.ok(html.includes("meta.source === 'ai_classification'"),
   'documents with current AI metadata must be skipped on incremental runs');
 assert.ok(html.includes('全部文献均已识别过 AI 元数据'),
   'an all-recognized library must surface a no-op notice instead of a fake AI run');
+// 「已识别」必须指"按当前附件内容识别过"（记录了附件 id + 版本），
+// 而不是仅仅存在一条早期元数据——否则未读正文的旧记录会被误跳过。
+assert.ok(html.includes('recognizedVersion >= currentVersion'),
+  'the skip check must compare the recognized attachment version');
+assert.ok(html.includes('meta.attachmentKey !== (attachment.key || attachment.data?.key)'),
+  'the skip check must bind recognition to the current attachment id');
 
 assert.match(devServer, /style-src-attr 'unsafe-inline'/, 'CSP must permit dynamic Canvas geometry styles');
 assert.match(devServer, /script-src 'self'/, 'script CSP must remain restricted');
