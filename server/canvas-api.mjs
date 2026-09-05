@@ -1237,7 +1237,8 @@ async function runAiClassification({ store, actorKey, targetEntries, workspaces,
       { role: 'system', content: systemPrompt },
       { role: 'user', content: `【候选研究主题】\n\n${topicContexts}\n\n【待分类文献列表】\n\n${docContexts}` }
     ],
-    temperature: 0.2
+    temperature: 0.2,
+    maxTokens: 8000
   }, privateConfig);
 
   let parsed = parseAiJson(aiResponse);
@@ -1318,7 +1319,10 @@ async function runAiTopicGeneration({ store, actorKey, targetEntries, maxTopics 
       { role: 'system', content: systemPrompt },
       { role: 'user', content: `【用户已有主题】\n\n${existingContext}\n\n【待分析与归类文献列表】\n\n${docContexts}` }
     ],
-    temperature: 0.2
+    temperature: 0.2,
+    // 3~4 篇文献 × 每篇完整 documentMetadata + 分类，默认 maxTokens 会截断
+    // JSON 输出导致解析失败，显式给足输出预算。
+    maxTokens: 8000
   }, privateConfig);
 
   let parsed = parseAiJson(aiResponse);
