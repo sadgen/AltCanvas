@@ -2100,9 +2100,11 @@
 
       allItems = nativeDocs.map(nativeDocumentToLibraryItem).filter(Boolean);
       renderItems();
-      // 主题筛选与画板主题联动：若筛选了主题（非"全部主题"），列表切到该主题的 PDF 视图。
+      // 保持当前视图：主题筛选 → 主题 PDF 视图；chips 筛选 → 用新数据重应用。
       if (libraryTopicFilter) {
         void loadTopicLibraryDocuments().catch(() => {});
+      } else if (libraryFilterState !== 'all') {
+        void applyLibraryFilter(libraryFilterState).catch(() => {});
       }
     }
 
@@ -2132,12 +2134,16 @@
     }
 
     function renderItems() {
+      if (currentLibraryView === 'files') return;   // 原始文件视图自管容器
+      if (libraryTopicFilter) return;               // 主题筛选视图由 loadTopicLibraryDocuments 自管
       const container = document.getElementById('items-container');
-      const filtered = sortLibraryItems(allItems);
+      const useFiltered = libraryFilterState !== 'all' && Array.isArray(libraryFilteredItems);
+      const filtered = sortLibraryItems(useFiltered ? libraryFilteredItems : allItems);
 
       container.innerHTML = '';
       if (filtered.length === 0) {
-        container.innerHTML = '<div class="text-slate-500 text-center py-10 text-xs">文库暂无条目</div>';
+        const emptyText = useFiltered ? libraryFilterEmptyText : '文库暂无条目';
+        container.innerHTML = `<div class="text-slate-500 text-center py-10 text-xs">${escapeHTML(emptyText)}</div>`;
         return;
       }
 
@@ -2235,6 +2241,10 @@
       loading: false, loadingMore: false, nextCursor: null
     };
     let libraryFilterState = 'all';
+    // 当前筛选 chips 命中的条目（持久化渲染状态）：打开文献、标注同步等都会
+    // 触发 renderItems() 重绘，若不持久化，筛选视图会被重绘回全量列表。
+    let libraryFilteredItems = null;
+    let libraryFilterEmptyText = '文库暂无条目';
 
     async function m4Fetch(path, options = {}) {
       // Like canvasFetch, but keeps the full payload for non-2xx conflict data.
@@ -2777,6 +2787,7 @@
         chip.className = `lib-filter-chip px-2.5 py-1 rounded whitespace-nowrap transition ${active ? 'bg-blue-600 text-white' : 'bg-slate-900 text-slate-400 hover:text-slate-200'}`;
       });
       if (libraryFilterState === 'all') {
+        libraryFilteredItems = null;
         await loadNativeLibrary().catch(err => renderNativeLibraryError(err));
         return;
       }
@@ -3010,15 +3021,11 @@
     }
 
     function renderFilteredNativeItems(items, emptyText) {
-      const container = document.getElementById('items-container');
-      container.innerHTML = '';
-      if (!items.length) {
-        container.innerHTML = `<div class="text-slate-500 text-center py-10 text-xs">${escapeHTML(emptyText)}</div>`;
-        return;
-      }
-      const originalState = allItems;
-      allItems = items;
-      try { renderItems(); } finally { allItems = originalState; }
+      // 过滤结果持久化为渲染状态：openItem/标注同步等触发的 renderItems()
+      // 重绘都会保持当前筛选（修复"点未分类里的 PDF 后列表变回全部"）。
+      libraryFilteredItems = items;
+      libraryFilterEmptyText = emptyText || '此筛选下暂无文献';
+      renderItems();
     }
 
     // ============================================================

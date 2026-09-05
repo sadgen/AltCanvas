@@ -1937,6 +1937,16 @@ assert.ok(html.includes('meta.attachmentKey !== (attachment.key || attachment.da
 // 最久未识别的文献永远轮不到。
 assert.ok(/targets = targets\.filter\(item => \{[\s\S]*?\n      \}\)\n      targets = targets\.slice\(0, 50\);/.test(html),
   'candidate capping must happen AFTER the incremental skip filter');
+// [M4 UX] 筛选视图必须持久化：点列表里的 PDF（openItem → renderItems）后，
+// 筛选状态不得被重绘回全量列表（未分类视图点击文献即变"全部"的回归）。
+assert.ok(html.includes('let libraryFilteredItems = null'),
+  'the filtered item set must be persisted as render state');
+assert.ok(/function renderFilteredNativeItems\(items, emptyText\) \{[\s\S]*?libraryFilteredItems = items;/.test(html),
+  'applyLibraryFilter results must flow through the persistent render state');
+assert.ok(/function renderItems\(\) \{[\s\S]*?if \(libraryTopicFilter\) return;/.test(html),
+  'renderItems must defer to the topic-filtered view');
+assert.ok(/function renderItems\(\) \{[\s\S]*?useFiltered \? libraryFilteredItems : allItems/.test(html),
+  'renderItems must render the filtered set while a chip filter is active');
 
 assert.match(devServer, /style-src-attr 'unsafe-inline'/, 'CSP must permit dynamic Canvas geometry styles');
 assert.match(devServer, /script-src 'self'/, 'script CSP must remain restricted');
