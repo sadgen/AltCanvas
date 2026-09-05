@@ -2225,3 +2225,20 @@ altcanvas.conf.bak-20260905，nginx -t 通过后 reload，外网域名验证 200
   识别一次（这次读正文）并补记版本，此后恢复正常增量跳过。
 - canvas.test 断言分类绑定附件 id+version；canvas-ui 断言跳过条件绑定
   当前附件身份。`npm test` 10 套全绿（exit 0）。
+
+## 2026-09-05 会话十（筛选视图持久化修复 + 测试盲区记录，`82722ce`）
+
+用户报告：点「未分类」筛选后，再点列表里的 PDF，视图直接跳回「全部」。
+根因：chips 筛选走 renderFilteredNativeItems 的临时 allItems 换入/还原
+hack，仅渲染一次；随后 openItem → renderItems() 的任何重绘（选中态、
+标注同步等都会触发）都会以未过滤的全量 allItems 重绘，视图被打回。
+
+- 修复：筛选结果持久化为渲染状态（libraryFilteredItems +
+  libraryFilterEmptyText）；renderItems 在 chips 筛选激活时渲染持久化
+  集合、主题筛选激活时让位给主题视图、原始文件视图直接跳过；
+  loadNativeLibrary 刷新后按当前筛选重应用而不是重置。
+- 测试盲区（如实记录）：canvas-ui 既有断言以静态结构为主，缺乏"筛选在
+  跨操作重绘后保持"的跨渲染行为覆盖，因此该 bug 未被自动化发现。后续
+  为筛选/视图状态类逻辑补充行为级测试。
+- 账号澄清：用户始终使用生产 sadgen 账号；lxc:8089 + zcadmin 为 agent
+  隔离测试实例，观察时不得混淆两者。
