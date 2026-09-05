@@ -1269,32 +1269,36 @@ async function runAiClassification({ store, actorKey, targetEntries, workspaces,
   return { classifications, documentMetas };
 }
 
+const MAX_SYSTEM_TOPICS = 4;
+
 // Shared M4 AI topic-taxonomy generation over classification-shaped entries.
-async function runAiTopicGeneration({ store, actorKey, targetEntries, maxTopics = 5, privateConfig, aiCompletion }) {
+async function runAiTopicGeneration({ store, actorKey, targetEntries, maxTopics = MAX_SYSTEM_TOPICS, privateConfig, aiCompletion }) {
   const existingWorkspaces = store.listWorkspaces(actorKey);
+  const effectiveMaxTopics = Math.max(2, Math.min(MAX_SYSTEM_TOPICS, maxTopics));
   const systemPrompt = [
-    '你是资深学术研究与产业分析专家。请根据给定的文献列表，自动提炼并规划一套清晰、聚焦的研究主题体系（Topic Taxonomy）。',
-    '【关键原则】',
-    `1. 主题数量严格精炼：提炼 3 到 ${maxTopics} 个高层次、非重叠的核心研究方向，避免过多细碎主题；`,
-    '2. 若已有候选主题且语义契合，请优先复用或在其基础上扩展，避免创建重复主题；',
-    '3. 为每个主题提供：`name`（15字以内的凝练中文名称）、`researchQuestion`（核心研究问题）、`inclusionRules`（清晰的纳入规则）、`exclusionRules`（排除规则）；',
-    '4. 为每篇待分类文献推荐最契合的主题（可多对多），仅当极个别文献确实与主要主题完全无关时才设立兜底补充主题；',
-    '5. 在同一次返回中为每篇文献生成规范中文名与元数据，不要要求第二次模型调用；',
-    '6. 规范中文名必须自然可展示：若文献附带「正文节选」，标题/机构/年份的识别优先依据正文内容；无法确定时直接省略装饰并留空字段，严禁编造「未注明机构」「未知年份」等占位词；',
-    '7. 只输出合法的 JSON 对象，严禁 Markdown 代码块。',
+    '你是资深学术研究与产业分析专家。请根据给定的文献列表，自动规划一套极度精炼、高层次的研究大类体系（Topic Taxonomy）。',
+    '【分类绝对精炼原则】',
+    `1. 严禁细分与碎片化：全知识库最多只允许提炼 3 到 ${effectiveMaxTopics} 个高层次、宽泛涵盖的宏观大类（例如：「全球宏观与市场策略」、「行业深度与产业投资」、「量化投资与资产配置」）。严禁出现微观、狭窄的碎片化主题；`,
+    '2. 严禁创建语义相近的平行主题：若文献与现有候选主题有任何交集或相关性，必须无条件优先合并归入已有主题！例如绝不允许同时存在“指数规则”与“指数政策”，必须合并归入单一宏观大类；',
+    '3. 只有当候选文献属于此前完全空白的全新顶级宏观领域时才允许补充新建主题；全库主题总数绝对不得超过 4 个；',
+    '4. 为每个主题提供：`name`（15字以内的凝练中文名称）、`researchQuestion`（核心研究问题）、`inclusionRules`（清晰的纳入规则）、`exclusionRules`（排除规则）；',
+    '5. 必须为每篇待分类文献推荐最契合的大类主题（强力归纳），非极端特殊情况不得拒收；',
+    '6. 在同一次返回中为每篇文献生成规范中文名与元数据，不要要求第二次模型调用；',
+    '7. 规范中文名必须自然可展示：若文献附带「正文节选」，标题/机构/年份的识别优先依据正文内容；无法确定时直接省略装饰并留空字段，严禁编造「未注明机构」「未知年份」等占位词；',
+    '8. 只输出合法的 JSON 对象，严禁 Markdown 代码块。',
     'JSON 格式示例：',
     '{',
     '  "topics": [',
     '    {',
-    '      "name": "具身智能与机器人控制",',
-    '      "researchQuestion": "端到端具身多模态模型在通用机器人控制与动作规划中的落地机制",',
-    '      "inclusionRules": "涉及机器人感知、决策、控制、动作生成及具身数据训练的文献",',
-    '      "exclusionRules": "纯软件大模型推理或传统非智能自动化"',
+    '      "name": "全球宏观与市场策略",',
+    '      "researchQuestion": "全球宏观经济波动、利率汇率周期及大类资产价格形成机制",',
+    '      "inclusionRules": "宏观经济展望、央行货币政策、流动性与大类资产配置研报",',
+    '      "exclusionRules": "纯个股微观财报"'
     '    }',
     '  ],',
     '  "classifications": {',
     '    "entry-id-1": [',
-    '      { "topicName": "具身智能与机器人控制", "confidence": 0.95, "reason": "聚焦端到端机器人动作生成" }',
+    '      { "topicName": "全球宏观与市场策略", "confidence": 0.95, "reason": "聚焦全球宏观货币政策分析" }',
     '    ]',
     '  },',
     '  "documentMetadata": {',
@@ -1327,6 +1331,7 @@ async function runAiTopicGeneration({ store, actorKey, targetEntries, maxTopics 
   const allCurrentWorkspaces = [...existingWorkspaces];
 
   for (const topic of rawTopics) {
+    if (allCurrentWorkspaces.length >= MAX_SYSTEM_TOPICS) break;
     const rawName = String(topic?.name || '').trim().slice(0, 100);
     if (!rawName) continue;
     const existing = allCurrentWorkspaces.find(w => w.name.toLowerCase() === rawName.toLowerCase());
@@ -3194,7 +3199,7 @@ export function createCanvasHandler(store, {
           error(res, 503, 'ai_not_configured', 'AI 模型尚未配置');
           return;
         }
-        const maxTopics = typeof body?.maxTopics === 'number' ? Math.max(2, Math.min(8, Math.floor(body.maxTopics))) : 5;
+        const maxTopics = typeof body?.maxTopics === 'number' ? Math.max(2, Math.min(MAX_SYSTEM_TOPICS, Math.floor(body.maxTopics))) : MAX_SYSTEM_TOPICS;
         try {
           const data = await runAiTopicGeneration({ store, actorKey: actor.actorKey, targetEntries, maxTopics, privateConfig, aiCompletion });
           json(res, 200, { data });

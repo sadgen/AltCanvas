@@ -255,14 +255,13 @@
         </div>
 
         <!-- M4 library view filters -->
-        <div id="library-filter-chips" class="flex gap-1 overflow-x-auto pb-1 text-[11px] custom-scrollbar">
-          <button data-lib-filter="all" class="lib-filter-chip px-2.5 py-1 rounded bg-blue-600 text-white whitespace-nowrap transition">全部</button>
-          <button data-lib-filter="unclassified" class="lib-filter-chip px-2.5 py-1 rounded bg-slate-900 text-slate-400 hover:text-slate-200 whitespace-nowrap transition">未分类</button>
-          <button data-lib-filter="no-pdf" class="lib-filter-chip px-2.5 py-1 rounded bg-slate-900 text-slate-400 hover:text-slate-200 whitespace-nowrap transition">无 PDF</button>
-          <button data-lib-filter="file-missing" class="lib-filter-chip px-2.5 py-1 rounded bg-slate-900 text-slate-400 hover:text-slate-200 whitespace-nowrap transition">文件缺失</button>
-          <button data-lib-filter="trash" class="lib-filter-chip px-2.5 py-1 rounded bg-slate-900 text-slate-400 hover:text-slate-200 whitespace-nowrap transition">回收站</button>
-          <button id="btn-library-ai-classify" type="button" class="px-2.5 py-1 rounded bg-purple-950/70 text-purple-300 border border-purple-800/60 hover:bg-purple-900/70 whitespace-nowrap transition" title="AI 只识别尚未命名的文献（已有 AI 元数据的自动跳过），并归类到主题">✨ AI 识别新增</button>
-          <button id="btn-library-ai-reclassify" type="button" class="px-2 py-1 rounded bg-slate-900 text-slate-400 border border-slate-800 hover:text-purple-300 whitespace-nowrap transition" title="忽略已有 AI 元数据，强制重新识别全部文献（覆盖 AI 命名并重新归类；手动编辑的不受影响）">🔁 重识别全部</button>
+        <div class="flex items-center justify-between gap-1.5 pb-1">
+          <div id="library-filter-chips" class="flex gap-1 text-[11px]">
+            <button data-lib-filter="all" class="lib-filter-chip px-2.5 py-1 rounded bg-blue-600 text-white whitespace-nowrap transition">全部</button>
+            <button data-lib-filter="unclassified" class="lib-filter-chip px-2.5 py-1 rounded bg-slate-900 text-slate-400 hover:text-slate-200 whitespace-nowrap transition">未分类</button>
+            <button data-lib-filter="trash" class="lib-filter-chip px-2.5 py-1 rounded bg-slate-900 text-slate-400 hover:text-slate-200 whitespace-nowrap transition">回收站</button>
+          </div>
+          <button id="btn-library-ai-classify" type="button" class="px-2.5 py-1 rounded bg-purple-950/70 text-purple-300 border border-purple-800/60 hover:bg-purple-900/70 whitespace-nowrap transition text-[11px] font-medium" title="对选中文件（未选时默认识别未分类文件）执行 AI 识别与归类">✨ AI 识别与归类</button>
         </div>
 
         <!-- 主题筛选（合并原「主题分类」Tab）：选择主题即只显示该主题下可阅读的 PDF -->
@@ -273,16 +272,27 @@
           <button id="btn-manage-library-topic" type="button" class="text-[11px] text-slate-400 hover:text-indigo-300 whitespace-nowrap">管理</button>
         </div>
 
-        <!-- 排序 -->
-        <div class="flex items-center gap-1.5">
-          <label for="select-library-sort" class="text-[10px] text-slate-500 whitespace-nowrap">排序</label>
-          <select id="select-library-sort" class="flex-1 min-w-0 bg-slate-900 text-slate-400 border border-slate-800 rounded px-2 py-1 text-[11px] focus:outline-none focus:border-indigo-500">
-            <option value="recent">最近更新（新→旧）</option>
-            <option value="oldest">时间（旧→新）</option>
-            <option value="title">名称 A→Z</option>
-            <option value="title-desc">名称 Z→A</option>
-          </select>
+        <!-- 排序与多选状态栏 -->
+        <div class="flex items-center justify-between gap-1.5">
+          <div class="flex items-center gap-1.5 flex-1 min-w-0">
+            <label for="select-library-sort" class="text-[10px] text-slate-500 whitespace-nowrap">排序</label>
+            <select id="select-library-sort" class="flex-1 min-w-0 bg-slate-900 text-slate-400 border border-slate-800 rounded px-2 py-1 text-[11px] focus:outline-none focus:border-indigo-500">
+              <option value="recent">最近更新（新→旧）</option>
+              <option value="oldest">时间（旧→新）</option>
+              <option value="title">名称 A→Z</option>
+              <option value="title-desc">名称 Z→A</option>
+            </select>
+          </div>
           <span id="topic-library-count" class="text-[10px] text-slate-500 whitespace-nowrap"></span>
+        </div>
+
+        <!-- 多选提示栏 -->
+        <div id="library-selection-bar" class="hidden flex items-center justify-between px-2 py-1 bg-indigo-950/50 border border-indigo-900/60 rounded text-[11px] text-indigo-200">
+          <span>已勾选 <b id="library-selected-count" class="text-white font-mono">0</b> 篇文献</span>
+          <div class="flex items-center gap-2">
+            <button id="btn-select-all-visible" type="button" class="text-indigo-300 hover:text-white underline text-[10px]">全选当前</button>
+            <button id="btn-clear-selection" type="button" class="text-slate-400 hover:text-slate-200 text-[10px]">取消勾选</button>
+          </div>
         </div>
 
         </div>
@@ -1082,6 +1092,23 @@
     // 文库列表的主题筛选（'' = 全部主题）。独立于画板当前主题，避免
     // renderTopicWorkspaceSelector 重建下拉时覆盖用户的筛选选择。
     let libraryTopicFilter = '';
+    // 文库多选状态：用户勾选的部分文献 ID 集合
+    const selectedDocumentKeys = new Set();
+
+    function updateLibrarySelectionUI() {
+      const bar = document.getElementById('library-selection-bar');
+      const countEl = document.getElementById('library-selected-count');
+      const btnClassify = document.getElementById('btn-library-ai-classify');
+      const count = selectedDocumentKeys.size;
+      if (bar) bar.classList.toggle('hidden', count === 0);
+      if (countEl) countEl.textContent = count;
+      if (btnClassify && !btnClassify.disabled) {
+        btnClassify.textContent = count > 0 ? `✨ AI 识别已选 (${count})` : '✨ AI 识别与归类';
+      }
+      document.querySelectorAll('.item-select-checkbox').forEach(cb => {
+        cb.checked = selectedDocumentKeys.has(cb.dataset.itemKey);
+      });
+    }
     let topicLibraryLoadToken = 0;
     let currentItem = null;
     let currentAttachment = null;
@@ -1863,11 +1890,17 @@
         showToast(`排序失败: ${errorMessage(err)}`, 'error');
       });
     });
-    document.getElementById('btn-library-ai-classify')?.addEventListener('click', () => libraryAiClassifyFlow(false));
-    document.getElementById('btn-library-ai-reclassify')?.addEventListener('click', () => {
-      if (!confirm('强制重识别将对全部文献重新执行 AI 命名与归类，并覆盖现有 AI 元数据（手动编辑的不受影响）。继续？')) return;
-      libraryAiClassifyFlow(true);
+    document.getElementById('btn-select-all-visible')?.addEventListener('click', () => {
+      document.querySelectorAll('.item-select-checkbox').forEach(cb => {
+        if (cb.dataset.itemKey) selectedDocumentKeys.add(cb.dataset.itemKey);
+      });
+      updateLibrarySelectionUI();
     });
+    document.getElementById('btn-clear-selection')?.addEventListener('click', () => {
+      selectedDocumentKeys.clear();
+      updateLibrarySelectionUI();
+    });
+    document.getElementById('btn-library-ai-classify')?.addEventListener('click', () => libraryAiClassifyFlow());
     document.getElementById('select-library-topic')?.addEventListener('change', async event => {
       libraryTopicFilter = event.target.value;
       const workspaceId = libraryTopicFilter;
@@ -2101,9 +2134,9 @@
       allItems = nativeDocs.map(nativeDocumentToLibraryItem).filter(Boolean);
       renderItems();
       // 保持当前视图：主题筛选 → 主题 PDF 视图；chips 筛选 → 用新数据重应用。
-      if (libraryTopicFilter) {
+      if (typeof libraryTopicFilter !== 'undefined' && libraryTopicFilter) {
         void loadTopicLibraryDocuments().catch(() => {});
-      } else if (libraryFilterState !== 'all') {
+      } else if (typeof libraryFilterState !== 'undefined' && libraryFilterState !== 'all') {
         void applyLibraryFilter(libraryFilterState).catch(() => {});
       }
     }
@@ -2168,38 +2201,53 @@
         const typeLabel = isPdfAttachment ? 'PDF 附件' : (item.data?.itemType || 'document');
         const numChildren = item.meta?.numChildren || 0;
 
+        const isChecked = selectedDocumentKeys.has(item.key);
+
         div.innerHTML = `
-          <div class="flex items-start justify-between gap-1.5">
-            <div class="font-medium ${isSelected ? 'text-blue-300' : 'group-hover:text-blue-400 text-slate-200'} line-clamp-2 leading-snug flex-1">${escapeHTML(displayTitle)}</div>
-            <button type="button" class="btn-item-edit-meta p-0.5 text-slate-500 hover:text-blue-400 opacity-0 group-hover:opacity-100 transition flex-shrink-0" title="编辑易读中文名" aria-label="编辑研报元数据">
-              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
-            </button>
-          </div>
-          ${item.isNative ? `<div class="text-[10px] text-slate-500 truncate mt-0.5" title="原始文件名（磁盘文件名）">📄 ${escapeHTML(item.sourceFile?.filename || '未入库 / 无原始文件')}</div>` : ''}
-          ${meta?.cleanTitle && rawName !== meta.cleanTitle && !item.isNative ? `<div class="text-[10px] text-slate-500 truncate mt-0.5" title="${escapeHTML(rawName)}">${escapeHTML(rawName)}</div>` : ''}
-          ${item.isNative && item.sourceFile && item.sourceFile.status !== 'active' ? `<div class="mt-1"><span class="px-1.5 py-0.2 rounded bg-amber-950/60 border border-amber-800/60 text-[10px] text-amber-300">${escapeHTML(M4_SOURCE_STATUS_LABELS[item.sourceFile.status] || item.sourceFile.status)}</span></div>` : ''}
-          <div class="flex items-center justify-between mt-1.5 text-[11px] text-slate-500">
-            <div class="flex items-center gap-1 overflow-hidden">
-              <span class="px-1.5 py-0.2 rounded bg-slate-900 border border-slate-800 text-[10px] text-slate-400 flex-shrink-0">${escapeHTML(typeLabel)}</span>
-              ${meta?.institution ? `<span class="px-1.5 py-0.2 rounded bg-indigo-950/70 border border-indigo-800/60 text-[10px] text-indigo-300 truncate max-w-[90px]" title="${escapeHTML(meta.institution)}">🏛️ ${escapeHTML(meta.institution)}</span>` : ''}
-              ${meta?.year ? `<span class="px-1 py-0.2 rounded bg-slate-900 text-[10px] text-slate-400 font-mono">${escapeHTML(meta.year)}</span>` : ''}
+          <div class="flex items-start gap-2">
+            <input type="checkbox" class="item-select-checkbox mt-1 w-3.5 h-3.5 rounded border-slate-700 bg-slate-900 text-indigo-500 focus:ring-0 cursor-pointer flex-shrink-0" ${isChecked ? 'checked' : ''} data-item-key="${escapeHTML(item.key)}" title="勾选加入针对性AI识别与归类">
+            <div class="min-w-0 flex-1">
+              <div class="flex items-start justify-between gap-1.5">
+                <div class="font-medium ${isSelected ? 'text-blue-300' : 'group-hover:text-blue-400 text-slate-200'} line-clamp-2 leading-snug flex-1">${escapeHTML(displayTitle)}</div>
+                <button type="button" class="btn-item-edit-meta p-0.5 text-slate-500 hover:text-blue-400 opacity-0 group-hover:opacity-100 transition flex-shrink-0" title="编辑易读中文名" aria-label="编辑研报元数据">
+                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
+                </button>
+              </div>
+              ${item.isNative ? `<div class="text-[10px] text-slate-500 truncate mt-0.5" title="原始文件名（磁盘文件名）">📄 ${escapeHTML(item.sourceFile?.filename || '未入库 / 无原始文件')}</div>` : ''}
+              ${meta?.cleanTitle && rawName !== meta.cleanTitle && !item.isNative ? `<div class="text-[10px] text-slate-500 truncate mt-0.5" title="${escapeHTML(rawName)}">${escapeHTML(rawName)}</div>` : ''}
+              ${item.isNative && item.sourceFile && item.sourceFile.status !== 'active' ? `<div class="mt-1"><span class="px-1.5 py-0.2 rounded bg-amber-950/60 border border-amber-800/60 text-[10px] text-amber-300">${escapeHTML(M4_SOURCE_STATUS_LABELS[item.sourceFile.status] || item.sourceFile.status)}</span></div>` : ''}
+              <div class="flex items-center justify-between mt-1.5 text-[11px] text-slate-500">
+                <div class="flex items-center gap-1 overflow-hidden">
+                  <span class="px-1.5 py-0.2 rounded bg-slate-900 border border-slate-800 text-[10px] text-slate-400 flex-shrink-0">${escapeHTML(typeLabel)}</span>
+                  ${meta?.institution ? `<span class="px-1.5 py-0.2 rounded bg-indigo-950/70 border border-indigo-800/60 text-[10px] text-indigo-300 truncate max-w-[90px]" title="${escapeHTML(meta.institution)}">🏛️ ${escapeHTML(meta.institution)}</span>` : ''}
+                  ${meta?.year ? `<span class="px-1 py-0.2 rounded bg-slate-900 text-[10px] text-slate-400 font-mono">${escapeHTML(meta.year)}</span>` : ''}
+                </div>
+                <div class="flex items-center gap-1.5 font-mono text-[10px] flex-shrink-0">
+                  ${numChildren > 0 ? `<span class="text-slate-400">📎 ${numChildren}</span>` : ''}
+                  <span class="text-slate-500">${escapeHTML(item.key)}</span>
+                </div>
+              </div>
+              ${item.isNative && item.sourceFile ? `
+              <div class="flex flex-wrap gap-1 mt-1.5 native-item-actions">
+                <button type="button" class="px-1.5 py-0.5 rounded bg-indigo-950/60 border border-indigo-800/60 text-[10px] text-indigo-300 hover:text-indigo-200" data-native-action="add-topic" title="把该文献加入研究主题">📚 主题</button>
+                <button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-slate-300 hover:text-slate-100" data-native-action="rename-original" title="重命名磁盘上的原始文件（文库文件名不变）">✏️ 原始文件</button>
+                <button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-slate-300 hover:text-slate-100" data-native-action="move" title="移动原始文件到其他目录">📂 移动</button>
+                ${item.sourceFile.status === 'trashed'
+                  ? '<button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-emerald-300 hover:text-emerald-200" data-native-action="restore">♻️ 恢复</button>'
+                  : '<button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-rose-300 hover:text-rose-200" data-native-action="trash">🗑 移入回收站</button>'}
+              </div>` : ''}
             </div>
-            <div class="flex items-center gap-1.5 font-mono text-[10px] flex-shrink-0">
-              ${numChildren > 0 ? `<span class="text-slate-400">📎 ${numChildren}</span>` : ''}
-              <span class="text-slate-500">${escapeHTML(item.key)}</span>
-            </div>
           </div>
-          ${item.isNative && item.sourceFile ? `
-          <div class="flex flex-wrap gap-1 mt-1.5 native-item-actions">
-            <button type="button" class="px-1.5 py-0.5 rounded bg-indigo-950/60 border border-indigo-800/60 text-[10px] text-indigo-300 hover:text-indigo-200" data-native-action="add-topic" title="把该文献加入研究主题（主题分类 Tab 可按主题打开）">📚 主题</button>
-            <button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-slate-300 hover:text-slate-100" data-native-action="rename-original" title="重命名磁盘上的原始文件（文库文件名不变）">✏️ 原始文件</button>
-            <button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-slate-300 hover:text-slate-100" data-native-action="move" title="移动原始文件到其他目录">📂 移动</button>
-            ${item.sourceFile.status === 'trashed'
-              ? '<button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-emerald-300 hover:text-emerald-200" data-native-action="restore">♻️ 恢复</button>'
-              : '<button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-rose-300 hover:text-rose-200" data-native-action="trash">🗑 移入回收站</button>'}
-          </div>` : ''}
         `;
         div.onclick = (e) => {
+          const cb = e.target.closest('.item-select-checkbox');
+          if (cb) {
+            e.stopPropagation();
+            if (cb.checked) selectedDocumentKeys.add(item.key);
+            else selectedDocumentKeys.delete(item.key);
+            updateLibrarySelectionUI();
+            return;
+          }
           if (e.target.closest('.btn-item-edit-meta')) {
             e.stopPropagation();
             openDocMetaModal(item);
@@ -2228,6 +2276,7 @@
         };
         container.appendChild(div);
       }
+      updateLibrarySelectionUI();
     }
 
     // ============================================================
@@ -2681,6 +2730,7 @@
           || (await m4Fetch(`/native/file-operations/${operationId}`).catch(() => null))?.data?.payload?.report?.enrolledDocumentIds
           || [];
         if (enrolledIds.length) {
+          if (btn) btn.textContent = '⏳ AI 刷新元数据...';
           try {
             const res = await refreshLibraryMetadataWithAi(enrolledIds, { onProgress: t => { if (btn) btn.textContent = t; } });
             if (res.analyzed) {
@@ -2976,17 +3026,32 @@
       return totals;
     }
 
-    async function libraryAiClassifyFlow(force = false) {
-      const btn = document.getElementById(force ? 'btn-library-ai-reclassify' : 'btn-library-ai-classify');
+    async function libraryAiClassifyFlow() {
+      const btn = document.getElementById('btn-library-ai-classify');
       if (btn) { btn.disabled = true; btn.textContent = '⏳ AI 分析中...'; }
       try {
-        const totals = await refreshLibraryMetadataWithAi(null, { onProgress: t => { if (btn) btn.textContent = t; }, force });
+        let targetIds = null;
+        let isSelectedMode = false;
+        if (selectedDocumentKeys.size > 0) {
+          targetIds = Array.from(selectedDocumentKeys);
+          isSelectedMode = true;
+        }
+        // 若用户主动勾选了部分文献，force: true 对这部分执行全新的正文识别与归类；
+        // 若未勾选，默认处理当前未分类的文献（增量跳过）。
+        const totals = await refreshLibraryMetadataWithAi(targetIds, {
+          onProgress: t => { if (btn) btn.textContent = t; },
+          force: isSelectedMode
+        });
+        if (isSelectedMode) {
+          selectedDocumentKeys.clear();
+          updateLibrarySelectionUI();
+        }
         if (!totals.batches) {
-          showToast('全部文献均已识别过 AI 元数据，无需重复识别（确需刷新请用「🔁 重识别全部」）', 'info');
+          showToast(isSelectedMode ? '所选文献暂无有效内容' : '当前文献均已完成 AI 识别与归类', 'info');
         } else if (totals.failedBatches) {
-          showToast(`AI 部分完成：已处理 ${totals.batches - totals.failedBatches}/${totals.batches} 批，${totals.failedBatches} 批失败（网关超时或网络波动，可重试续跑）`, 'error');
+          showToast(`AI 部分完成：已处理 ${totals.batches - totals.failedBatches}/${totals.batches} 批，${totals.failedBatches} 批失败（可重试续跑）`, 'error');
         } else {
-          showToast(`AI 完成：识别 ${totals.analyzed} 篇文献（含中文名刷新），提炼 ${totals.created} 个新主题，采纳 ${totals.applied} 条归类建议`, 'success');
+          showToast(`AI 完成：识别 ${totals.analyzed} 篇文献（已提取中文名并归入宏观大类），提炼 ${totals.created} 个新分类，采纳 ${totals.applied} 条归类`, 'success');
         }
         if (userWorkspaces) {
           userWorkspaces = await canvasFetch('/workspaces').catch(() => userWorkspaces);
@@ -2994,9 +3059,9 @@
         await refreshCurrentLibraryView().catch(() => {});
       } catch (err) {
         if (err.code === 'ai_not_configured') showToast('AI 模型尚未配置', 'error');
-        else showToast(`AI 主题归类失败: ${errorMessage(err)}`, 'error');
+        else showToast(`AI 识别归类失败: ${errorMessage(err)}`, 'error');
       } finally {
-        if (btn) { btn.disabled = false; btn.textContent = '✨ AI 主题归类'; }
+        if (btn) { btn.disabled = false; updateLibrarySelectionUI(); }
       }
     }
 

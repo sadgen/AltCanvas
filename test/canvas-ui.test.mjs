@@ -258,7 +258,8 @@ assert.match(html, /原始文件名（磁盘文件名）/, 'library items must d
     getElementById: () => ({ disabled: false, textContent: '' })
   };
   const runner = new Function(
-    'm4Fetch', 'document', 'showToast', 'userWorkspaces', 'canvasFetch', 'applyLibraryFilter', 'libraryFilterState',
+    'm4Fetch', 'document', 'showToast', 'userWorkspaces', 'canvasFetch', 'refreshCurrentLibraryView',
+    'selectedDocumentKeys', 'updateLibrarySelectionUI', 'refreshLibraryMetadataWithAi',
     `return (async () => { ${fnMatch[1]} })();`
   );
   await runner(
@@ -289,12 +290,11 @@ assert.match(html, /原始文件名（磁盘文件名）/, 'library items must d
     [{ id: 'ws-A', name: 'Topic A' }],
     async (path) => [{ id: 'ws-A', name: 'Topic A' }],
     async () => {},
-    'all'
+    new Set(['doc-1', 'doc-2']),
+    () => {},
+    async (targets, opts) => ({ batches: 1, failedBatches: 0, analyzed: 2, created: 1, applied: 2 })
   );
 
-  const batchCalls = m4Calls.filter(c => c.path === '/native/documents/batch-topics');
-  assert.equal(batchCalls.length, 1, 'Only one workspace received >=0.7 suggestions');
-  assert.deepEqual(batchCalls[0].body, { documentIds: ['doc-1', 'doc-2'], topicIds: ['ws-A'] });
   assert.equal(toastCalls.some(t => t.type === 'success' && /采纳 2 条/.test(t.msg)), true,
     'must report the number of applied suggestions');
 }
@@ -1884,13 +1884,13 @@ assert.ok(html.includes('btn-confirm-add-to-topic'), 'add-to-topic confirm butto
 assert.ok(!html.includes('可在“收件箱”中先完成 AI 分类'), 'topic-tab empty state must not reference the retired inbox');
 
 // [M4 UX] 扫描 → AI 刷新元数据（分类 + 标题识别同一次调用）自动闭环。
-assert.ok(html.includes('refreshLibraryMetadataWithAi(enrolledIds)'),
+assert.ok(html.includes('refreshLibraryMetadataWithAi(enrolledIds'),
   'a scan with newly enrolled documents must trigger the AI metadata refresh');
 assert.ok(html.includes("AI 刷新元数据"), 'the scan button must surface the metadata-refresh phase');
 assert.ok(html.includes('ai_not_configured') && html.includes('暂以文件名作为文库文件名'),
   'an unconfigured AI must degrade gracefully after enrollment');
-assert.ok(/async function libraryAiClassifyFlow[\s\S]*?refreshLibraryMetadataWithAi\(null\)/.test(html),
-  'the manual AI button must reuse the shared metadata-refresh flow');
+assert.ok(/async function libraryAiClassifyFlow[\s\S]*?refreshLibraryMetadataWithAi\(targetIds/.test(html),
+  'the manual AI button must reuse the shared metadata-refresh flow with targetIds');
 // 刷新必须读取 PDF 真实正文（与「✨ 识别标题」同深度），而不是只凭元数据。
 assert.ok(html.includes("import('/reader/pdf/build/pdf.mjs')"),
   'the refresh flow must reuse the vendored PDF.js build for text extraction');
@@ -1918,15 +1918,16 @@ assert.ok(html.includes('id="select-library-sort"'), 'the library must expose a 
 assert.ok(html.includes('function sortLibraryItems'), 'library items must be sortable');
 assert.ok(html.includes('libraryItemTimestamp'), 'sorting must support timestamp modes');
 assert.ok(html.includes('zh-Hans-CN'), 'title sorting must use Chinese-aware collation');
-// [M4 UX] AI 识别分增量与强制两档：✨ 只识别未命名文献（跳过已有 AI 元数据），
-// 🔁 才会全量重识别并覆盖。
-assert.ok(html.includes('btn-library-ai-reclassify'), 'a force re-recognize entry must exist');
-assert.ok(html.includes('refreshLibraryMetadataWithAi(null, { onProgress: t => { if (btn) btn.textContent = t; }, force })'),
-  'the shared refresh must honor the force flag');
-assert.ok(html.includes("meta.source === 'ai_classification'"),
-  'documents with current AI metadata must be skipped on incremental runs');
-assert.ok(html.includes('全部文献均已识别过 AI 元数据'),
-  'an all-recognized library must surface a no-op notice instead of a fake AI run');
+// [M4 UX] 极简设计：移除无意义 chips（no-pdf, file-missing），移除多余 reclassify 按钮，
+// 统一收敛为单一「✨ AI 识别与归类」按钮并支持列表多选勾选。
+assert.ok(!html.includes('data-lib-filter="no-pdf"'), 'useless no-pdf chip must be removed');
+assert.ok(!html.includes('data-lib-filter="file-missing"'), 'useless file-missing chip must be removed');
+assert.ok(!html.includes('btn-library-ai-reclassify'), 'redundant reclassify button must be removed');
+assert.ok(html.includes('id="btn-library-ai-classify"'), 'single unified AI classify button must exist');
+assert.ok(html.includes('item-select-checkbox'), 'library items must have selection checkboxes');
+assert.ok(html.includes('id="library-selection-bar"'), 'library selection bar must exist');
+assert.ok(html.includes('const selectedDocumentKeys'), 'multi-select set must exist');
+assert.ok(html.includes('selectedDocumentKeys.size > 0'), 'classify flow must check selection state');
 // 「已识别」必须指"按当前附件内容识别过"（记录了附件 id + 版本），
 // 而不是仅仅存在一条早期元数据——否则未读正文的旧记录会被误跳过。
 assert.ok(html.includes('recognizedVersion >= currentVersion'),
@@ -1935,7 +1936,7 @@ assert.ok(html.includes('meta.attachmentKey !== (attachment.key || attachment.da
   'the skip check must bind recognition to the current attachment id');
 // 先过滤待识别、再按上限裁剪：否则最近更新的已识别文献会挤占名额，
 // 最久未识别的文献永远轮不到。
-assert.ok(/targets = targets\.filter\(item => \{[\s\S]*?\n      \}\)\n      targets = targets\.slice\(0, 50\);/.test(html),
+assert.ok(/targets = targets\.filter\(item => \{[\s\S]*?\}\);?\s*\}?\s*targets = targets\.slice\(0, 50\);/.test(html),
   'candidate capping must happen AFTER the incremental skip filter');
 // [M4 UX] 筛选视图必须持久化：点列表里的 PDF（openItem → renderItems）后，
 // 筛选状态不得被重绘回全量列表（未分类视图点击文献即变"全部"的回归）。
