@@ -1933,6 +1933,10 @@ assert.ok(html.includes('recognizedVersion >= currentVersion'),
   'the skip check must compare the recognized attachment version');
 assert.ok(html.includes('meta.attachmentKey !== (attachment.key || attachment.data?.key)'),
   'the skip check must bind recognition to the current attachment id');
+// 先过滤待识别、再按上限裁剪：否则最近更新的已识别文献会挤占名额，
+// 最久未识别的文献永远轮不到。
+assert.ok(/targets = targets\.filter\(item => \{[\s\S]*?\n      \}\)\n      targets = targets\.slice\(0, 50\);/.test(html),
+  'candidate capping must happen AFTER the incremental skip filter');
 
 assert.match(devServer, /style-src-attr 'unsafe-inline'/, 'CSP must permit dynamic Canvas geometry styles');
 assert.match(devServer, /script-src 'self'/, 'script CSP must remain restricted');
