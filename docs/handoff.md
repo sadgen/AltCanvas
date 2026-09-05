@@ -2207,3 +2207,21 @@ altcanvas.conf.bak-20260905，nginx -t 通过后 reload，外网域名验证 200
   受保护。
 - 扫描自动刷新本就只作用于新入册文档，语义不变。canvas-ui 断言钉住
   跳过条件、force 透传与 no-op 提示。
+
+## 2026-09-05 会话九（「已识别」语义修复：识别必须绑定附件内容，`822f683`）
+
+用户实机发现矛盾：✨ 识别新增提示"全部已识别"，但单篇「✨ 识别标题」却能
+识别出新名字。根因：增量跳过只看"是否存在 ai_classification 元数据"，而
+分类保存的元数据从不记录附件 id/版本（始终 null）——**未读正文的旧元数据
+（按文件名/元数据取名）同样带已识别标记**，于是被误跳过。
+
+- 分类保存元数据时记录识别所针对的附件 id + version
+  （nativeDocumentToClassificationEntry 携带、saveClassificationDocumentMetas
+  优先采用 entry 的当前附件身份）；
+- 客户端跳过条件收紧为：meta.source=ai_classification 且
+  attachmentKey=当前附件 id 且 attachmentVersion ≥ 当前版本。无 PDF 的纯
+  元数据文献有 AI 元数据即视为已处理；force 忽略一切跳过。
+- **存量自愈**：旧记录（attachment_version=null）会在下一次 ✨ 时自动重新
+  识别一次（这次读正文）并补记版本，此后恢复正常增量跳过。
+- canvas.test 断言分类绑定附件 id+version；canvas-ui 断言跳过条件绑定
+  当前附件身份。`npm test` 10 套全绿（exit 0）。
