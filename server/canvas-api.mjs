@@ -1283,7 +1283,7 @@ async function runAiTopicGeneration({ store, actorKey, targetEntries, maxTopics 
     '2. 严禁创建语义相近的平行主题：若文献与现有候选主题有任何交集或相关性，必须无条件优先合并归入已有主题！例如绝不允许同时存在“指数规则”与“指数政策”，必须合并归入单一宏观大类；',
     '3. 只有当候选文献属于此前完全空白的全新顶级宏观领域时才允许补充新建主题；全库主题总数绝对不得超过 4 个；',
     '4. 为每个主题提供：`name`（15字以内的凝练中文名称）、`researchQuestion`（核心研究问题）、`inclusionRules`（清晰的纳入规则）、`exclusionRules`（排除规则）；',
-    '5. 必须为每篇待分类文献推荐最契合的大类主题（强力归纳），非极端特殊情况不得拒收；',
+    '5. 必须为每篇待分类文献推荐最契合的大类主题（强力归纳）：每篇文献都必须至少给出一条主题建议并给出与其契合度相称的置信度（契合即 0.7 以上），严禁因"不完全契合"而拒收或压低置信度；',
     '6. 在同一次返回中为每篇文献生成规范中文名与元数据，不要要求第二次模型调用；',
     '7. 规范中文名必须自然可展示：若文献附带「正文节选」，标题/机构/年份的识别优先依据正文内容；无法确定时直接省略装饰并留空字段，严禁编造「未注明机构」「未知年份」等占位词；',
     '8. 只输出合法的 JSON 对象，严禁 Markdown 代码块。',
@@ -1332,10 +1332,11 @@ async function runAiTopicGeneration({ store, actorKey, targetEntries, maxTopics 
   const rawClassifications = parsed.classifications || {};
 
   const createdWorkspaces = [];
-  const allCurrentWorkspaces = [...existingWorkspaces];
+  // 「我的研究主题」是系统默认主题，不占用宏观大类名额。
+  const macroTopics = () => allCurrentWorkspaces.filter(w => w.name !== '我的研究主题');
 
   for (const topic of rawTopics) {
-    if (allCurrentWorkspaces.length >= MAX_SYSTEM_TOPICS) break;
+    if (macroTopics().length >= MAX_SYSTEM_TOPICS) break;
     const rawName = String(topic?.name || '').trim().slice(0, 100);
     if (!rawName) continue;
     const existing = allCurrentWorkspaces.find(w => w.name.toLowerCase() === rawName.toLowerCase());

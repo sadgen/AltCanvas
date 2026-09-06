@@ -260,6 +260,7 @@ assert.match(html, /原始文件名（磁盘文件名）/, 'library items must d
   const runner = new Function(
     'm4Fetch', 'document', 'showToast', 'userWorkspaces', 'canvasFetch', 'refreshCurrentLibraryView',
     'selectedDocumentKeys', 'updateLibrarySelectionUI', 'refreshLibraryMetadataWithAi',
+    'errorMessage', 'renderTopicWorkspaceSelector', 'canvasWorkspace',
     `return (async () => { ${fnMatch[1]} })();`
   );
   await runner(
@@ -292,7 +293,10 @@ assert.match(html, /原始文件名（磁盘文件名）/, 'library items must d
     async () => {},
     new Set(['doc-1', 'doc-2']),
     () => {},
-    async (targets, opts) => ({ batches: 1, failedBatches: 0, analyzed: 2, created: 1, applied: 2 })
+    async (targets, opts) => ({ batches: 1, failedBatches: 0, analyzed: 2, created: 1, applied: 2 }),
+    (e) => e.message,
+    () => {},
+    { id: 'ws-current' }
   );
 
   assert.equal(toastCalls.some(t => t.type === 'success' && /采纳 2 条/.test(t.msg)), true,

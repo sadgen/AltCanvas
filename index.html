@@ -2237,11 +2237,12 @@
               ${meta?.cleanTitle && rawName !== meta.cleanTitle && !item.isNative ? `<div class="text-[10px] text-slate-500 truncate mt-0.5" title="${escapeHTML(rawName)}">${escapeHTML(rawName)}</div>` : ''}
               ${item.isNative && item.sourceFile && item.sourceFile.status !== 'active' ? `<div class="mt-1"><span class="px-1.5 py-0.2 rounded bg-amber-950/60 border border-amber-800/60 text-[10px] text-amber-300">${escapeHTML(M4_SOURCE_STATUS_LABELS[item.sourceFile.status] || item.sourceFile.status)}</span></div>` : ''}
               <div class="flex items-center justify-between mt-1.5 text-[11px] text-slate-500">
-                <div class="flex items-center gap-1 overflow-hidden">
-                  <span class="px-1.5 py-0.2 rounded bg-slate-900 border border-slate-800 text-[10px] text-slate-400 flex-shrink-0">${escapeHTML(typeLabel)}</span>
-                  ${meta?.institution ? `<span class="px-1.5 py-0.2 rounded bg-indigo-950/70 border border-indigo-800/60 text-[10px] text-indigo-300 truncate max-w-[90px]" title="${escapeHTML(meta.institution)}">🏛️ ${escapeHTML(meta.institution)}</span>` : ''}
-                  ${meta?.year ? `<span class="px-1 py-0.2 rounded bg-slate-900 text-[10px] text-slate-400 font-mono">${escapeHTML(meta.year)}</span>` : ''}
-                </div>
+              <div class="flex items-center gap-1 overflow-hidden">
+                <span class="px-1.5 py-0.2 rounded bg-slate-900 border border-slate-800 text-[10px] text-slate-400 flex-shrink-0">${escapeHTML(typeLabel)}</span>
+                ${(item.topics || []).slice(0, 2).map(t => `<span class="px-1.5 py-0.2 rounded bg-emerald-950/70 border border-emerald-800/60 text-[10px] text-emerald-300 truncate max-w-[110px]" title="已归入主题：${escapeHTML(t.name || t.workspace_name || '')}">🗂 ${escapeHTML(t.name || t.workspace_name || '')}</span>`).join('')}
+                ${meta?.institution ? `<span class="px-1.5 py-0.2 rounded bg-indigo-950/70 border border-indigo-800/60 text-[10px] text-indigo-300 truncate max-w-[90px]" title="${escapeHTML(meta.institution)}">🏛️ ${escapeHTML(meta.institution)}</span>` : ''}
+                ${meta?.year ? `<span class="px-1 py-0.2 rounded bg-slate-900 text-[10px] text-slate-400 font-mono">${escapeHTML(meta.year)}</span>` : ''}
+              </div>
                 <div class="flex items-center gap-1.5 font-mono text-[10px] flex-shrink-0">
                   ${numChildren > 0 ? `<span class="text-slate-400">📎 ${numChildren}</span>` : ''}
                   <span class="text-slate-500">${escapeHTML(item.key)}</span>
@@ -2946,6 +2947,9 @@
       }
       // 先过滤、后裁剪（顺序不可换）：已识别的文献 updated_at 最新，若先按
       // updated_at 截前 50 再跳过，最久未识别的文献将永远轮不到。
+      // 增量判定（产品规则：识别 = 取名 + 归类一起完成）：已按当前附件正文
+      // 识别过 **且** 已至少归入一个宏观大类的文献才算完成；只取名未归类的
+      // 会在下一次 ✨ 时补归类。
       if (!force) {
         targets = targets.filter(item => {
           const meta = documentMetas.get(docMetaKey(
@@ -2954,6 +2958,8 @@
             item.key
           ));
           if (!meta || meta.source !== 'ai_classification') return true;
+          const hasTopicBinding = (item.topics || []).length > 0;
+          if (!hasTopicBinding) return true;
           const attachment = (item.children || []).find(c => c.data?.contentType === 'application/pdf');
           if (!attachment) return false;
           if (meta.attachmentKey !== (attachment.key || attachment.data?.key)) return true;
@@ -3009,26 +3015,35 @@
             const data = gen.data || {};
             totals.created += (data.createdWorkspaces || []).length;
             totals.batches += 1;
-            const suggestions = [];
+            // 产品规则：识别 = 取名 + 归类一起完成。每篇文献取最高置信度的
+            // 建议强制归入该宏观大类（不再设阈值丢弃——被丢弃的文献会变成
+            // "有名字但永远未分类"）。同篇多主题建议只归入最契合的一个。
+            const bestPerDoc = new Map();
             for (const [documentId, list] of Object.entries(data.classifications || {})) {
               totals.analyzed += 1;
+              let top = null;
               for (const s of (list || [])) {
-                if (s && typeof s.confidence === 'number' && s.confidence >= 0.7) {
-                  suggestions.push({ documentId, workspaceId: s.workspaceId });
+                if (s && typeof s.confidence === 'number'
+                  && (!top || s.confidence > top.confidence)) {
+                  top = s;
                 }
               }
+              if (top && top.workspaceId) {
+                bestPerDoc.set(documentId, top.workspaceId);
+              }
             }
-            if (suggestions.length) {
+            totals.applied += bestPerDoc.size;
+            if (bestPerDoc.size) {
               const byWorkspace = new Map();
-              for (const sug of suggestions) {
-                if (!byWorkspace.has(sug.workspaceId)) byWorkspace.set(sug.workspaceId, []);
-                byWorkspace.get(sug.workspaceId).push(sug.documentId);
+              for (const [documentId, workspaceId] of bestPerDoc) {
+                if (!byWorkspace.has(workspaceId)) byWorkspace.set(workspaceId, []);
+                byWorkspace.get(workspaceId).push(documentId);
               }
               for (const [workspaceId, ids] of byWorkspace) {
                 const res = await m4Fetch('/native/documents/batch-topics', {
                   method: 'POST', body: { documentIds: ids, topicIds: [workspaceId] }
                 });
-                totals.applied += (res.data || []).filter(r => r.ok).length;
+                totals.applied -= (res.data || []).length - (res.data || []).filter(r => r.ok).length;
               }
             }
             break;
@@ -3075,6 +3090,8 @@
         }
         if (userWorkspaces) {
           userWorkspaces = await canvasFetch('/workspaces').catch(() => userWorkspaces);
+          // 同步主题筛选下拉，让新提炼的宏观大类立即可见可选。
+          renderTopicWorkspaceSelector(canvasWorkspace?.id || null);
         }
         await refreshCurrentLibraryView().catch(() => {});
       } catch (err) {
