@@ -2331,3 +2331,12 @@ AI 生成的主题过于细碎相似；希望支持针对性勾选一部分文�
 
 lxc 全量 10 套测试全绿（exit 0），生产行为验证：3 篇 MSCI 识别 8.9s 完成，
 提炼单一宏观大类「量化多因子与风险模型」并全部归入。
+
+## 2026-09-06 会话三（抓到并修复 allCurrentWorkspaces 回归 + 双端点复测通过，`427fdca`）
+
+生产日志抓到用户点击全部 502：`allCurrentWorkspaces is not defined`。
+根因：MAX_SYSTEM_TOPICS 守卫重构时，Edit 的 new_string 丢掉了
+`const allCurrentWorkspaces = [...existingWorkspaces]` 声明行。
+已恢复声明；两套 classify 端点（documents/classify 5.4s、
+generate-topics 5.9s）以 sadgen 会话真实复测全部 200，分类与中文名
+输出正常（临时密码审计后已恢复原值）。
