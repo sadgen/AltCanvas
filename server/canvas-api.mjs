@@ -1332,6 +1332,7 @@ async function runAiTopicGeneration({ store, actorKey, targetEntries, maxTopics 
   const rawClassifications = parsed.classifications || {};
 
   const createdWorkspaces = [];
+  const allCurrentWorkspaces = [...existingWorkspaces];
   // 「我的研究主题」是系统默认主题，不占用宏观大类名额。
   const macroTopics = () => allCurrentWorkspaces.filter(w => w.name !== '我的研究主题');
 
