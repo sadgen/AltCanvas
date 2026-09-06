@@ -1946,6 +1946,9 @@ assert.ok(html.includes('meta.attachmentKey !== (attachment.key || attachment.da
 // 最久未识别的文献永远轮不到。
 assert.ok(/targets = targets\.filter\(item => \{[\s\S]*?\}\);?\s*\}?\s*targets = targets\.slice\(0, 50\);/.test(html),
   'candidate capping must happen AFTER the incremental skip filter');
+// 主题筛选视图的行同样带多选勾选框（与文库列表一致）。
+assert.ok(/async function loadTopicLibraryDocuments[\s\S]*?item-select-checkbox/.test(html),
+  'the topic-filtered view must render selection checkboxes too');
 // [M4 UX] 筛选视图必须持久化：点列表里的 PDF（openItem → renderItems）后，
 // 筛选状态不得被重绘回全量列表（未分类视图点击文献即变"全部"的回归）。
 assert.ok(html.includes('let libraryFilteredItems = null'),
