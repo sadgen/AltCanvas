@@ -29,7 +29,7 @@ for (const id of [
   'btn-library-view-files', 'library-files-panel', 'source-files-root-select', 'btn-source-rescan', 'btn-source-new-dir', 'btn-source-up', 'source-files-path-label', 'source-files-items',
   'library-filter-chips', 'btn-library-ai-classify',
   'file-name-modal', 'file-name-modal-title', 'file-name-modal-hint', 'file-name-modal-input', 'file-name-modal-extra', 'file-name-modal-dir-input', 'file-name-modal-error', 'btn-close-file-name-modal', 'btn-cancel-file-name-modal', 'btn-confirm-file-name-modal',
-  'doc-meta-modal', 'doc-meta-panel', 'btn-close-doc-meta', 'input-doc-meta-clean-title', 'input-doc-meta-institution', 'input-doc-meta-year', 'input-doc-meta-report-title', 'input-doc-meta-subtitle', 'input-doc-meta-summary', 'btn-doc-meta-ai-extract', 'btn-cancel-doc-meta', 'btn-save-doc-meta', 'btn-doc-edit-title', 'btn-doc-ai-title',
+  'doc-meta-modal', 'doc-meta-panel', 'btn-close-doc-meta', 'input-doc-meta-clean-title', 'input-doc-meta-institution', 'input-doc-meta-year', 'input-doc-meta-report-title', 'input-doc-meta-subtitle', 'input-doc-meta-summary', 'btn-doc-meta-ai-extract', 'btn-cancel-doc-meta', 'btn-save-doc-meta', 'btn-doc-edit-title',
   'btn-canvas-quick-import', 'quick-import-modal', 'quick-import-panel', 'btn-close-quick-import', 'input-quick-import-query', 'btn-quick-import-resolve', 'quick-import-result-card', 'btn-cancel-quick-import', 'btn-quick-import-topic',
   'quick-import-directory-section', 'quick-import-target-root', 'quick-import-target-dir', 'quick-import-filename', 'quick-import-dir-topics', 'btn-quick-import-directory',
   'canvas-evidence-popover', 'evidence-popover-panel', 'btn-close-evidence-popover', 'evidence-popover-title', 'evidence-popover-page-badge', 'evidence-popover-doc-title', 'evidence-popover-quote-box', 'btn-dismiss-evidence-popover', 'btn-evidence-popover-jump'
@@ -427,7 +427,6 @@ assert.doesNotMatch(html, /Native library does not support Zotero API endpoints/
   const mockOpenItemDom = {
     'current-doc-title': { textContent: '' },
     'btn-doc-edit-title': { classList: { remove: () => {}, add: () => {} } },
-    'btn-doc-ai-title': { classList: { remove: () => {}, add: () => {} } },
     'reader-loading': { classList: { remove: () => {}, add: () => {} } },
     'reader-loading-text': { textContent: '' },
     'reader-placeholder': { classList: { remove: () => {}, add: () => {} } },
@@ -1928,6 +1927,11 @@ assert.ok(html.includes('item-select-checkbox'), 'library items must have select
 assert.ok(html.includes('id="library-selection-bar"'), 'library selection bar must exist');
 assert.ok(html.includes('const selectedDocumentKeys'), 'multi-select set must exist');
 assert.ok(html.includes('selectedDocumentKeys.size > 0'), 'classify flow must check selection state');
+// 标题栏「识别标题」与文库统一 AI 按钮重叠，已删除；批量识别能力收敛到文库多选。
+assert.ok(!html.includes('btn-doc-ai-title'), 'the redundant title-bar 识别标题 button must be removed');
+assert.ok(html.includes('btn-doc-meta-ai-extract'), 'the metadata-edit modal keeps its on-demand extract button');
+// 常驻全选切换按钮
+assert.ok(html.includes('btn-library-toggle-select-all'), 'a persistent select-all toggle must exist');
 // 「已识别」必须指"按当前附件内容识别过"（记录了附件 id + 版本），
 // 而不是仅仅存在一条早期元数据——否则未读正文的旧记录会被误跳过。
 assert.ok(html.includes('recognizedVersion >= currentVersion'),

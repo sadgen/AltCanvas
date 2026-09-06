@@ -191,9 +191,6 @@
         <button id="btn-doc-edit-title" type="button" class="hidden p-0.5 text-slate-400 hover:text-blue-300 hover:bg-slate-800 rounded transition" title="编辑易读中文名与元数据" aria-label="编辑标题">
           <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
         </button>
-        <button id="btn-doc-ai-title" type="button" class="hidden px-1.5 py-0.5 bg-purple-950/80 hover:bg-purple-900 text-purple-300 border border-purple-800/80 rounded text-[10px] transition flex items-center gap-0.5" title="AI 智能识别研报标题与机构">
-          <span>✨ 识别标题</span>
-        </button>
       </div>
     </div>
 
@@ -260,6 +257,7 @@
             <button data-lib-filter="all" class="lib-filter-chip px-2.5 py-1 rounded bg-blue-600 text-white whitespace-nowrap transition">全部</button>
             <button data-lib-filter="unclassified" class="lib-filter-chip px-2.5 py-1 rounded bg-slate-900 text-slate-400 hover:text-slate-200 whitespace-nowrap transition">未分类</button>
             <button data-lib-filter="trash" class="lib-filter-chip px-2.5 py-1 rounded bg-slate-900 text-slate-400 hover:text-slate-200 whitespace-nowrap transition">回收站</button>
+            <button id="btn-library-toggle-select-all" type="button" class="px-2.5 py-1 rounded bg-slate-900 text-slate-400 hover:text-indigo-300 whitespace-nowrap transition" title="全选/取消全选当前列表中的文献（勾选后可用「✨ AI 识别与归类」针对性识别）">全选</button>
           </div>
           <button id="btn-library-ai-classify" type="button" class="px-2.5 py-1 rounded bg-purple-950/70 text-purple-300 border border-purple-800/60 hover:bg-purple-900/70 whitespace-nowrap transition text-[11px] font-medium" title="对选中文件（未选时默认识别未分类文件）执行 AI 识别与归类">✨ AI 识别与归类</button>
         </div>
@@ -1099,11 +1097,21 @@
       const bar = document.getElementById('library-selection-bar');
       const countEl = document.getElementById('library-selected-count');
       const btnClassify = document.getElementById('btn-library-ai-classify');
+      const toggleAll = document.getElementById('btn-library-toggle-select-all');
       const count = selectedDocumentKeys.size;
       if (bar) bar.classList.toggle('hidden', count === 0);
       if (countEl) countEl.textContent = count;
       if (btnClassify && !btnClassify.disabled) {
         btnClassify.textContent = count > 0 ? `✨ AI 识别已选 (${count})` : '✨ AI 识别与归类';
+      }
+      if (toggleAll) {
+        const visibleKeys = [...document.querySelectorAll('.item-select-checkbox')]
+          .map(cb => cb.dataset.itemKey).filter(Boolean);
+        const allSelected = visibleKeys.length > 0 && visibleKeys.every(k => selectedDocumentKeys.has(k));
+        toggleAll.textContent = allSelected ? '取消全选' : '全选';
+        toggleAll.className = `px-2.5 py-1 rounded whitespace-nowrap transition ${allSelected
+          ? 'bg-indigo-950/70 text-indigo-300 border border-indigo-800/60'
+          : 'bg-slate-900 text-slate-400 hover:text-indigo-300'}`;
       }
       document.querySelectorAll('.item-select-checkbox').forEach(cb => {
         cb.checked = selectedDocumentKeys.has(cb.dataset.itemKey);
@@ -1894,6 +1902,18 @@
       document.querySelectorAll('.item-select-checkbox').forEach(cb => {
         if (cb.dataset.itemKey) selectedDocumentKeys.add(cb.dataset.itemKey);
       });
+      updateLibrarySelectionUI();
+    });
+    // 常驻「全选」切换：未全选 → 全选当前列表；已全选 → 清空勾选。
+    document.getElementById('btn-library-toggle-select-all')?.addEventListener('click', () => {
+      const visibleKeys = [...document.querySelectorAll('.item-select-checkbox')]
+        .map(cb => cb.dataset.itemKey).filter(Boolean);
+      const allSelected = visibleKeys.length > 0 && visibleKeys.every(k => selectedDocumentKeys.has(k));
+      if (allSelected) {
+        selectedDocumentKeys.clear();
+      } else {
+        for (const k of visibleKeys) selectedDocumentKeys.add(k);
+      }
       updateLibrarySelectionUI();
     });
     document.getElementById('btn-clear-selection')?.addEventListener('click', () => {
@@ -3239,7 +3259,6 @@
       const titleEl = document.getElementById('current-doc-title');
       if (titleEl) titleEl.textContent = '';
       document.getElementById('btn-doc-edit-title')?.classList.add('hidden');
-      document.getElementById('btn-doc-ai-title')?.classList.add('hidden');
       renderItems();
       updateCanvasAiToolbar();
     }
@@ -3264,7 +3283,6 @@
       const displayTitle = meta?.cleanTitle || item.data?.title || item.data?.filename || item.key;
       document.getElementById('current-doc-title').textContent = displayTitle;
       document.getElementById('btn-doc-edit-title')?.classList.remove('hidden');
-      document.getElementById('btn-doc-ai-title')?.classList.remove('hidden');
 
       const loadingOverlay = document.getElementById('reader-loading');
       const loadingText = document.getElementById('reader-loading-text');
@@ -6998,9 +7016,6 @@
     });
     document.getElementById('btn-doc-edit-title')?.addEventListener('click', () => {
       if (currentItem) openDocMetaModal(currentItem);
-    });
-    document.getElementById('btn-doc-ai-title')?.addEventListener('click', () => {
-      if (currentItem) extractDocumentChineseMetadata(currentItem, { force: true });
     });
     document.getElementById('btn-close-doc-meta')?.addEventListener('click', closeDocMetaModal);
     document.getElementById('btn-cancel-doc-meta')?.addEventListener('click', closeDocMetaModal);
