@@ -274,12 +274,12 @@
         <div class="flex items-center justify-between gap-1.5">
           <div class="flex items-center gap-1.5 flex-1 min-w-0">
             <label for="select-library-sort" class="text-[10px] text-slate-500 whitespace-nowrap">排序</label>
-            <select id="select-library-sort" class="flex-1 min-w-0 bg-slate-900 text-slate-400 border border-slate-800 rounded px-2 py-1 text-[11px] focus:outline-none focus:border-indigo-500">
-              <option value="recent">最近更新（新→旧）</option>
-              <option value="oldest">时间（旧→新）</option>
-              <option value="title">名称 A→Z</option>
-              <option value="title-desc">名称 Z→A</option>
-            </select>
+          <select id="select-library-sort" class="flex-1 min-w-0 bg-slate-900 text-slate-400 border border-slate-800 rounded px-2 py-1 text-[11px] focus:outline-none focus:border-indigo-500">
+            <option value="recent">文件修改时间（新→旧）</option>
+            <option value="oldest">文件修改时间（旧→新）</option>
+            <option value="title">名称 A→Z</option>
+            <option value="title-desc">名称 Z→A</option>
+          </select>
           </div>
           <span id="topic-library-count" class="text-[10px] text-slate-500 whitespace-nowrap"></span>
         </div>
@@ -2001,7 +2001,8 @@
           relativePath: doc.sourceFile.relativePath,
           filename: doc.sourceFile.filename,
           rootId: doc.sourceFile.rootId,
-          version: doc.sourceFile.version
+          version: doc.sourceFile.version,
+          modifiedAt: doc.sourceFile.modifiedAt || null
         } : null,
         topics: doc.topics || [],
         data: {
@@ -3165,6 +3166,12 @@
     }
 
     function libraryItemTimestamp(item, kind) {
+      // 排序语义：时间模式按「原始文件的磁盘修改时间」（source_files.modified_at），
+      // 无原始文件的纯元数据文献回退到文献记录时间。
+      if (kind === 'modified') {
+        const fromSource = item.sourceFile?.modifiedAt || item.sourceFile?.modified_at;
+        if (fromSource) return String(fromSource);
+      }
       const source = kind === 'created' ? (item.createdAt || item.data?.createdAt) : (item.updatedAt || item.data?.updatedAt);
       return String(source || '');
     }
@@ -3177,9 +3184,9 @@
       } else if (mode === 'title-desc') {
         sorted.sort((a, b) => libraryItemDisplayTitle(b).localeCompare(libraryItemDisplayTitle(a), 'zh-Hans-CN'));
       } else if (mode === 'oldest') {
-        sorted.sort((a, b) => libraryItemTimestamp(a, 'created').localeCompare(libraryItemTimestamp(b, 'created')));
+        sorted.sort((a, b) => libraryItemTimestamp(a, 'modified').localeCompare(libraryItemTimestamp(b, 'modified')));
       } else {
-        sorted.sort((a, b) => libraryItemTimestamp(b, 'updated').localeCompare(libraryItemTimestamp(a, 'updated')));
+        sorted.sort((a, b) => libraryItemTimestamp(b, 'modified').localeCompare(libraryItemTimestamp(a, 'modified')));
       }
       return sorted;
     }

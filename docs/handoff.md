@@ -2340,3 +2340,17 @@ lxc 全量 10 套测试全绿（exit 0），生产行为验证：3 篇 MSCI 识�
 已恢复声明；两套 classify 端点（documents/classify 5.4s、
 generate-topics 5.9s）以 sadgen 会话真实复测全部 200，分类与中文名
 输出正常（临时密码审计后已恢复原值）。
+
+## 2026-09-06 会话二（排序语义修正：按原始文件修改时间，`待提交`）
+
+用户指出文库时间排序应按**原始文件的磁盘修改时间**，而不是文献记录的
+updated_at（后者会被 AI 识别、改名等操作冲掉，排序无意义）。
+
+- 前端 nativeDocumentToLibraryItem 的 sourceFile 映射补上 modifiedAt
+  （sourceFileRow 一直有，前端漏透传）；
+- 「最近更新/时间」两个时间模式改为按 source_files.modified_at 排序，
+  下拉文案同步改为「文件修改时间（新→旧/旧→新）」；无原始文件的纯元数据
+  文献回退文献记录时间。
+- 生产实机验证：旧→新（MSCI 方法论 2026-06 → BCA 2026-07）与新→旧
+  （ssrn/MSCI Index Policies 最新）均正确按文件 mtime 排列。
+- 审计后 sadgen 原密码已再次从备份逐字节恢复。
