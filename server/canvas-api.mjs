@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
@@ -2686,6 +2687,102 @@ export function createCanvasHandler(store, {
       if (match && method === 'DELETE') {
         const result = await deleteSourceFilePermanent(store, actor.actorKey, match[1], versionFromIfMatch(req));
         json(res, 200, { data: { deleted: true, operationId: result.operation.id } });
+        return;
+      }
+
+      // Product rule (user 2026-09): recognition is SIMPLIFIED — AI reads PDF
+      // page-1 text and extracts ONLY title, authors, and institution. No
+      // topics, no summary, no confidence scores. The output feeds document
+      // creation (enrollment into 文库).
+      function extractPdfFirstPageText(absPath) {
+        try {
+          return execFileSync('pdftotext', ['-f', '1', '-l', '1', absPath, '-'], { timeout: 15000, encoding: 'utf8' }).replace(/\s+/g, ' ').trim().slice(0, 6000);
+        } catch { return ''; }
+      }
+
+      async function runAiSimpleRecognition(store, actorKey, items, privateConfig, aiCompletion) {
+        const systemPrompt = [
+          '你是研报元数据提取助手。从给定的 PDF 首页文本中提取以下信息：',
+          '1. title：报告的准确完整标题（保留原文语言）',
+          '2. authors：全部作者姓名数组（如 ["张三", "Li, David"]）',
+          '3. institution：发布机构/组织名称',
+          '只输出一个合法的 JSON 对象。',
+          'JSON 格式：{"title": "...", "authors": ["..."], "institution": "..."}',
+          '如果某个字段在文本中无法找到，返回空字符串或空数组。严禁编造。'
+        ].join('\n');
+
+        const results = [];
+        for (const item of items) {
+          const sf = store.getSourceFile(actorKey, item.sourceFileId);
+          if (!sf) { results.push({ sourceFileId: item.sourceFileId, error: 'not found' }); continue; }
+          if (sf.documentId) {
+            results.push({ sourceFileId: item.sourceFileId, documentId: sf.documentId, skipped: true, reason: 'already enrolled' });
+            continue;
+          }
+          // Get the absolute file path for text extraction
+          const root = store.db.prepare('SELECT absolute_path FROM library_roots WHERE id = ? AND deleted_at IS NULL').get(sf.rootId);
+          const absPath = root ? path.join(root.absolute_path, sf.relativePath) : null;
+          const text = item.textSnippet || (absPath ? extractPdfFirstPageText(absPath) : '');
+          const userContent = `标题提示（文件名）: ${sf.filename}\n\nPDF 首页文本:\n${text || '（未提供文本）'}`;
+          const aiResponse = await aiCompletion({
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: userContent }
+            ],
+            temperature: 0.1,
+            maxTokens: 2000
+          }, privateConfig);
+
+          let parsed;
+          try {
+            parsed = JSON.parse(aiResponse.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, ''));
+          } catch {
+            parsed = {};
+          }
+          const title = String(parsed.title || sf.filename.replace(/\.pdf$/i, '')).trim().slice(0, 500) || sf.filename;
+          const authors = Array.isArray(parsed.authors) ? parsed.authors.map(a => String(a).trim()).filter(Boolean).slice(0, 100) : [];
+          const institution = String(parsed.institution || '').trim().slice(0, 200);
+
+          const enrolled = store.enrollExistingSourceFile(actorKey, item.sourceFileId);
+          if (enrolled.duplicate) {
+            results.push({ sourceFileId: item.sourceFileId, documentId: enrolled.document.id, skipped: true, reason: 'duplicate' });
+            continue;
+          }
+          store.db.prepare('UPDATE documents SET title = ?, updated_at = ? WHERE id = ?').run(title, new Date().toISOString(), enrolled.document.id);
+          for (const [idx, name] of authors.entries()) {
+            store.db.prepare('INSERT INTO document_creators (id, document_id, position, creator_type, first_name, last_name, name) VALUES (?, ?, ?, ?, ?, ?, ?)')
+              .run(crypto.randomUUID(), enrolled.document.id, idx, 'author', '', '', name);
+          }
+          if (institution) {
+            const now = new Date().toISOString();
+            store.db.prepare(`
+              INSERT INTO document_metas (id, owner_key, library_type, library_id, item_key, attachment_key, attachment_version, clean_title, institution, source, created_at, updated_at)
+              VALUES (?, ?, 'native', 'local', ?, ?, 1, ?, ?, 'ai_recognition', ?, ?)
+            `).run(crypto.randomUUID(), actorKey, enrolled.document.id, enrolled.attachment.id, title, institution, now, now);
+          }
+          results.push({ sourceFileId: item.sourceFileId, documentId: enrolled.document.id, title, authors, institution, skipped: false });
+        }
+        return results;
+      }
+
+      match = /^\/canvas\/native\/source-files\/recognize$/.exec(pathname);
+      if (match && method === 'POST') {
+        const body = await readJson(req, MAX_DOCUMENT_BODY_BYTES);
+        if (!body || typeof body !== 'object' || !Array.isArray(body.items)) {
+          throw new TypeError('body must contain an items array');
+        }
+        if (body.items.length > 50) throw new TypeError('items must contain at most 50 entries');
+        const privateConfig = store.getAiSettings(actor.actorKey);
+        if (!aiPublicConfig(privateConfig).configured) {
+          error(res, 503, 'ai_not_configured', 'AI 模型尚未配置');
+          return;
+        }
+        try {
+          const data = await runAiSimpleRecognition(store, actor.actorKey, body.items, privateConfig, aiCompletion);
+          json(res, 200, { data });
+        } catch (aiErr) {
+          error(res, aiErr?.name === 'AbortError' ? 504 : 502, 'ai_gateway_error', aiErr.message);
+        }
         return;
       }
 

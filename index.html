@@ -2851,7 +2851,9 @@
       }
     }
 
-    // 用户在原始文件视图勾选文件 → AI 读首页 → 提取标题/作者/机构 → 入库到文库
+    // 原始文件视图的 AI 识别入库：与文库「✨ AI 识别与归类」走完全相同的
+    // AI 流程（读正文 → 提取标题/机构 → 归入宏观大类）。先入库拿到
+    // documentId，再走共享的 refreshLibraryMetadataWithAi。
     async function sourceAiRecognizeFlow() {
       const btn = document.getElementById('btn-source-ai-recognize');
       if (!btn || btn.disabled) return;
@@ -2860,7 +2862,6 @@
       if (selectedSourceFileIds.size > 0) {
         targets = [...selectedSourceFileIds];
       } else {
-        // 自动处理所有未入库的 source_file（无 documentId 的 active 行）
         targets = [...document.querySelectorAll('.source-select-checkbox[data-sf-id]')]
           .filter(cb => !cb.closest('[data-has-doc]'))
           .map(cb => cb.dataset.sfId)
@@ -2871,25 +2872,32 @@
         return;
       }
       btn.disabled = true;
-      btn.textContent = `⏳ AI 识别中（0/${targets.length}）...`;
+      btn.textContent = '⏳ 入库中...';
       try {
-        // 逐个提取 PDF 首页文本（复用 extractAttachmentPdfText）
-        const items = [];
-        for (const [idx, sfId] of targets.entries()) {
-          if (btn) btn.textContent = `⏳ 读取正文 (${idx + 1}/${targets.length})...`;
-          // 通过 source_file 找到关联的 attachment（如果已入库）；未入库的用 source_file 自身路径
-          const text = await extractSourceFilePdfText(sfId);
-          items.push({ sourceFileId: sfId, textSnippet: text });
+        // 第一步：批量入库（创建 document + attachment，标题暂用文件名）
+        const documentIds = [];
+        for (const sfId of targets) {
+          try {
+            const res = await m4Fetch(`/native/source-files/${sfId}/enroll`, { method: 'POST' });
+            if (res.data?.document?.id) documentIds.push(res.data.document.id);
+          } catch (e) {
+            if (e.code !== 'duplicate_content') console.warn(`enroll ${sfId}:`, e.message);
+          }
         }
-        if (btn) btn.textContent = `⏳ AI 识别中...`;
-        const res = await m4Fetch('/native/source-files/recognize', {
-          method: 'POST',
-          body: { items }
-        });
-        const recognized = (res.data || []).filter(r => !r.skipped);
-        showToast(`AI 识别完成：${recognized.length}/${items.length} 篇已入库到文库`, 'success');
+        if (!documentIds.length) {
+          showToast('没有新入库的文件（可能已全部入库）', 'info');
+          return;
+        }
+        // 第二步：走与文库完全相同的 AI 流程（读正文取名 + 归入宏观大类）
+        btn.textContent = '⏳ AI 识别与归类...';
+        await refreshLibraryMetadataWithAi(documentIds, { onProgress: t => { if (btn) btn.textContent = t; } });
+        showToast(`AI 完成：${documentIds.length} 篇文献已入库并完成识别归类`, 'success');
         selectedSourceFileIds.clear();
         await Promise.all([loadSourceFiles(), loadNativeLibrary().catch(() => {})]);
+        if (userWorkspaces) {
+          userWorkspaces = await canvasFetch('/workspaces').catch(() => userWorkspaces);
+          renderTopicWorkspaceSelector(canvasWorkspace?.id || null);
+        }
       } catch (err) {
         if (err.code === 'ai_not_configured') showToast('AI 模型尚未配置，请先在设置中配置 AI', 'error');
         else showToast(`AI 识别入库失败: ${errorMessage(err)}`, 'error');

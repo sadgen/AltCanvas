@@ -788,20 +788,18 @@ async function scanPhaseC(store, actorKey, root, scanId, report, { batchDelayMs,
           report.duplicates += 1;
           continue;
         }
-        const enrolled = enrollScannedFile(store, actorKey, rootId, {
+        const sf = store.createSourceFile(actorKey, rootId, {
           relativePath: st.relative_path,
           filename: st.filename,
           sha256: st.sha256,
           sizeBytes: st.size_bytes,
-          mtimeMs: st.modified_at
+          modifiedAt: st.modified_at,
+          lastSeenAt: startedAt,
+          status: 'active'
         });
         report.newDocuments += 1;
-        // Per product rule the AI owns classification + title recognition in a
-        // single pass ("刷新元数据"); the scan hands freshly enrolled ids to the
-        // client so it can trigger that pass automatically. Cap aligns with the
-        // classify endpoint's documentIds limit.
         if (report.enrolledDocumentIds.length < 200) {
-          report.enrolledDocumentIds.push(enrolled.document.id);
+          report.enrolledDocumentIds.push(sf.id);
         }
       }
     });
