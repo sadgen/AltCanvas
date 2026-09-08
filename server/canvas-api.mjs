@@ -2501,6 +2501,24 @@ export function createCanvasHandler(store, {
         return;
       }
 
+      // Return all active source_file IDs under a directory path (recursive)
+      // for the 原始文件 "select all in directory" flow.
+      match = /^\/canvas\/native\/library-roots\/([0-9a-f-]+)\/source-file-ids$/.exec(pathname);
+      if (match && method === 'GET') {
+        const root = store.requireLibraryRoot(actor.actorKey, match[1]);
+        const dirPath = url.searchParams.get('path') || '';
+        const prefix = dirPath ? dirPath + '/' : '';
+        const ids = store.db.prepare(`
+          SELECT sf.id FROM source_files sf
+          WHERE sf.root_id = ? AND sf.owner_key = ? AND sf.deleted_at IS NULL
+            AND sf.status = 'active' AND sf.document_id IS NULL
+            AND sf.relative_path LIKE ? || '%'
+          ORDER BY sf.relative_path ASC
+        `).all(root.id, actor.actorKey, prefix).map(r => ({ sourceFileId: r.id }));
+        json(res, 200, { data: ids });
+        return;
+      }
+
       match = /^\/canvas\/native\/library-roots\/([0-9a-f-]+)\/scan$/.exec(pathname);
       if (match && method === 'POST') {
         const root = store.requireLibraryRoot(actor.actorKey, match[1]);

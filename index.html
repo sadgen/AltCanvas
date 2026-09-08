@@ -2523,7 +2523,7 @@
             <div class="min-w-0 flex-1">
               <div class="flex items-start justify-between gap-1.5">
                 <div class="font-medium text-slate-200 truncate flex-1" title="${escapeHTML(entry.relativePath)}">${entry.type === 'directory' ? '📁' : '📄'} ${escapeHTML(entry.name)}</div>
-                ${statusBadge}
+                ${entry.type === 'directory' ? `<button type="button" class="px-1.5 py-0.5 rounded bg-indigo-950/60 border border-indigo-800/60 text-[10px] text-indigo-300 hover:text-indigo-200 flex-shrink-0" data-select-dir="${escapeHTML(entry.relativePath)}" title="勾选此目录下所有未入库的 PDF">📂 全选</button>` : statusBadge}
               </div>
               ${entry.type !== 'directory' ? libTitle : ''}
               ${entry.type !== 'directory' ? `<div class="text-[10px] text-slate-500 mt-0.5 font-mono">${escapeHTML(formatM4Bytes(entry.sizeBytes))} · ${escapeHTML(formatM4Time(entry.modifiedAt))}</div>` : ''}
@@ -2538,6 +2538,21 @@
             if (cb.checked && cb.dataset.sfId) selectedSourceFileIds.add(cb.dataset.sfId);
             else if (!cb.checked && cb.dataset.sfId) selectedSourceFileIds.delete(cb.dataset.sfId);
             updateSourceFileSelectionUI();
+            return;
+          }
+          const selectDirBtn = e.target.closest('[data-select-dir]');
+          if (selectDirBtn) {
+            e.stopPropagation();
+            const dirPath = selectDirBtn.dataset.selectDir;
+            // 递归获取该目录下所有未入库的 source_file ID 并勾选
+            m4Fetch(`/native/library-roots/${sourceFilesState.rootId}/source-file-ids?path=${encodeURIComponent(dirPath)}`)
+              .then(res => {
+                const ids = (res.data || []).map(r => r.sourceFileId);
+                for (const id of ids) selectedSourceFileIds.add(id);
+                updateSourceFileSelectionUI();
+                showToast(`已勾选 ${ids.length} 个文件`, 'info');
+              })
+              .catch(err => showToast(`全选失败: ${errorMessage(err)}`, 'error'));
             return;
           }
           const actionBtn = e.target.closest('[data-source-action]');
