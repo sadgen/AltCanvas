@@ -2511,7 +2511,6 @@
         const actions = entry.type === 'pdf' ? `
           <div class="flex flex-wrap gap-1 mt-1.5 source-actions">
             ${lib?.attachmentId ? `<button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-blue-300 hover:text-blue-200" data-source-action="open">📖 打开</button>` : ''}
-            ${!lib?.documentId ? `<button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-emerald-300 hover:text-emerald-200" data-source-action="enroll">➕ 加入文库</button>` : ''}
             <button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-slate-300 hover:text-slate-100" data-source-action="rename">✏️ 重命名</button>
             <button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-slate-300 hover:text-slate-100" data-source-action="move">📂 移动</button>
             ${lib?.status === 'trashed'
