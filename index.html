@@ -307,6 +307,11 @@
           <label for="source-files-root-select" class="text-xs font-semibold text-emerald-300 whitespace-nowrap">授权根目录</label>
           <button id="btn-source-rescan" type="button" class="text-[11px] px-2 py-0.5 rounded bg-emerald-950/60 text-emerald-300 border border-emerald-800/60 hover:bg-emerald-900/60 transition">🔄 递归扫描</button>
         </div>
+        <button id="btn-source-ai-recognize" type="button" class="w-full px-2.5 py-1.5 rounded bg-purple-950/70 text-purple-300 border border-purple-800/60 hover:bg-purple-900/70 text-[11px] font-medium transition" title="对勾选的文件（未勾选时自动处理所有未入库文件）执行 AI 识别：提取标题、作者、机构，并创建文库条目">✨ AI 识别入库</button>
+        <div id="source-selection-bar" class="hidden flex items-center justify-between px-2 py-1 bg-indigo-950/50 border border-indigo-900/60 rounded text-[11px] text-indigo-200">
+          <span>已勾选 <b id="source-selected-count" class="text-white font-mono">0</b> 个文件</span>
+          <button id="btn-source-clear-selection" type="button" class="text-slate-400 hover:text-slate-200 text-[10px]">取消勾选</button>
+        </div>
         <select id="source-files-root-select" class="w-full bg-slate-900 text-slate-200 border border-slate-700 rounded px-2 py-1.5 text-xs focus:outline-none focus:border-emerald-500" title="服务端配置的文库根目录">
           <option value="">加载根目录中...</option>
         </select>
@@ -314,6 +319,12 @@
           <button id="btn-source-up" type="button" class="px-2 py-1 rounded bg-slate-900 text-slate-400 hover:text-slate-200 border border-slate-800 text-[11px] transition">⬆ 上级</button>
           <button id="btn-source-new-dir" type="button" class="px-2 py-1 rounded bg-slate-900 text-slate-400 hover:text-slate-200 border border-slate-800 text-[11px] transition">📁 新建目录</button>
           <span id="source-files-path-label" class="flex-1 truncate text-[10px] font-mono text-slate-500" title="当前目录">/</span>
+          <select id="source-files-sort" class="bg-slate-900 text-slate-400 border border-slate-800 rounded px-1.5 py-1 text-[10px] focus:outline-none focus:border-emerald-500 flex-shrink-0" title="排序方式">
+            <option value="mtime-desc">🕐 新→旧</option>
+            <option value="mtime-asc">🕐 旧→新</option>
+            <option value="name-asc">🔤 A→Z</option>
+            <option value="name-desc">🔤 Z→A</option>
+          </select>
         </div>
       </div>
       <div id="blob-migration-notice" class="hidden px-1"></div>
@@ -1092,6 +1103,20 @@
     let libraryTopicFilter = '';
     // 文库多选状态：用户勾选的部分文献 ID 集合
     const selectedDocumentKeys = new Set();
+    // 原始文件多选状态：勾选的 source_file ID 集合（用于 AI 识别入库）
+    const selectedSourceFileIds = new Set();
+
+    function updateSourceFileSelectionUI() {
+      const bar = document.getElementById('source-selection-bar');
+      const countEl = document.getElementById('source-selected-count');
+      const btnRec = document.getElementById('btn-source-ai-recognize');
+      const count = selectedSourceFileIds.size;
+      if (bar) bar.classList.toggle('hidden', count === 0);
+      if (countEl) countEl.textContent = count;
+      if (btnRec && !btnRec.disabled) {
+        btnRec.textContent = count > 0 ? `✨ AI 识别入库 (${count})` : '✨ AI 识别入库';
+      }
+    }
 
     function updateLibrarySelectionUI() {
       const bar = document.getElementById('library-selection-bar');
@@ -1876,7 +1901,15 @@
       sourceFilesState.rootId = event.target.value || null;
       loadSourceFiles('');
     });
+    document.getElementById('source-files-sort')?.addEventListener('change', () => {
+      renderSourceFilesEntries();
+    });
     document.getElementById('btn-source-rescan')?.addEventListener('click', () => sourceScanFlow());
+    document.getElementById('btn-source-clear-selection')?.addEventListener('click', () => {
+      selectedSourceFileIds.clear();
+      updateSourceFileSelectionUI();
+    });
+    document.getElementById('btn-source-ai-recognize')?.addEventListener('click', () => sourceAiRecognizeFlow());
     document.getElementById('btn-source-new-dir')?.addEventListener('click', () => sourceNewDirFlow());
     document.getElementById('btn-source-up')?.addEventListener('click', () => {
       const idx = sourceFilesState.path.lastIndexOf('/');
@@ -2254,6 +2287,7 @@
                 <button type="button" class="px-1.5 py-0.5 rounded bg-indigo-950/60 border border-indigo-800/60 text-[10px] text-indigo-300 hover:text-indigo-200" data-native-action="add-topic" title="把该文献加入研究主题">📚 主题</button>
                 <button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-slate-300 hover:text-slate-100" data-native-action="rename-original" title="重命名磁盘上的原始文件（文库文件名不变）">✏️ 原始文件</button>
                 <button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-slate-300 hover:text-slate-100" data-native-action="move" title="移动原始文件到其他目录">📂 移动</button>
+                <button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-amber-400 hover:text-amber-300" data-native-action="remove-from-library" title="从文库移除此文献（原始文件保留在磁盘上）">📤 从文库移除</button>
                 ${item.sourceFile.status === 'trashed'
                   ? '<button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-emerald-300 hover:text-emerald-200" data-native-action="restore">♻️ 恢复</button>'
                   : '<button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-rose-300 hover:text-rose-200" data-native-action="trash">🗑 移入回收站</button>'}
@@ -2285,6 +2319,19 @@
             e.stopPropagation();
             const lib = item.sourceFile || {};
             const entry = { relativePath: lib.relativePath || '', name: lib.filename || '', library: lib };
+            if (nativeActionBtn.dataset.nativeAction === 'remove-from-library') {
+              if (!confirm('确定从文库移除此文献？\n（原始文件不会被删除，之后可重新识别入库）')) return;
+              const docId = item.key;
+              const version = item.version;
+              m4Fetch(`/native/documents/${docId}`, {
+                method: 'DELETE',
+                headers: { 'If-Match': `W/"${version}"` }
+              }).then(() => {
+                showToast('已从文库移除（原始文件保留在磁盘上）', 'success');
+                return loadNativeLibrary().catch(() => {});
+              }).catch(err => showToast(`移除失败: ${errorMessage(err)}`, 'error'));
+              return;
+            }
             handleSourceFileAction(nativeActionBtn.dataset.nativeAction, entry).catch(err => handleM4ConflictError(err, { entry, lib }));
             return;
           }
@@ -2426,6 +2473,17 @@
         container.innerHTML = '<div class="text-center text-slate-500 py-10 text-xs">此目录为空（仅显示 PDF 与子目录）</div>';
         return;
       }
+      // Apply sort: directories always first, then files per sort mode
+      const sortMode = document.getElementById('source-files-sort')?.value || 'mtime-desc';
+      const sorted = [...entries].sort((a, b) => {
+        if (a.type === 'directory' && b.type !== 'directory') return -1;
+        if (a.type !== 'directory' && b.type === 'directory') return 1;
+        if (a.type === 'directory' && b.type === 'directory') return a.name.localeCompare(b.name, 'zh-Hans-CN');
+        if (sortMode === 'name-asc') return a.name.localeCompare(b.name, 'zh-Hans-CN');
+        if (sortMode === 'name-desc') return b.name.localeCompare(a.name, 'zh-Hans-CN');
+        const aTime = a.modifiedAt || 0, bTime = b.modifiedAt || 0;
+        return sortMode === 'mtime-asc' ? aTime - bTime : bTime - aTime;
+      });
       container.innerHTML = '';
       if (sourceFilesState.meta?.truncated) {
         const notice = document.createElement('div');
@@ -2433,7 +2491,7 @@
         notice.textContent = '⚠️ 目录项目过多，当前结果不完整（已截断到前 20000 项）；请将文件整理到子目录后浏览。';
         container.appendChild(notice);
       }
-      for (const entry of entries) {
+      for (const entry of sorted) {
         const div = document.createElement('div');
         div.role = 'button';
         div.tabIndex = 0;
@@ -2446,6 +2504,10 @@
         const libTitle = lib?.documentTitle
           ? `<div class="text-[10px] text-indigo-300/90 truncate mt-0.5" title="文库文件名">📚 ${escapeHTML(lib.documentTitle)}</div>`
           : '<div class="text-[10px] text-slate-600 truncate mt-0.5">（未入库）</div>';
+        const isSelected = entry.type === 'pdf' && lib?.sourceFileId && selectedSourceFileIds.has(lib.sourceFileId);
+        const checkbox = entry.type === 'pdf' && lib?.sourceFileId
+          ? `<input type="checkbox" class="source-select-checkbox w-3.5 h-3.5 rounded border-slate-700 bg-slate-900 text-indigo-500 focus:ring-0 cursor-pointer flex-shrink-0 mt-0.5" ${isSelected ? 'checked' : ''} data-sf-id="${escapeHTML(lib.sourceFileId)}" title="勾选进行 AI 识别入库">`
+          : '';
         const actions = entry.type === 'pdf' ? `
           <div class="flex flex-wrap gap-1 mt-1.5 source-actions">
             ${lib?.attachmentId ? `<button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-blue-300 hover:text-blue-200" data-source-action="open">📖 打开</button>` : ''}
@@ -2457,15 +2519,28 @@
               : '<button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-rose-300 hover:text-rose-200" data-source-action="trash">🗑 移入回收站</button>'}
           </div>` : '';
         div.innerHTML = `
-          <div class="flex items-start justify-between gap-1.5">
-            <div class="font-medium text-slate-200 truncate flex-1" title="${escapeHTML(entry.relativePath)}">${entry.type === 'directory' ? '📁' : '📄'} ${escapeHTML(entry.name)}</div>
-            ${statusBadge}
+          <div class="flex items-start gap-2">
+            ${checkbox}
+            <div class="min-w-0 flex-1">
+              <div class="flex items-start justify-between gap-1.5">
+                <div class="font-medium text-slate-200 truncate flex-1" title="${escapeHTML(entry.relativePath)}">${entry.type === 'directory' ? '📁' : '📄'} ${escapeHTML(entry.name)}</div>
+                ${statusBadge}
+              </div>
+              ${entry.type !== 'directory' ? libTitle : ''}
+              ${entry.type !== 'directory' ? `<div class="text-[10px] text-slate-500 mt-0.5 font-mono">${escapeHTML(formatM4Bytes(entry.sizeBytes))} · ${escapeHTML(formatM4Time(entry.modifiedAt))}</div>` : ''}
+              ${actions}
+            </div>
           </div>
-          ${entry.type !== 'directory' ? libTitle : ''}
-          ${entry.type !== 'directory' ? `<div class="text-[10px] text-slate-500 mt-0.5 font-mono">${escapeHTML(formatM4Bytes(entry.sizeBytes))} · ${escapeHTML(formatM4Time(entry.modifiedAt))}</div>` : ''}
-          ${actions}
         `;
         div.onclick = (e) => {
+          const cb = e.target.closest('.source-select-checkbox');
+          if (cb) {
+            e.stopPropagation();
+            if (cb.checked && cb.dataset.sfId) selectedSourceFileIds.add(cb.dataset.sfId);
+            else if (!cb.checked && cb.dataset.sfId) selectedSourceFileIds.delete(cb.dataset.sfId);
+            updateSourceFileSelectionUI();
+            return;
+          }
           const actionBtn = e.target.closest('[data-source-action]');
           if (actionBtn) {
             e.stopPropagation();
@@ -2775,6 +2850,66 @@
       } finally {
         if (btn) { btn.disabled = false; btn.textContent = '🔄 递归扫描'; }
       }
+    }
+
+    // 用户在原始文件视图勾选文件 → AI 读首页 → 提取标题/作者/机构 → 入库到文库
+    async function sourceAiRecognizeFlow() {
+      const btn = document.getElementById('btn-source-ai-recognize');
+      if (!btn || btn.disabled) return;
+      // 收集目标 source_file ID：勾选的，或所有未入库的
+      let targets = [];
+      if (selectedSourceFileIds.size > 0) {
+        targets = [...selectedSourceFileIds];
+      } else {
+        // 自动处理所有未入库的 source_file（无 documentId 的 active 行）
+        targets = [...document.querySelectorAll('.source-select-checkbox[data-sf-id]')]
+          .filter(cb => !cb.closest('[data-has-doc]'))
+          .map(cb => cb.dataset.sfId)
+          .filter(Boolean);
+      }
+      if (!targets.length) {
+        showToast('没有需要识别的文件（所有文件已入库或无可勾选项）', 'info');
+        return;
+      }
+      btn.disabled = true;
+      btn.textContent = `⏳ AI 识别中（0/${targets.length}）...`;
+      try {
+        // 逐个提取 PDF 首页文本（复用 extractAttachmentPdfText）
+        const items = [];
+        for (const [idx, sfId] of targets.entries()) {
+          if (btn) btn.textContent = `⏳ 读取正文 (${idx + 1}/${targets.length})...`;
+          // 通过 source_file 找到关联的 attachment（如果已入库）；未入库的用 source_file 自身路径
+          const text = await extractSourceFilePdfText(sfId);
+          items.push({ sourceFileId: sfId, textSnippet: text });
+        }
+        if (btn) btn.textContent = `⏳ AI 识别中...`;
+        const res = await m4Fetch('/native/source-files/recognize', {
+          method: 'POST',
+          body: { items }
+        });
+        const recognized = (res.data || []).filter(r => !r.skipped);
+        showToast(`AI 识别完成：${recognized.length}/${items.length} 篇已入库到文库`, 'success');
+        selectedSourceFileIds.clear();
+        await Promise.all([loadSourceFiles(), loadNativeLibrary().catch(() => {})]);
+      } catch (err) {
+        if (err.code === 'ai_not_configured') showToast('AI 模型尚未配置，请先在设置中配置 AI', 'error');
+        else showToast(`AI 识别入库失败: ${errorMessage(err)}`, 'error');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '✨ AI 识别入库';
+        updateSourceFileSelectionUI();
+      }
+    }
+
+    // 从 source_file 所在磁盘路径提取 PDF 前几页文本（复用 PDF.js 基础设施）
+    async function extractSourceFilePdfText(sourceFileId) {
+      // For source_files not yet enrolled, we read the file directly from disk
+      // via the same /canvas/native/attachments/:id/file pattern — but un-enrolled
+      // source_files don't have attachments. Instead, the server endpoint
+      // /native/source-files/:id/recognize handles text extraction internally
+      // when textSnippet is empty. So we return '' here and let the server
+      // do a direct file read if needed.
+      return '';
     }
 
     async function sourceNewDirFlow() {
