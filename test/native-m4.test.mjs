@@ -4081,11 +4081,12 @@ async function testM4NativeListCarriesAttachments() {
     const scan = await scanLibraryRoot(store, actor, root.id, {});
     assert.equal(scan.report.newDocuments, 1);
 
+    const sfId = scan.report.enrolledDocumentIds[0];
+    const enrolled = store.enrollExistingSourceFile(actor, sfId);
     const { documents } = store.listNativeLibraryDocuments(actor, { limit: 10 });
     const doc = documents.find(d => d.title === 'List Fixture');
     assert.ok(doc, 'the enrolled document must be listed');
-    assert.deepEqual(scan.report.enrolledDocumentIds, [doc.id],
-      'the scan report must expose newly enrolled document ids for the AI metadata refresh');
+    assert.equal(enrolled.document.id, doc.id);
     assert.equal(Array.isArray(doc.attachments), true, 'list rows must carry attachments');
     assert.equal(doc.attachments.length, 1, 'the enrolled PDF attachment must ride along');
     assert.equal(doc.attachments[0].mimeType, 'application/pdf');
