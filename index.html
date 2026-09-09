@@ -2903,6 +2903,8 @@
           showToast('没有新入库的文件（可能已全部入库）', 'info');
           return;
         }
+        // 关键：入库后先刷新文库缓存（allItems），让 AI 流程能找到新文献的附件
+        await loadNativeLibrary().catch(() => {});
         // 第二步：走与文库完全相同的 AI 流程（读正文取名 + 归入宏观大类）
         btn.textContent = '⏳ AI 识别与归类...';
         await refreshLibraryMetadataWithAi(documentIds, { onProgress: t => { if (btn) btn.textContent = t; } });
