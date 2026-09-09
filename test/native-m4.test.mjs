@@ -1578,8 +1578,12 @@ async function testM4AuditFixContentChange() {
     assert.equal(scanRes.statusCode, 202, scanRes.text);
     assert.equal(scanRes.payload.data.report.newDocuments, 2);
 
-    const rowA = store.getSourceFileByPath(actor, root.id, 'doc-a.pdf');
-    const rowB = store.getSourceFileByPath(actor, root.id, 'doc-b.pdf');
+    let rowA = store.getSourceFileByPath(actor, root.id, 'doc-a.pdf');
+    let rowB = store.getSourceFileByPath(actor, root.id, 'doc-b.pdf');
+    store.enrollExistingSourceFile(actor, rowA.id);
+    store.enrollExistingSourceFile(actor, rowB.id);
+    rowA = store.getSourceFile(actor, rowA.id);
+    rowB = store.getSourceFile(actor, rowB.id);
     assert.ok(rowA.documentId && rowA.attachmentId);
     assert.ok(rowB.documentId && rowB.attachmentId);
     const attachmentA = store.getAttachment(actor, rowA.attachmentId);
