@@ -17,7 +17,7 @@ for (const id of [
   'btn-canvas-clear', 'btn-canvas-cross-report',
   'cross-report-modal', 'cross-report-panel', 'btn-close-cross-report', 'cross-report-focal-text', 'cross-report-relations-list', 'btn-cancel-cross-report', 'btn-expand-selected-relations',
   'btn-canvas-ai-translate', 'btn-canvas-ai-synthesize',
-  'btn-canvas-ai-document', 'input-ai-auto-translate',
+  'btn-canvas-ai-document', 'btn-canvas-ai-organize', 'input-ai-auto-translate',
   'ai-modal', 'ai-panel', 'ai-selected-chips', 'input-ai-prompt', 'btn-submit-ai',
   'btn-close-ai', 'btn-cancel-ai', 'btn-open-ai-settings',
   'ai-provider-status', 'ai-provider-name', 'ai-provider-model', 'btn-test-ai-conn',
@@ -27,7 +27,7 @@ for (const id of [
   'topic-settings-modal', 'topic-settings-panel', 'btn-close-topic-settings', 'input-topic-name', 'input-topic-desc', 'input-topic-question', 'input-topic-inclusion', 'input-topic-exclusion', 'btn-save-topic-meta', 'btn-delete-topic', 'topic-docs-list',
   // M4 原始文件视图与文库过滤
   'btn-library-view-files', 'library-files-panel', 'source-files-root-select', 'btn-source-rescan', 'btn-source-new-dir', 'btn-source-up', 'source-files-path-label', 'source-files-items',
-  'library-filter-chips', 'btn-library-ai-classify',
+  'library-filter-chips', 'btn-library-ai-classify', 'btn-library-batch-map',
   'file-name-modal', 'file-name-modal-title', 'file-name-modal-hint', 'file-name-modal-input', 'file-name-modal-extra', 'file-name-modal-dir-input', 'file-name-modal-error', 'btn-close-file-name-modal', 'btn-cancel-file-name-modal', 'btn-confirm-file-name-modal',
   'doc-meta-modal', 'doc-meta-panel', 'btn-close-doc-meta', 'input-doc-meta-clean-title', 'input-doc-meta-institution', 'input-doc-meta-year', 'input-doc-meta-report-title', 'input-doc-meta-subtitle', 'input-doc-meta-summary', 'btn-doc-meta-ai-extract', 'btn-cancel-doc-meta', 'btn-save-doc-meta', 'btn-doc-edit-title',
   'btn-canvas-quick-import', 'quick-import-modal', 'quick-import-panel', 'btn-close-quick-import', 'input-quick-import-query', 'btn-quick-import-resolve', 'quick-import-result-card', 'btn-cancel-quick-import', 'btn-quick-import-topic',
@@ -1959,6 +1959,20 @@ assert.ok(/function renderItems\(\) \{[\s\S]*?if \(libraryTopicFilter\) return;/
   'renderItems must defer to the topic-filtered view');
 assert.ok(/function renderItems\(\) \{[\s\S]*?useFiltered \? libraryFilteredItems : allItems/.test(html),
   'renderItems must render the filtered set while a chip filter is active');
+
+// --- Multi-document Canvas Mapping & Contrast Fusion UI Tests ---
+assert.match(html, /id="btn-library-batch-map"/, 'Library selection bar must provide batch map and contrast button');
+assert.match(html, /function libraryBatchMapFlow\(/, 'libraryBatchMapFlow must exist');
+assert.match(html, /function extractAttachmentPdfPages\(/, 'extractAttachmentPdfPages must exist for multi-document extraction');
+assert.match(html, /function autoFitAllCanvasNodes\(/, 'autoFitAllCanvasNodes must exist for compact content height');
+assert.match(html, /docBtn\.textContent = '➕ 对比补充'/, 'toolbar button must dynamically shift to 对比补充 when board has cards');
+assert.match(html, /docBtn\.textContent = '🗺️ 绘制导图'/, 'toolbar button must dynamically shift to 绘制导图 when board is empty');
+assert.match(html, /text-rose-300 text-\[9px\]">分歧<\/span>/, 'canvas card must support 分歧 relation badge');
+assert.match(html, /text-emerald-300 text-\[9px\]">共识<\/span>/, 'canvas card must support 共识 relation badge');
+assert.match(html, /text-blue-300 text-\[9px\]">补充<\/span>/, 'canvas card must support 补充 relation badge');
+assert.match(html, /id="btn-canvas-ai-organize"/, 'Canvas toolbar must provide 整理画板 button');
+assert.match(html, /function organizeCanvasWithAi\(/, 'organizeCanvasWithAi function must exist');
+assert.match(html, /function getNodePerimeterAnchor\(/, 'getNodePerimeterAnchor function must exist for perimeter edge clipping');
 
 assert.match(devServer, /style-src-attr 'unsafe-inline'/, 'CSP must permit dynamic Canvas geometry styles');
 assert.match(devServer, /script-src 'self'/, 'script CSP must remain restricted');

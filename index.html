@@ -34,9 +34,12 @@
     }
     .canvas-surface.is-panning { cursor: grabbing; }
     .canvas-world { position: absolute; inset: 0 auto auto 0; width: 4000px; height: 4000px; transform-origin: 0 0; }
-    .canvas-edges { position: absolute; inset: 0; width: 4000px; height: 4000px; overflow: visible; pointer-events: none; }
-    .canvas-edge { stroke: #6366f1; stroke-width: 2; vector-effect: non-scaling-stroke; opacity: .72; }
-    .canvas-edge-label { fill: #a5b4fc; font-size: 11px; paint-order: stroke; stroke: #020617; stroke-width: 4px; stroke-linejoin: round; }
+    .canvas-edges { position: absolute; inset: 0; width: 4000px; height: 4000px; overflow: visible; pointer-events: none; z-index: 12; }
+    .canvas-edge { stroke: #818cf8; stroke-width: 2; fill: none; vector-effect: non-scaling-stroke; opacity: .88; }
+    .canvas-edge-contradicts { stroke: #f43f5e !important; stroke-width: 2.2px; stroke-dasharray: 6 3; opacity: .95; }
+    .canvas-edge-supports { stroke: #10b981 !important; stroke-width: 2.2px; opacity: .95; }
+    .canvas-edge-extends { stroke: #3b82f6 !important; stroke-width: 2px; opacity: .95; }
+    .canvas-edge-label { fill: #e0e7ff; font-size: 10.5px; font-weight: 500; paint-order: stroke; stroke: #020617; stroke-width: 4px; stroke-linejoin: round; }
     .canvas-node {
       position: absolute; display: flex; flex-direction: column; overflow: hidden;
       min-width: 80px; min-height: 40px; border: 1px solid #334155; border-radius: 10px;
@@ -47,7 +50,7 @@
     .canvas-node.is-connect-source { outline: 2px solid #a5b4fc; outline-offset: 2px; }
     .canvas-node.is-selected { outline: 2px solid #a855f7; outline-offset: 2px; box-shadow: 0 0 0 4px rgba(168, 85, 247, 0.25), 0 12px 30px rgba(0,0,0,.35); }
     .canvas-node-header { cursor: move; user-select: none; touch-action: none; }
-    .canvas-node-body { overflow: auto; overflow-wrap: anywhere; }
+    .canvas-node-body { max-height: 500px; overflow-y: auto; overflow-x: hidden; overflow-wrap: anywhere; }
     .canvas-node-text { white-space: pre-wrap; word-break: break-word; }
     .canvas-resize-handle {
       position: absolute; right: 0; bottom: 0; width: 18px; height: 18px;
@@ -288,6 +291,7 @@
         <div id="library-selection-bar" class="hidden flex items-center justify-between px-2 py-1 bg-indigo-950/50 border border-indigo-900/60 rounded text-[11px] text-indigo-200">
           <span>已勾选 <b id="library-selected-count" class="text-white font-mono">0</b> 篇文献</span>
           <div class="flex items-center gap-2">
+            <button id="btn-library-batch-map" type="button" class="text-purple-300 hover:text-white font-medium underline text-[10px]" title="对所选文献在画板绘制知识导图与对比">🗺️ 绘制对比导图</button>
             <button id="btn-select-all-visible" type="button" class="text-indigo-300 hover:text-white underline text-[10px]">全选当前</button>
             <button id="btn-clear-selection" type="button" class="text-slate-400 hover:text-slate-200 text-[10px]">取消勾选</button>
           </div>
@@ -384,23 +388,26 @@
       </div>
 
       <div class="canvas-toolbar px-2 py-2 border-b border-slate-800/80 bg-slate-950/70 flex items-center gap-1.5 text-[11px] overflow-x-auto whitespace-nowrap">
-        <button id="btn-canvas-add-note" type="button" title="新建手写卡片 (N)" class="px-2 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white">+ 手写卡片</button>
-        <button id="btn-canvas-import" type="button" class="px-2 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 disabled:opacity-40 disabled:cursor-not-allowed">加入当前标注</button>
-        <button id="btn-canvas-quick-import" type="button" class="px-2 py-1.5 rounded bg-indigo-900/80 hover:bg-indigo-800 text-indigo-200 border border-indigo-700/50" title="通过 DOI / arXiv / 学术链接快速导入文献">📥 快速导入</button>
-        <button id="btn-canvas-ai-document" type="button" class="px-2 py-1.5 rounded bg-purple-700 hover:bg-purple-600 text-white disabled:opacity-40 disabled:cursor-not-allowed" disabled title="提取当前 PDF 全文并生成可编辑的理解画板；正文会发送给当前 AI 服务">🧠 理解全文</button>
-        <button id="btn-canvas-evidence-annotate" type="button" class="px-2 py-1.5 rounded bg-emerald-700 hover:bg-emerald-600 text-white disabled:opacity-40 disabled:cursor-not-allowed" disabled title="把当前画板所有未转换的 AI 证据引用批量转为正式 PDF 批注">🔖 证据转批注</button>
-        <button id="btn-canvas-connect" type="button" aria-pressed="false" title="切换连线模式 (C)" class="px-2 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200">连线</button>
-        <button id="btn-canvas-ai-translate" type="button" class="px-2 py-1.5 rounded bg-purple-700 hover:bg-purple-600 text-white disabled:opacity-40 disabled:cursor-not-allowed" disabled title="将选中卡片一键忠实翻译为中文">🌐 中译</button>
-        <button id="btn-canvas-ai-synthesize" type="button" class="px-2 py-1.5 rounded bg-purple-900/80 hover:bg-purple-800 text-purple-200 border border-purple-700/50 disabled:opacity-40 disabled:cursor-not-allowed" disabled title="一键综合总结选中卡片">✨ 总结</button>
-        <button id="btn-canvas-cross-report" type="button" class="px-2 py-1.5 rounded bg-indigo-900/80 hover:bg-indigo-800 text-indigo-200 border border-indigo-700/50 disabled:opacity-40 disabled:cursor-not-allowed" title="发现当前选中卡片与主题内其他研报的跨报告观点关联与冲突证据">🔗 跨报告关联</button>
-        <button id="btn-canvas-ai" type="button" class="px-2 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-purple-200 disabled:opacity-40 disabled:cursor-not-allowed" disabled title="观点对比、针对问答或补充自定义指令">更多 AI</button>
+        <button id="btn-canvas-ai-document" type="button" class="px-2.5 py-1.5 rounded bg-purple-700 hover:bg-purple-600 text-white font-medium disabled:opacity-40 disabled:cursor-not-allowed transition" disabled title="提取当前 PDF 核心观点与结构，生成知识导图；正文会发送给当前 AI 服务">🗺️ 绘制导图</button>
+        <button id="btn-canvas-ai-organize" type="button" class="px-2.5 py-1.5 rounded bg-purple-950/80 text-purple-200 border border-purple-800/60 hover:bg-purple-900/80 disabled:opacity-40 disabled:cursor-not-allowed transition" disabled title="通过 AI 综合梳理画板全部卡片：提炼全貌、共识与分歧，并按主题重新排布清晰导图">🧹 整理画板</button>
+        <button id="btn-canvas-add-note" type="button" title="新建手写卡片 (N)" class="px-2 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition">+ 手写卡片</button>
+        <button id="btn-canvas-connect" type="button" aria-pressed="false" title="切换连线模式 (C)" class="px-2 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 transition">连线</button>
         <span class="w-px h-5 bg-slate-800"></span>
-        <button id="btn-canvas-export-json" type="button" title="导出画板 JSON" class="px-2 py-1.5 rounded hover:bg-slate-800 text-slate-300">导出</button>
-        <label id="lbl-canvas-import-json" title="导入画板 JSON" class="px-2 py-1.5 rounded hover:bg-slate-800 text-slate-300 cursor-pointer">
+        <button id="btn-canvas-ai" type="button" class="px-2.5 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-purple-300 disabled:opacity-40 disabled:cursor-not-allowed transition" disabled title="对选中的卡片进行深度分析（综合总结、中译、对比、问答）">✨ AI 分析</button>
+        <span class="w-px h-5 bg-slate-800"></span>
+        <button id="btn-canvas-clear" type="button" title="清空全部卡片和连线；可按 Ctrl+Z 撤销" class="px-2 py-1.5 rounded hover:bg-rose-950 text-rose-400 disabled:opacity-40 disabled:cursor-not-allowed transition" disabled>清空画板</button>
+        <!-- 冗余或次级功能：保持 ID 存在于 DOM 供脚本与测试契约调用，但隐藏以免杂乱 -->
+        <button id="btn-canvas-import" type="button" class="hidden" title="把当前 PDF 标注加入画板">加入标注</button>
+        <button id="btn-canvas-ai-translate" type="button" class="hidden" title="将选中卡片一键忠实翻译为中文">🌐 中译</button>
+        <button id="btn-canvas-ai-synthesize" type="button" class="hidden" title="一键综合总结选中卡片">✨ 总结</button>
+        <button id="btn-canvas-cross-report" type="button" class="hidden" title="发现当前选中卡片与主题内其他研报的跨报告观点关联与冲突证据">🔗 跨报告关联</button>
+        <button id="btn-canvas-quick-import" type="button" class="hidden" title="快速导入文献">📥 快速导入</button>
+        <button id="btn-canvas-evidence-annotate" type="button" class="hidden" title="把当前画板所有未转换的 AI 证据引用批量转为正式 PDF 批注">🔖 证据转批注</button>
+        <button id="btn-canvas-history" type="button" class="hidden" title="查看操作溯源历史 (H)">历史</button>
+        <button id="btn-canvas-export-json" type="button" class="hidden" title="导出画板 JSON">导出</button>
+        <label id="lbl-canvas-import-json" title="导入画板 JSON" class="hidden">
           导入<input id="input-canvas-import-file" type="file" accept=".json,.altcanvas.json" class="hidden">
         </label>
-        <button id="btn-canvas-history" type="button" title="查看操作溯源历史 (H)" class="px-2 py-1.5 rounded hover:bg-slate-800 text-slate-300">历史</button>
-        <button id="btn-canvas-clear" type="button" title="清空全部卡片和连线；可按 Ctrl+Z 撤销" class="px-2 py-1.5 rounded hover:bg-rose-950 text-rose-400 disabled:opacity-40 disabled:cursor-not-allowed" disabled>清空画板</button>
         <span class="w-px h-5 bg-slate-800"></span>
         <button id="btn-canvas-zoom-out" type="button" aria-label="缩小画板" class="px-2 py-1.5 rounded hover:bg-slate-800 text-slate-300">−</button>
         <button id="btn-canvas-zoom-reset" type="button" class="px-2 py-1.5 rounded hover:bg-slate-800 text-slate-400 font-mono">100%</button>
@@ -414,7 +421,22 @@
           </div>
         </div>
         <div id="canvas-world" class="canvas-world">
-          <svg id="canvas-edges" class="canvas-edges" aria-hidden="true"></svg>
+          <svg id="canvas-edges" class="canvas-edges" aria-hidden="true">
+            <defs>
+              <marker id="arrow-related" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#818cf8" />
+              </marker>
+              <marker id="arrow-supports" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#10b981" />
+              </marker>
+              <marker id="arrow-contradicts" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#f43f5e" />
+              </marker>
+              <marker id="arrow-extends" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#3b82f6" />
+              </marker>
+            </defs>
+          </svg>
           <div id="canvas-nodes"></div>
         </div>
       </div>
@@ -1126,6 +1148,11 @@
       const count = selectedDocumentKeys.size;
       if (bar) bar.classList.toggle('hidden', count === 0);
       if (countEl) countEl.textContent = count;
+      const btnBatchMap = document.getElementById('btn-library-batch-map');
+      if (btnBatchMap) {
+        btnBatchMap.textContent = count > 1 ? `🗺️ 对比导图 (${count})` : '🗺️ 绘制导图';
+        btnBatchMap.title = count > 1 ? `对勾选的 ${count} 篇文献在画板绘制对比综合导图，标出共识与分歧` : '对勾选的文献在画板绘制知识导图';
+      }
       if (btnClassify && !btnClassify.disabled) {
         btnClassify.textContent = count > 0 ? `✨ AI 识别已选 (${count})` : '✨ AI 识别与归类';
       }
@@ -1953,6 +1980,7 @@
       selectedDocumentKeys.clear();
       updateLibrarySelectionUI();
     });
+    document.getElementById('btn-library-batch-map')?.addEventListener('click', () => libraryBatchMapFlow());
     document.getElementById('btn-library-ai-classify')?.addEventListener('click', () => libraryAiClassifyFlow());
     document.getElementById('select-library-topic')?.addEventListener('change', async event => {
       libraryTopicFilter = event.target.value;
@@ -3091,6 +3119,149 @@
       } catch (err) {
         console.warn('PDF text extraction failed; falling back to metadata-only for this document', err);
         return '';
+      }
+    }
+
+    async function extractAttachmentPdfPages(attachmentId, { maxPages = 40, maxChars = 500_000 } = {}) {
+      if (!attachmentId) return [];
+      try {
+        const pdfjs = await loadHostPdfjs();
+        const doc = await pdfjs.getDocument({
+          url: `/canvas/native/attachments/${encodeURIComponent(attachmentId)}/file`,
+          withCredentials: true
+        }).promise;
+        try {
+          const pages = [];
+          let totalChars = 0;
+          const count = Math.min(maxPages, doc.numPages || 1);
+          for (let p = 0; p < count; p++) {
+            const page = await doc.getPage(p + 1);
+            const textContent = await page.getTextContent();
+            const pageText = textContent.items.map(item => item.str || '').join(' ').replace(/\s+/g, ' ').trim();
+            totalChars += pageText.length;
+            if (pageText) pages.push({ pageNumber: p + 1, text: pageText });
+            if (totalChars >= maxChars) break;
+          }
+          return pages;
+        } finally {
+          try { doc.destroy(); } catch {}
+        }
+      } catch (err) {
+        console.warn('PDF pages extraction failed', err);
+        return [];
+      }
+    }
+
+    async function libraryBatchMapFlow() {
+      if (!canvasReady || !canvasBoard) {
+        return showToast('请先进入画板', 'error');
+      }
+      if (!aiConfig.configured) {
+        return showToast('请先在设置中配置 AI', 'error');
+      }
+      if (selectedDocumentKeys.size === 0) {
+        return showToast('请先勾选需要绘制导图的文献', 'info');
+      }
+      if (aiDocumentGenerationInFlight) return;
+      aiDocumentGenerationInFlight = true;
+      updateCanvasAiToolbar();
+
+      const btnBatchMap = document.getElementById('btn-library-batch-map');
+      const keys = Array.from(selectedDocumentKeys);
+      if (btnBatchMap) btnBatchMap.textContent = '⏳ 绘制中...';
+      setCanvasSaveState(`准备为 ${keys.length} 篇文献绘制导图与对比…`);
+
+      let processed = 0;
+
+      try {
+        for (const itemKey of keys) {
+          let item = allItems.find(i => i.key === itemKey);
+          let pdfAttachment = (item?.children || []).find(c => c.data?.contentType === 'application/pdf')
+            || (item?.data?.itemType === 'attachment' ? item : null);
+          if (!pdfAttachment && itemKey) {
+            try {
+              const fullDocRes = await fetch(`/canvas/native/documents/${encodeURIComponent(itemKey)}`);
+              if (fullDocRes.ok) {
+                const fullDoc = await fullDocRes.json();
+                const firstAtt = fullDoc.data?.attachments?.[0];
+                if (firstAtt) {
+                  pdfAttachment = {
+                    key: firstAtt.id,
+                    version: firstAtt.version,
+                    data: { key: firstAtt.id, title: firstAtt.title, filename: firstAtt.originalFilename }
+                  };
+                }
+              }
+            } catch {}
+          }
+          if (!pdfAttachment) continue;
+
+          const library = normalizeLibraryContext(item?.isNative ? { libraryType: 'native', libraryId: 'local' } : currentDocumentLibrary);
+          const meta = documentMetas.get(docMetaKey(library.libraryType, library.libraryId, itemKey));
+          const title = meta?.cleanTitle || item?.data?.title || pdfAttachment.data?.filename || itemKey;
+          const attachmentKey = pdfAttachment.key;
+          const attachmentVersion = Number(pdfAttachment.data?.version ?? pdfAttachment.version ?? 0) || null;
+
+          setCanvasSaveState(`正在分析 [${processed + 1}/${keys.length}] 《${title.slice(0, 14)}》…`);
+
+          const cacheProbe = await canvasFetch(`/boards/${canvasBoard.id}/ai/document-map`, {
+            method: 'POST',
+            body: {
+              title,
+              document: { ...library, itemKey, attachmentKey, attachmentVersion },
+              checkOnly: true
+            }
+          });
+
+          if (cacheProbe?.cached) {
+            setCanvasSaveState(`正在融合 [${processed + 1}/${keys.length}] 《${title.slice(0, 14)}》…`);
+            await canvasFetch(`/boards/${canvasBoard.id}/ai/document-map`, {
+              method: 'POST',
+              body: {
+                title,
+                document: { ...library, itemKey, attachmentKey, attachmentVersion }
+              }
+            });
+          } else {
+            setCanvasSaveState(`提取正文 [${processed + 1}/${keys.length}] 《${title.slice(0, 14)}》…`);
+            let pages = [];
+            try {
+              pages = await extractAttachmentPdfPages(attachmentKey);
+            } catch {}
+            if (!pages.length) continue;
+
+            setCanvasSaveState(`AI 对比与融合 [${processed + 1}/${keys.length}] 《${title.slice(0, 14)}》…`);
+            await canvasFetch(`/boards/${canvasBoard.id}/ai/document-map`, {
+              method: 'POST',
+              body: {
+                title,
+                document: { ...library, itemKey, attachmentKey, attachmentVersion },
+                pages
+              }
+            });
+          }
+          processed++;
+          await loadCanvasSnapshot();
+        }
+
+        selectedDocumentKeys.clear();
+        updateLibrarySelectionUI();
+
+        if (processed > 0) {
+          showToast(`✨ 已完成 ${processed} 篇文献的导图绘制与对比融合！`, 'success');
+          setCanvasSaveState(`✨ 导图对比完成（处理 ${processed} 篇）`, 'ok');
+        } else {
+          showToast('所选文献未能成功提取 PDF 内容', 'error');
+          setCanvasSaveState('绘制导图失败', 'error');
+        }
+      } catch (err) {
+        reportApplicationError('canvas.batch-map', err);
+        showToast(`导图绘制中断: ${errorMessage(err)}`, 'error');
+        setCanvasSaveState(`绘制失败: ${errorMessage(err)}`, 'error');
+      } finally {
+        aiDocumentGenerationInFlight = false;
+        updateCanvasAiToolbar();
+        updateLibrarySelectionUI();
       }
     }
 
@@ -5225,7 +5396,15 @@
         empty.querySelector('div').innerHTML = '画板还是空的<br>创建手写卡片或加入当前文档标注';
       }
       nodesContainer.replaceChildren();
-      for (const node of canvasNodes.values()) nodesContainer.appendChild(createCanvasNodeElement(node));
+      for (const node of canvasNodes.values()) {
+        const el = createCanvasNodeElement(node);
+        nodesContainer.appendChild(el);
+        if (!node.manuallyResized) {
+          const h = Math.ceil(el.offsetHeight || el.scrollHeight || 0);
+          if (h > 0) node.height = h;
+        }
+      }
+      autoFitAllCanvasNodes();
       renderCanvasEdges();
       updateCanvasImportState();
     }
@@ -5240,7 +5419,11 @@
       element.style.left = `${node.x}px`;
       element.style.top = `${node.y}px`;
       element.style.width = `${node.width}px`;
-      element.style.height = `${node.height}px`;
+      if (node.manuallyResized) {
+        element.style.height = `${node.height}px`;
+      } else {
+        element.style.height = 'auto';
+      }
       element.style.zIndex = String(node.zIndex);
       if (node.color) element.style.borderTop = `3px solid ${node.color}`;
       const typeNames = {
@@ -5291,7 +5474,14 @@
 
       let headerTitleHtml = '';
       if (node.type === 'ai_output') {
-        headerTitleHtml = `<span class="text-purple-300 font-medium truncate flex items-center gap-1"><span>✨</span><span>${escapeHTML(node.title || 'AI 输出')}</span></span>`;
+        const relationBadgeHtml = node.color === '#f43f5e'
+          ? '<span class="px-1 py-0.5 rounded bg-rose-950/80 border border-rose-800/80 text-rose-300 text-[9px]">分歧</span>'
+          : (node.color === '#10b981'
+            ? '<span class="px-1 py-0.5 rounded bg-emerald-950/80 border border-emerald-800/80 text-emerald-300 text-[9px]">共识</span>'
+            : (node.color === '#3b82f6'
+              ? '<span class="px-1 py-0.5 rounded bg-blue-950/80 border border-blue-800/80 text-blue-300 text-[9px]">补充</span>'
+              : ''));
+        headerTitleHtml = `<span class="text-purple-300 font-medium truncate flex items-center gap-1"><span>✨</span>${relationBadgeHtml}<span>${escapeHTML(node.title || 'AI 输出')}</span></span>`;
       } else if (sourceRef?.annotationKey) {
         headerTitleHtml = `<button type="button" class="canvas-node-jump text-indigo-300 hover:text-indigo-200 font-medium truncate flex items-center gap-1 hover:underline text-left cursor-pointer" title="点击在阅读器中跳转定位"><span>${escapeHTML(typeNames[node.type] || node.type)}</span>${displayPageLabel ? `<span class="text-slate-400 font-mono text-[9px]">p.${escapeHTML(displayPageLabel)}</span>` : ''}<span class="text-indigo-400 text-[10px]">↗</span></button>`;
       } else {
@@ -5422,27 +5612,100 @@
       return element;
     }
 
+    function getNodePerimeterAnchor(source, target) {
+      const scx = source.x + source.width / 2;
+      const scy = source.y + source.height / 2;
+      const tcx = target.x + target.width / 2;
+      const tcy = target.y + target.height / 2;
+      const dx = tcx - scx;
+      const dy = tcy - scy;
+
+      let x1 = scx;
+      let y1 = scy;
+      let x2 = tcx;
+      let y2 = tcy;
+
+      // Exit anchor from source outer perimeter
+      if (Math.abs(dx) * (source.height / 2) >= Math.abs(dy) * (source.width / 2)) {
+        x1 = dx >= 0 ? source.x + source.width : source.x;
+        y1 = scy;
+      } else {
+        x1 = scx;
+        y1 = dy >= 0 ? source.y + source.height : source.y;
+      }
+
+      // Entry anchor into target outer perimeter
+      if (Math.abs(dx) * (target.height / 2) >= Math.abs(dy) * (target.width / 2)) {
+        x2 = dx >= 0 ? target.x : target.x + target.width;
+        y2 = tcy;
+      } else {
+        x2 = tcx;
+        y2 = dy >= 0 ? target.y : target.y + target.height;
+      }
+
+      return { x1, y1, x2, y2, dx, dy };
+    }
+
+    function ensureSvgDefs(svg) {
+      if (svg.querySelector('defs')) return;
+      const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+      defs.innerHTML = `
+        <marker id="arrow-related" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#818cf8" />
+        </marker>
+        <marker id="arrow-supports" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#10b981" />
+        </marker>
+        <marker id="arrow-contradicts" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#f43f5e" />
+        </marker>
+        <marker id="arrow-extends" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#3b82f6" />
+        </marker>
+      `;
+      svg.appendChild(defs);
+    }
+
     function renderCanvasEdges() {
       const svg = document.getElementById('canvas-edges');
+      if (!svg) return;
+      const defs = svg.querySelector('defs');
       svg.replaceChildren();
+      if (defs) svg.appendChild(defs);
+      else ensureSvgDefs(svg);
+
       for (const edge of canvasEdges.values()) {
         const sourceNode = canvasNodes.get(edge.sourceNodeId);
         const targetNode = canvasNodes.get(edge.targetNodeId);
         if (!sourceNode || !targetNode) continue;
-        const x1 = sourceNode.x + sourceNode.width / 2;
-        const y1 = sourceNode.y + sourceNode.height / 2;
-        const x2 = targetNode.x + targetNode.width / 2;
-        const y2 = targetNode.y + targetNode.height / 2;
-        const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-        line.setAttribute('class', 'canvas-edge');
-        line.setAttribute('x1', x1); line.setAttribute('y1', y1);
-        line.setAttribute('x2', x2); line.setAttribute('y2', y2);
-        svg.appendChild(line);
+
+        const { x1, y1, x2, y2, dx, dy } = getNodePerimeterAnchor(sourceNode, targetNode);
+
+        const offset = Math.min(100, Math.max(20, Math.hypot(dx, dy) * 0.25));
+        let pathD = '';
+        if (Math.abs(dx) >= Math.abs(dy)) {
+          const cx1 = dx >= 0 ? x1 + offset : x1 - offset;
+          const cx2 = dx >= 0 ? x2 - offset : x2 + offset;
+          pathD = `M ${x1} ${y1} C ${cx1} ${y1}, ${cx2} ${y2}, ${x2} ${y2}`;
+        } else {
+          const cy1 = dy >= 0 ? y1 + offset : y1 - offset;
+          const cy2 = dy >= 0 ? y2 - offset : y2 + offset;
+          pathD = `M ${x1} ${y1} C ${x1} ${cy1}, ${x2} ${cy2}, ${x2} ${y2}`;
+        }
+
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        const rel = edge.relation || 'related';
+        const validRel = ['related', 'supports', 'contradicts', 'extends'].includes(rel) ? rel : 'related';
+        path.setAttribute('class', `canvas-edge canvas-edge-${validRel}`);
+        path.setAttribute('d', pathD);
+        path.setAttribute('marker-end', `url(#arrow-${validRel})`);
+        svg.appendChild(path);
+
         if (edge.label || edge.relation !== 'related') {
           const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
           label.setAttribute('class', 'canvas-edge-label');
           label.setAttribute('x', (x1 + x2) / 2);
-          label.setAttribute('y', (y1 + y2) / 2 - 5);
+          label.setAttribute('y', (y1 + y2) / 2 - 6);
           label.setAttribute('text-anchor', 'middle');
           label.textContent = edge.label || edge.relation;
           svg.appendChild(label);
@@ -5492,8 +5755,40 @@
       const newHeight = Math.min(2000, Math.max(minHeight, measuredHeight));
       node.height = newHeight;
       element.style.height = `${newHeight}px`;
+      node.manuallyResized = false;
       renderCanvasEdges();
       scheduleCanvasLayoutSave();
+    }
+
+    function autoFitAllCanvasNodes(options = {}) {
+      const nodesContainer = document.getElementById('canvas-nodes');
+      if (!nodesContainer) return;
+      let anyAdjusted = false;
+      for (const element of nodesContainer.children) {
+        const nodeId = element.dataset?.nodeId;
+        const node = canvasNodes.get(nodeId);
+        if (!node || node.manuallyResized) continue;
+        const measured = Math.ceil(element.offsetHeight || element.scrollHeight || 0);
+        if (measured <= 0) continue;
+        const prevHeight = element.style.height;
+        element.style.height = 'auto';
+        const naturalHeight = Math.ceil(element.offsetHeight || element.scrollHeight || 0);
+        element.style.height = prevHeight;
+        if (naturalHeight <= 0) continue;
+        const minHeight = node.type === 'annotation' ? 64 : (node.type === 'manual_note' ? 68 : (node.type === 'ai_output' ? 72 : 68));
+        const newHeight = Math.min(2000, Math.max(minHeight, naturalHeight));
+        if (Math.abs(node.height - newHeight) > 4) {
+          node.height = newHeight;
+          element.style.height = `${newHeight}px`;
+          anyAdjusted = true;
+        }
+      }
+      if (anyAdjusted) {
+        renderCanvasEdges();
+        if (options.saveLayout) {
+          scheduleCanvasLayoutSave();
+        }
+      }
     }
 
     function beginCanvasNodeResize(event, node, element) {
@@ -5504,6 +5799,7 @@
       const startY = event.clientY;
       const originWidth = node.width;
       const originHeight = node.height;
+      node.manuallyResized = true;
       const onMove = moveEvent => {
         const zoom = canvasViewport().zoom;
         node.width = Math.min(5000, Math.max(80, originWidth + (moveEvent.clientX - startX) / zoom));
@@ -5627,8 +5923,8 @@
           const body = bodyParts.join('\n\n') || '空白标注';
           const textLen = body.length;
           const cardWidth = textLen > 200 ? 360 : 310;
-          const charsPerLine = Math.floor(cardWidth / 13);
-          const cardHeight = Math.min(380, Math.max(76, 68 + Math.ceil(textLen / charsPerLine) * 18));
+          const charsPerLine = Math.max(18, Math.floor((cardWidth - 24) / 11.5));
+          const cardHeight = Math.min(380, Math.max(68, 52 + Math.ceil(textLen / charsPerLine) * 17));
           const node = await canvasFetch(`/boards/${canvasBoard.id}/nodes`, {
             method: 'POST',
             body: {
@@ -6345,8 +6641,23 @@
       btn.disabled = disabled;
       document.getElementById('btn-canvas-ai-translate').disabled = disabled;
       document.getElementById('btn-canvas-ai-synthesize').disabled = disabled;
-      document.getElementById('btn-canvas-ai-document').disabled = !currentAttachment || !currentReaderInstance
-        || !canvasReady || !aiConfig.configured || aiDocumentGenerationInFlight;
+      const docBtn = document.getElementById('btn-canvas-ai-document');
+      if (docBtn) {
+        docBtn.disabled = !currentAttachment || !currentReaderInstance
+          || !canvasReady || !aiConfig.configured || aiDocumentGenerationInFlight;
+        const hasExistingCards = canvasNodes.size > 0;
+        if (hasExistingCards) {
+          docBtn.textContent = '➕ 对比补充';
+          docBtn.title = '以当前画板为基础，分析新文献并补充对比、标出相同点与矛盾点';
+        } else {
+          docBtn.textContent = '🗺️ 绘制导图';
+          docBtn.title = '提取当前 PDF 核心观点与结构，生成知识导图';
+        }
+      }
+      const organizeBtn = document.getElementById('btn-canvas-ai-organize');
+      if (organizeBtn) {
+        organizeBtn.disabled = canvasNodes.size < 2 || !canvasReady || !aiConfig.configured || aiDocumentGenerationInFlight;
+      }
       document.getElementById('btn-canvas-clear').disabled = !canvasReady || canvasDeleteInFlight || canvasNodes.size === 0;
       const evidenceCount = [...canvasNodes.values()].filter(node => {
         const sourceRef = node.sourceRefId ? canvasSources.get(node.sourceRefId) : null;
@@ -6567,6 +6878,40 @@
         showToast(`全文理解失败: ${errorMessage(err)}`, 'error');
       } finally {
         aiDocumentGenerationInFlight = false;
+        updateCanvasAiToolbar();
+      }
+    }
+
+    async function organizeCanvasWithAi() {
+      if (!canvasReady || !canvasBoard) return showToast('请先进入画板', 'error');
+      if (!aiConfig.configured) return showToast('请先在设置中配置 AI', 'error');
+      if (canvasNodes.size < 2) return showToast('画板卡片过少，无需整理', 'info');
+      if (aiDocumentGenerationInFlight) return;
+      aiDocumentGenerationInFlight = true;
+      updateCanvasAiToolbar();
+      const btn = document.getElementById('btn-canvas-ai-organize');
+      if (btn) btn.textContent = '⏳ 梳理中...';
+      setCanvasSaveState('AI 正在全景梳理与重排结构…');
+
+      try {
+        await canvasFetch(`/boards/${canvasBoard.id}/ai/organize`, {
+          method: 'POST'
+        });
+        await loadCanvasSnapshot();
+        if (canvasBoard) {
+          canvasBoard.viewport = { x: 30, y: 30, zoom: 0.7 };
+          updateCanvasTransform();
+          scheduleCanvasLayoutSave();
+        }
+        showToast('✨ 画板已完成 AI 梳理：已提炼全景对比综述并重构排版！', 'success');
+        setCanvasSaveState('画板梳理完成', 'ok');
+      } catch (err) {
+        reportApplicationError('canvas.ai-organize', err);
+        showToast(`画板梳理失败: ${errorMessage(err)}`, 'error');
+        setCanvasSaveState(`梳理失败: ${errorMessage(err)}`, 'error');
+      } finally {
+        aiDocumentGenerationInFlight = false;
+        if (btn) btn.textContent = '🧹 整理画板';
         updateCanvasAiToolbar();
       }
     }
@@ -7159,6 +7504,7 @@
       };
       document.getElementById('btn-canvas-ai').onclick = () => openAiModal();
       document.getElementById('btn-canvas-ai-document').onclick = generateCurrentPdfUnderstandingCanvas;
+      document.getElementById('btn-canvas-ai-organize').onclick = organizeCanvasWithAi;
       document.getElementById('btn-canvas-evidence-annotate').onclick = convertAllEvidenceToAnnotations;
       document.getElementById('btn-canvas-clear').onclick = clearCanvas;
       document.getElementById('btn-canvas-ai-translate').onclick = () => executeAiGeneration({ task: 'translate', prompt: '', quick: true });

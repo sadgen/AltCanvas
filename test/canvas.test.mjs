@@ -161,6 +161,13 @@ try {
         }
         return '[]';
       }
+      if (system.includes('整理专家') || system.includes('结构重组')) {
+        return JSON.stringify({
+          summaryTitle: '全景梳理与多篇对比综述',
+          summaryBody: '【核心结论】多篇研报均支持因子有效性。\n\n【共识点】\n1. 动量因子在长周期表现稳健。\n\n【主要分歧】\n1. 样本期不同导致短期结论有所差异。',
+          layout: []
+        });
+      }
       if (system.includes('空间画板')) {
         if (String(request.messages?.at(-1)?.content || '').includes('文档标题：坏结构')) return 'not-json';
         if (String(request.messages?.at(-1)?.content || '').includes('文档标题：关联已有节点论文')) {
@@ -912,6 +919,15 @@ try {
     method: 'POST', cookie, body: { task: 'synthesize', inputNodeIds: [] }
   });
   assert.equal(badAiRes.statusCode, 400);
+
+  // --- AI Organize Board Test ---
+  const organizeRes = await call(handler, `/canvas/boards/${apiBoard.id}/ai/organize`, {
+    method: 'POST', cookie
+  });
+  assert.equal(organizeRes.statusCode, 200);
+  assert.ok(organizeRes.payload.data.summaryTitle);
+  const organizedSnap = store.snapshot(canvasActorKey('https://issuer.example', 'api-subject'), apiBoard.id);
+  assert.ok(organizedSnap.nodes.some(n => n.title.includes('全景梳理') || n.title.includes('对比综述')), 'AI organize must create synthesis overview card');
 
   // --- Schema v2 -> v3 Migration Test with Authentic DDL and Data Fidelity ---
   const v2Dir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-v2-migration-test-'));

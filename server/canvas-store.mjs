@@ -3200,11 +3200,23 @@ export class CanvasStore {
 
     // 1. Overview card (wide header)
     const overviewItem = nodes[0];
+    const overviewCrossRel = (graph.relations || []).find(r => r.from === 'overview' && String(r.to || '').startsWith('existing:'));
+    if (overviewCrossRel) {
+      const relType = overviewCrossRel.relation;
+      if (relType === 'contradicts' || relType === 'context_differs') {
+        overviewItem.color = '#f43f5e';
+      } else if (relType === 'supports' || relType === 'same_method') {
+        overviewItem.color = '#10b981';
+      } else if (relType === 'extends') {
+        overviewItem.color = '#3b82f6';
+      }
+    }
     const overviewTextLen = (overviewItem.body || '').length;
     const overviewQuoteLen = (overviewItem.evidenceQuote || '').length;
     const overviewWidth = 640;
-    const extraForOverviewQuote = overviewQuoteLen ? 36 + Math.ceil(overviewQuoteLen / 44) * 16 : 0;
-    const overviewHeight = Math.min(520, Math.max(120, 80 + extraForOverviewQuote + Math.ceil(overviewTextLen / 42) * 18));
+    const charsPerLineOverview = Math.max(28, Math.floor((overviewWidth - 32) / 11.5));
+    const extraForOverviewQuote = overviewQuoteLen ? 20 + Math.ceil(overviewQuoteLen / charsPerLineOverview) * 16 : 0;
+    const overviewHeight = Math.min(520, Math.max(90, 56 + extraForOverviewQuote + Math.ceil(overviewTextLen / charsPerLineOverview) * 17));
     layoutMap.set('overview', { x: 280 + startOffsetX, y: currentY, width: overviewWidth, height: overviewHeight });
     currentY += overviewHeight + 40;
 
@@ -3229,12 +3241,37 @@ export class CanvasStore {
       kindNodes.forEach((node, index) => {
           const bodyLen = (node.body || '').length;
           const quoteLen = (node.evidenceQuote || '').length;
-          const charsPerLine = Math.max(16, Math.floor(cardWidth / 14));
-          const extraForQuote = quoteLen ? 36 + Math.ceil(quoteLen / charsPerLine) * 16 : 0;
-          const height = Math.min(460, Math.max(88, 76 + extraForQuote + Math.ceil(bodyLen / charsPerLine) * 18));
+          const charsPerLine = Math.max(20, Math.floor((cardWidth - 28) / 11.5));
+          const extraForQuote = quoteLen ? 20 + Math.ceil(quoteLen / charsPerLine) * 16 : 0;
+          const height = Math.min(460, Math.max(76, 54 + extraForQuote + Math.ceil(bodyLen / charsPerLine) * 17));
           const columnIndex = index % cols;
-          const x = startX + columnIndex * (cardWidth + colGap);
-          layoutMap.set(node.key, { x, y: columnBottoms[columnIndex], width: cardWidth, height });
+          let x = startX + columnIndex * (cardWidth + colGap);
+          let y = columnBottoms[columnIndex];
+
+          const crossRel = (graph.relations || []).find(r => r.from === node.key && String(r.to || '').startsWith('existing:'));
+          if (crossRel) {
+            const relType = crossRel.relation;
+            if (relType === 'contradicts' || relType === 'context_differs') {
+              node.color = '#f43f5e';
+            } else if (relType === 'supports' || relType === 'same_method') {
+              node.color = '#10b981';
+            } else if (relType === 'extends') {
+              node.color = '#3b82f6';
+            }
+            const targetId = crossRel.to.slice('existing:'.length);
+            const targetNode = existingBoardNodes.find(n => n.id === targetId);
+            if (targetNode && !isUpdateInPlace) {
+              const candX = targetNode.x + targetNode.width + 48;
+              const candY = targetNode.y;
+              const collides = Array.from(layoutMap.values()).some(placed =>
+                Math.abs(placed.x - candX) < cardWidth && Math.abs(placed.y - candY) < height
+              );
+              x = candX;
+              y = collides ? candY + height + 24 : candY;
+            }
+          }
+
+          layoutMap.set(node.key, { x, y, width: cardWidth, height });
           columnBottoms[columnIndex] += height + 36;
       });
       currentY = Math.max(...columnBottoms) - 36;
@@ -3327,7 +3364,7 @@ export class CanvasStore {
               INSERT INTO nodes
                 (id, board_id, node_type, x, y, width, height, z_index, title, body, color, source_ref_id, created_at, updated_at)
               VALUES (?, ?, 'ai_output', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            `).run(nodeId, boardId, layout.x, layout.y, layout.width, layout.height, index + 1, item.title || item.kind, item.body, colors[item.kind], sourceRefId, timestamp, timestamp);
+            `).run(nodeId, boardId, layout.x, layout.y, layout.width, layout.height, index + 1, item.title || item.kind, item.body, item.color || colors[item.kind], sourceRefId, timestamp, timestamp);
             nodeIds.set(item.key, nodeId);
             createdNodeIds.push(nodeId);
           }
@@ -3444,7 +3481,7 @@ export class CanvasStore {
             INSERT INTO nodes
               (id, board_id, node_type, x, y, width, height, z_index, title, body, color, source_ref_id, created_at, updated_at)
             VALUES (?, ?, 'ai_output', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          `).run(nodeId, boardId, layout.x, layout.y, layout.width, layout.height, index + 1, item.title || item.kind, item.body, colors[item.kind], sourceRefId, timestamp, timestamp);
+          `).run(nodeId, boardId, layout.x, layout.y, layout.width, layout.height, index + 1, item.title || item.kind, item.body, item.color || colors[item.kind], sourceRefId, timestamp, timestamp);
           nodeIds.set(item.key, nodeId);
           createdNodeIds.push(nodeId);
         }

@@ -3818,11 +3818,15 @@ ${textSnippet.slice(0, 8000) || '无'}`;
             const boardRelationAiRes = await aiCompletion({
               messages: [
                 { role: 'system', content: [
-                  '你是学术研究助手，负责在新文献卡片与当前画板已有卡片之间发现关键学术关联。',
+                  '你是学术研究助手，负责在新文献与当前画板已有卡片之间发现关键学术关联，进行深度对比与增量知识融合。',
+                  '请重点比对新文献与画板已有卡片，识别出：',
+                  '1. 矛盾点/分歧（relation: "contradicts" 或 "context_differs"）：结论相反、对立观点、核心假设冲突或数据范围分歧；',
+                  '2. 相同点/共识（relation: "supports" 或 "same_method"）：互相印证、支持论点、复现结论或同类方法；',
+                  '3. 补充视角（relation: "extends"）：新文献提出的延伸机制、补充案例或未涵盖的增量发现。',
                   '只输出一个 JSON 数组，不要 Markdown 代码围栏。若无明显关联返回 []。',
-                  '格式：[{"from":"section-0","to":"existing:<已有卡片ID>","relation":"supports|contradicts|extends|same_method|context_differs|related","label":"简短标签"}]',
+                  '格式：[{"from":"section-0","to":"existing:<已有卡片ID>","relation":"supports|contradicts|extends|same_method|context_differs|related","label":"具体分歧或相同点说明"}]',
                   'from 必须是新文献卡片 ID（overview/section-N/concept-N/claim-N），to 必须是 existing:<已有卡片ID>。',
-                  'relation 必须是 related/supports/contradicts/causes/cites/extends/same_method/context_differs/custom。'
+                  'label 请写明具体学术内容（例如："分歧: A认为正相关，B发现负相关"、"共识: 均证实小盘股溢价效应"、"补充: 引入行业风险调整因子"）。'
                 ].join('\n') },
                 { role: 'user', content: `新文献《${title}》概览：${baseGraph.overview}\n\n新文献卡片：\n${cardsBrief}\n\n当前画板已有卡片：\n${boardContextText}` }
               ],
@@ -3862,6 +3866,99 @@ ${textSnippet.slice(0, 8000) || '无'}`;
 
         json(res, 201, { data: { ...result, cached: isCached } });
         return;
+      }
+
+      match = /^\/canvas\/boards\/([0-9a-f-]+)\/ai\/organize$/.exec(pathname);
+      if (match && method === 'POST') {
+        const boardId = match[1];
+        const board = store.requireBoard(actor.actorKey, boardId);
+        const privateConfig = store.getAiSettings(actor.actorKey);
+        const publicConfig = aiPublicConfig(privateConfig);
+        if (!publicConfig.configured) {
+          error(res, 503, 'ai_not_configured', 'AI 模型尚未配置');
+          return;
+        }
+
+        const snapshot = store.snapshot(actor.actorKey, boardId);
+        const activeNodes = (snapshot.nodes || []).filter(n => !n.deletedAt);
+        if (activeNodes.length < 2) {
+          error(res, 400, 'insufficient_cards', '画板卡片数量不足（至少需2张卡片）');
+          return;
+        }
+
+        const cardsBrief = activeNodes.map(n => `- [${n.id}] (${n.type}) ${n.title}: ${(n.body || '').slice(0, 150)}`).join('\n');
+        const edgesBrief = (snapshot.edges || []).map(e => `${e.sourceNodeId} -(${e.relation}: ${e.label})-> ${e.targetNodeId}`).join('\n');
+
+        try {
+          const organizeAiRes = await aiCompletion({
+            messages: [
+              { role: 'system', content: [
+                '你是学术研究导师与知识图谱整理专家。请对当前画板的全部卡片进行深度梳理与结构重组。',
+                '任务要求：',
+                '1. 提炼全景对比综述（必须包含：核心结论、主要共识、关键分歧与争鸣、重要延伸线索）；',
+                '2. 空间排版规划：将卡片按学术主题聚类为 2~4 个主题簇（如：背景与问题、核心方法与论据、分歧争鸣、延伸应用），计算每张卡片的新 (x, y) 坐标，使同簇紧密聚合排列、簇间留出 120px 间距，消除重叠。',
+                '只输出一个 JSON 对象，不要 Markdown 代码围栏。',
+                'JSON 格式：',
+                '{"summaryTitle":"全景梳理与多篇对比综述","summaryBody":"【核心结论】...\\n\\n【共识点】\\n1. ...\\n\\n【主要分歧】\\n1. ...\\n\\n【延伸视角】\\n1. ...",',
+                '"layout":[{"id":"<卡片ID>","x":100,"y":200}]}'
+              ].join('\n') },
+              { role: 'user', content: `当前画板卡片（共 ${activeNodes.length} 张）：\n${cardsBrief}\n\n当前卡片间关联：\n${edgesBrief || '无'}` }
+            ],
+            temperature: 0.2
+          }, privateConfig);
+
+          const parsed = parseAiJson(organizeAiRes);
+          const layout = Array.isArray(parsed?.layout) ? parsed.layout : [];
+          const summaryBody = string(parsed?.summaryBody || '', 'summaryBody', { max: 10_000 });
+          const summaryTitle = string(parsed?.summaryTitle || '全景梳理与对比综述', 'summaryTitle', { max: 200 });
+
+          const timestamp = new Date().toISOString();
+          store.transaction(() => {
+            for (const item of layout) {
+              const node = activeNodes.find(n => n.id === item?.id);
+              if (!node) continue;
+              const newX = number(item.x, 'item.x');
+              const newY = number(item.y, 'item.y');
+              store.db.prepare(`
+                UPDATE nodes SET x = ?, y = ?, version = version + 1, updated_at = ?
+                WHERE id = ? AND board_id = ?
+              `).run(newX, newY, timestamp, node.id, boardId);
+            }
+
+            if (summaryBody) {
+              const existingSummary = activeNodes.find(n => n.title?.includes('全景梳理') || n.title?.includes('对比综述'));
+              if (existingSummary) {
+                store.db.prepare(`
+                  UPDATE nodes SET title = ?, body = ?, version = version + 1, updated_at = ?
+                  WHERE id = ? AND board_id = ?
+                `).run(summaryTitle, summaryBody, timestamp, existingSummary.id, boardId);
+              } else {
+                const summaryId = crypto.randomUUID();
+                const minX = Math.min(...activeNodes.map(n => n.x), 200);
+                const minY = Math.min(...activeNodes.map(n => n.y), 40);
+                store.db.prepare(`
+                  INSERT INTO nodes (id, board_id, node_type, x, y, width, height, z_index, title, body, color, created_at, updated_at)
+                  VALUES (?, ?, 'ai_output', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                `).run(summaryId, boardId, minX, Math.max(20, minY - 260), 680, 220, activeNodes.length + 10, summaryTitle, summaryBody, '#7c3aed', timestamp, timestamp);
+              }
+            }
+
+            store.recordEvent({
+              workspaceId: board.workspaceId,
+              boardId,
+              type: 'board.organized_ai',
+              actorKey: actor.actorKey,
+              payload: { nodeCount: activeNodes.length, summaryTitle }
+            });
+          });
+
+          const finalSnapshot = store.snapshot(actor.actorKey, boardId);
+          json(res, 200, { data: { snapshot: finalSnapshot, summaryTitle } });
+          return;
+        } catch (aiErr) {
+          error(res, aiErr?.name === 'AbortError' ? 504 : 502, 'ai_gateway_error', aiErr.message);
+          return;
+        }
       }
 
       match = /^\/canvas\/workspaces\/([0-9a-f-]+)\/related-knowledge$/.exec(pathname);
@@ -4103,8 +4200,9 @@ ${textSnippet.slice(0, 8000) || '无'}`;
 
             const textLen = (u.body || '').length;
             const quoteLen = (u.evidenceQuote || '').length;
-            const extraForQuote = quoteLen ? 36 + Math.ceil(quoteLen / 24) * 16 : 0;
-            const height = Math.min(420, Math.max(88, 76 + extraForQuote + Math.ceil(textLen / 24) * 18));
+            const charsPerLine = Math.max(20, Math.floor((cardWidth - 28) / 11.5));
+            const extraForQuote = quoteLen ? 20 + Math.ceil(quoteLen / charsPerLine) * 16 : 0;
+            const height = Math.min(420, Math.max(76, 54 + extraForQuote + Math.ceil(textLen / charsPerLine) * 17));
             const nodeId = crypto.randomUUID();
 
             const relationColors = {
@@ -4464,8 +4562,8 @@ ${textSnippet.slice(0, 8000) || '无'}`;
         const newY = minY;
         const textLen = (responseText || '').trim().length;
         const width = textLen > 300 ? 440 : 380;
-        const charsPerLine = Math.floor(width / 13);
-        const height = Math.min(500, Math.max(88, 76 + Math.ceil(textLen / charsPerLine) * 18));
+        const charsPerLine = Math.max(20, Math.floor((width - 28) / 11.5));
+        const height = Math.min(500, Math.max(76, 54 + Math.ceil(textLen / charsPerLine) * 17));
 
         const result = store.createAiSynthesisNode(actor.actorKey, boardId, {
           task,
