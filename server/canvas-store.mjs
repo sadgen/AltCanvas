@@ -1144,7 +1144,12 @@ export class CanvasStore {
     this.db.exec('PRAGMA journal_mode = WAL');
     this.db.exec('PRAGMA busy_timeout = 5000');
     this.db.exec('PRAGMA foreign_keys = OFF');
-    this.migrate();
+    try {
+      this.migrate();
+    } catch (err) {
+      try { this.db.close(); } catch {}
+      throw err;
+    }
     this.db.exec('PRAGMA foreign_keys = ON');
     for (const filePath of [this.dbPath, `${this.dbPath}-wal`, `${this.dbPath}-shm`]) {
       if (fs.existsSync(filePath)) fs.chmodSync(filePath, 0o600);
@@ -5162,6 +5167,36 @@ export class CanvasStore {
       WHERE id = ? AND owner_key = ? AND deleted_at IS NULL
     `).run(timestamp, timestamp, row.id, actorKey);
     return true;
+  }
+
+  // Auto-discover: creates a source_files row for a PDF file that exists on
+  // disk but hasn't been scanned yet. sha256 is left null (filled by the next
+  // full scan). Returns the sourceFile row (existing or newly created).
+  ensureSourceFileDiscovered(actorKey, rootId, { relativePath, filename, sizeBytes, modifiedAt }) {
+    const existing = this.db.prepare(
+      'SELECT id, status, deleted_at FROM source_files WHERE root_id = ? AND relative_path = ? AND owner_key = ?'
+    ).get(rootId, relativePath, actorKey);
+    if (existing) {
+      if (existing.deleted_at || existing.status === 'missing') {
+        const timestamp = nowIso();
+        this.db.prepare(`
+          UPDATE source_files
+          SET status = 'active', deleted_at = NULL, size_bytes = ?, modified_at = ?, last_seen_at = ?, updated_at = ?, version = version + 1
+          WHERE id = ?
+        `).run(sizeBytes || 0, modifiedAt || timestamp, timestamp, timestamp, existing.id);
+      }
+      return this.getSourceFile(actorKey, existing.id);
+    }
+    const sf = this.createSourceFile(actorKey, rootId, {
+      relativePath,
+      filename: filename || relativePath,
+      sha256: null,
+      sizeBytes: sizeBytes || 0,
+      modifiedAt: modifiedAt || new Date().toISOString(),
+      lastSeenAt: new Date().toISOString(),
+      status: 'active'
+    });
+    return this.getSourceFile(actorKey, sf.id);
   }
 
   // 加入文库: creates a library identity (document + source_file attachment)

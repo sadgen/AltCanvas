@@ -87,8 +87,13 @@ export function placeFileIntoRoot(rootPath, targetRelativePath, tempFilePath) {
     }
     cleanupStaged();
     assertWrittenInsideRoot(rootReal, target); // post-write containment: never keep an escape
-    const dirFd = fs.openSync(path.dirname(target), 'r');
-    try { fs.fsyncSync(dirFd); } finally { fs.closeSync(dirFd); }
+    try {
+      const dirFd = fs.openSync(path.dirname(target), 'r');
+      try { fs.fsyncSync(dirFd); } finally { fs.closeSync(dirFd); }
+    } catch (e) {
+      // Directory fsync is POSIX-only; Windows throws EPERM / EINVAL.
+      if (process.platform !== 'win32') throw e;
+    }
     return target;
   } catch (err) {
     cleanupStaged();

@@ -72,10 +72,12 @@ const otherActor = canvasActorKey('https://issuer.example', 'subject-2');
 let store = new CanvasStore(dbPath);
 
 try {
-  assert.equal(fs.statSync(tempDir).mode & 0o777, 0o700, 'Canvas data directory must be owner-only');
-  assert.equal(fs.statSync(dbPath).mode & 0o777, 0o600, 'Canvas database must be owner-only');
-  assert.equal(fs.statSync(path.join(tempDir, 'ai-settings.key')).mode & 0o777, 0o600,
-    'AI settings encryption key must be owner-only');
+  if (process.platform !== 'win32') {
+    assert.equal(fs.statSync(tempDir).mode & 0o777, 0o700, 'Canvas data directory must be owner-only');
+    assert.equal(fs.statSync(dbPath).mode & 0o777, 0o600, 'Canvas database must be owner-only');
+    assert.equal(fs.statSync(path.join(tempDir, 'ai-settings.key')).mode & 0o777, 0o600,
+      'AI settings encryption key must be owner-only');
+  }
   const workspace = store.createWorkspace(actor, { name: 'Research workspace' });
   const board = store.createBoard(actor, workspace.id, { name: 'Argument map' });
   const annotation = store.createNode(actor, board.id, {
@@ -2076,11 +2078,16 @@ try {
   // recognition ran against — the incremental ✨ run skips only documents
   // whose meta marks the CURRENT attachment as recognized. Legacy rows with
   // null attachment_version are re-recognized (with real content) once.
+  const versionedBlobNow = new Date().toISOString();
+  store.db.prepare(`
+    INSERT OR IGNORE INTO blobs (sha256, relative_path, size_bytes, mime_type, created_at, reference_count)
+    VALUES ('blob-versioned-hash', 'sha256/bv/blob-versioned-hash.pdf', 10, 'application/pdf', ?, 1)
+  `).run(versionedBlobNow);
   store.db.prepare(`
     INSERT INTO attachments
       (id, document_id, blob_hash, mime_type, original_filename, title, size_bytes, storage_kind, version, created_at, updated_at)
-    VALUES (?, ?, NULL, 'application/pdf', 'vision-survey.pdf', 'Vision Survey', 10, 'managed_blob', 4, ?, ?)
-  `).run('att-versioned-1', classifyDoc.id, new Date().toISOString(), new Date().toISOString());
+    VALUES (?, ?, 'blob-versioned-hash', 'application/pdf', 'vision-survey.pdf', 'Vision Survey', 10, 'managed_blob', 4, ?, ?)
+  `).run('att-versioned-1', classifyDoc.id, versionedBlobNow, versionedBlobNow);
   const versionedHandler = createCanvasHandler(store, {
     aiPublicConfig: () => ({ configured: true, provider: 'mock.example', model: 'mock-model' }),
     aiCompletion: async () => JSON.stringify({
@@ -2126,13 +2133,12 @@ try {
     'the AI prompt must include the real first-page text');
   assert.ok(!classifyPromptText.includes('【未注明机构】'), 'placeholder text must not be fabricated');
   // text values are hard-capped before they reach the prompt
-  await assert.rejects(
-    call(textClassifyHandler, '/canvas/native/documents/classify', {
-      method: 'POST', cookie,
-      body: { documentIds: [classifyDoc.id], documentTexts: { [classifyDoc.id]: 42 } }
-    }),
-    /documentTexts values must be strings/
-  );
+  const badTextRes = await call(textClassifyHandler, '/canvas/native/documents/classify', {
+    method: 'POST', cookie,
+    body: { documentIds: [classifyDoc.id], documentTexts: { [classifyDoc.id]: 42 } }
+  });
+  assert.equal(badTextRes.statusCode, 400);
+  assert.match(badTextRes.payload.error.message, /documentTexts values must be strings/);
 
   // Native classify rejects oversized document id lists before any AI call
   const oversizedIds = Array.from({ length: 201 }, () => '00000000-0000-4000-8000-000000000000');
@@ -2169,6 +2175,12 @@ try {
       }
     })
   });
+  // Ensure the topic budget has room for the 2 AI generated topics
+  for (const ws of store.listWorkspaces(canvasActorKey('https://issuer.example', 'api-subject'))) {
+    if (ws.id !== apiTopic.id) {
+      store.deleteWorkspace(canvasActorKey('https://issuer.example', 'api-subject'), ws.id, ws.version);
+    }
+  }
   const generateTopicsRes = await call(autoTopicHandler, '/canvas/native/classify/generate-topics', {
     method: 'POST', cookie, body: { documentIds: [classifyDoc.id], maxTopics: 5 }
   });

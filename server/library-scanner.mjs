@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { hashFileInsideRoot, resolveRootRealPath, ensureVerifiedDirectory, safeProbeInsideRoot, safeUnlinkWithExpectedSha } from './native-fs.mjs';
+import { hashFileInsideRoot, resolveRootRealPath, ensureVerifiedDirectory, safeProbeInsideRoot, safeUnlinkWithExpectedSha, normalizeRelativePath } from './native-fs.mjs';
 import { nowIso } from './canvas-store.mjs';
 
 // M4 incremental library scanner. A scan is a full directory inventory whose
@@ -25,7 +25,7 @@ export class LibraryScanError extends Error {
 // and directories) are never followed. Implemented as a lazy generator so the
 // full directory listing is never aggregated in memory; callers consume
 // bounded batches via batchesOf below.
-export function* iteratePdfEntries(rootPath) {
+export function* iteratePdfEntries(rootPath, subDir = '') {
   const rootReal = resolveRootRealPath(rootPath);
   function* visit(relativeDir) {
     let dirents;
@@ -61,7 +61,8 @@ export function* iteratePdfEntries(rootPath) {
       };
     }
   }
-  yield* visit('');
+  const startDir = subDir ? normalizeRelativePath(subDir, { allowHidden: false }) : '';
+  yield* visit(startDir);
 }
 
 // Bounds memory: yields fixed-size batches pulled lazily from the generator.

@@ -20,7 +20,7 @@ import { getSession, getSessionIdFromRequest } from './session.mjs';
 import { getAiPublicConfig, requestAiCompletion, validateAiEndpoint } from './ai-provider.mjs';
 import { resolveImportInput, findDuplicateCandidates, safeDownloadPdfFile } from './import-resolver.mjs';
 import { NativePathError, openFileInsideRoot, normalizeRelativePath, normalizeFilename, listDirectoryPage, ensureDirectoryInsideRoot, safeUnlinkWithExpectedSha } from './native-fs.mjs';
-import { scanLibraryRoot, LibraryScanError } from './library-scanner.mjs';
+import { scanLibraryRoot, LibraryScanError, iteratePdfEntries } from './library-scanner.mjs';
 import { runBlobOnlyWebImportMigration } from './blob-migration.mjs';
 import {
   FileOpError,
@@ -2459,8 +2459,25 @@ export function createCanvasHandler(store, {
         const listing = listDirectoryPage(root.absolutePath, relativePath, { cursor, limit });
         const pdfPaths = listing.entries.filter(e => e.type === 'pdf').map(e => e.relativePath);
         const libraryInfo = store.getSourceFileLibraryInfoByPaths(actor.actorKey, root.id, pdfPaths);
+        // Auto-discover: PDFs on disk without source_files rows get one created
+        // so they always show checkboxes in the 原始文件 view. sha256 is left
+        // null (filled by the next full scan).
+        for (const entry of listing.entries) {
+          if (entry.type !== 'pdf') continue;
+          if (libraryInfo.has(entry.relativePath)) continue;
+          try {
+            store.ensureSourceFileDiscovered(actor.actorKey, root.id, {
+              relativePath: entry.relativePath,
+              filename: entry.name,
+              sizeBytes: entry.sizeBytes || 0,
+              modifiedAt: entry.modifiedAt ? new Date(entry.modifiedAt).toISOString() : new Date().toISOString()
+            });
+          } catch (e) { console.error('AUTO_DISCOVER_FAIL:', entry.relativePath, e.message); }
+        }
+        // Re-fetch after auto-discovery so new rows are included
+        const updatedInfo = store.getSourceFileLibraryInfoByPaths(actor.actorKey, root.id, pdfPaths);
         const data = listing.entries.map(entry => {
-          const binding = libraryInfo.get(entry.relativePath) || null;
+          const binding = updatedInfo.get(entry.relativePath) || null;
           return { ...entry, library: binding };
         });
         json(res, 200, {
@@ -2508,13 +2525,26 @@ export function createCanvasHandler(store, {
         const root = store.requireLibraryRoot(actor.actorKey, match[1]);
         const dirPath = url.searchParams.get('path') || '';
         const prefix = dirPath ? dirPath + '/' : '';
+        // Auto-discover: ensure any PDFs on disk under this directory have source_files rows
+        try {
+          for (const entry of iteratePdfEntries(root.absolutePath, dirPath)) {
+            store.ensureSourceFileDiscovered(actor.actorKey, root.id, {
+              relativePath: entry.relativePath,
+              filename: entry.filename,
+              sizeBytes: entry.sizeBytes,
+              modifiedAt: new Date(entry.mtimeMs).toISOString()
+            });
+          }
+        } catch (e) {
+          console.error('AUTO_DISCOVER_IN_SOURCE_FILE_IDS_FAIL:', e.message);
+        }
         const ids = store.db.prepare(`
           SELECT sf.id FROM source_files sf
           WHERE sf.root_id = ? AND sf.owner_key = ? AND sf.deleted_at IS NULL
             AND sf.status = 'active' AND sf.document_id IS NULL
-            AND sf.relative_path LIKE ? || '%'
+            AND (sf.relative_path = ? OR sf.relative_path LIKE ? || '%')
           ORDER BY sf.relative_path ASC
-        `).all(root.id, actor.actorKey, prefix).map(r => ({ sourceFileId: r.id }));
+        `).all(root.id, actor.actorKey, dirPath, prefix).map(r => ({ sourceFileId: r.id }));
         json(res, 200, { data: ids });
         return;
       }

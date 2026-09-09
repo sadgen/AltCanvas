@@ -91,6 +91,8 @@ console.log('🧪 Running AltCanvas Native M1 Minimal Loop Tests...');
 
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-native-m1-test-'));
 const dbPath = path.join(tempDir, 'native-canvas.sqlite');
+let store = null;
+let reopenedStore = null;
 
 try {
   // 1. Verify default Auth Mode without Altero env is 'local'
@@ -102,7 +104,7 @@ try {
   assert.equal(getAuthMode(), 'local', 'Default auth mode must be local when no Altero config is present');
   assert.equal(isLocalAuthAllowed(), true);
 
-  const store = new CanvasStore(dbPath);
+  store = new CanvasStore(dbPath);
   const handler = createCanvasHandler(store);
 
   // [P0 Regression][M4] AUTH_MODE=altero no longer exists as a mode: setting the
@@ -245,7 +247,9 @@ try {
   // Verify blob file exists on disk with 0600 permissions
   const blobPath = store.resolveBlobPath(expectedSha256, '.pdf');
   assert.ok(fs.existsSync(blobPath), 'Blob file must exist on disk in designated sha256 directory');
-  assert.equal(fs.statSync(blobPath).mode & 0o777, 0o600, 'Blob file must have 0600 permissions');
+  if (process.platform !== 'win32') {
+    assert.equal(fs.statSync(blobPath).mode & 0o777, 0o600, 'Blob file must have 0600 permissions');
+  }
   assert.equal(fs.readFileSync(blobPath).equals(samplePdfContent), true, 'Blob file content must match byte-for-byte');
 
   // [P1 Regression] Verify content deduplication on identical PDF upload does NOT increment reference count
@@ -696,7 +700,7 @@ try {
 
   // 10. Persistence across Store & Process Restart & [P1 Regression] Blob Reference Count on Delete
   store.close();
-  const reopenedStore = new CanvasStore(dbPath);
+  reopenedStore = new CanvasStore(dbPath);
   const reopenedDoc = reopenedStore.getDocument(adminActorKey, uploadedDoc.id);
   assert.ok(reopenedDoc, 'Document must persist across database re-instantiation');
   assert.equal(reopenedDoc.title, 'Robotics Deep Dive (Updated)');
@@ -870,5 +874,7 @@ try {
 
   console.log('✅ All Native M1 Minimal Loop & Audit Regression Tests Passed Successfully!');
 } finally {
-  fs.rmSync(tempDir, { recursive: true, force: true });
+  try { store.close(); } catch {}
+  try { reopenedStore?.close(); } catch {}
+  fs.rmSync(tempDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }

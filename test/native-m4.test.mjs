@@ -612,10 +612,12 @@ async function testM4Scanner() {
     assert.equal(rows.length, 2);
     for (const row of rows) {
       assert.equal(row.status, 'active');
-      assert.ok(row.documentId, 'scanned files must be enrolled with a document');
-      assert.ok(row.attachmentId);
+      assert.equal(row.documentId, null, 'scanned files are discovered without auto-enrolling');
+      assert.equal(row.attachmentId, null);
       assert.equal(row.sha256, row.filename === 'a.pdf' ? sha256Of(uniqueA) : sha256Of(uniqueB));
-      const doc = store.getDocument(actor, row.documentId);
+      // Explicit enrollment (user action / AI recognition)
+      const enrolled = store.enrollExistingSourceFile(actor, row.id);
+      const doc = store.getDocument(actor, enrolled.document.id);
       assert.equal(doc.attachments.length, 1);
       assert.equal(doc.attachments[0].storageKind, 'source_file');
       assert.equal(doc.attachments[0].sourceFileId, row.id);
@@ -4092,6 +4094,48 @@ async function testM4NativeListCarriesAttachments() {
   }
 }
 
+async function testM4AutoDiscoveryAndSourceFileIds() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-autodiscover-'));
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'altcanvas-m4-autodiscover-root-'));
+  const dbPath = path.join(tempDir, 'canvas.sqlite');
+  const store = new CanvasStore(dbPath);
+  const actor = canvasActorKey('local', 'm4-autodiscover');
+  try {
+    const [root] = store.ensureLibraryRootsFromConfig(actor, [{ absolutePath: rootDir, displayName: '自动发现文库' }]);
+    fs.mkdirSync(path.join(rootDir, 'subfolder'), { recursive: true });
+    fs.writeFileSync(path.join(rootDir, 'subfolder', 'test1.pdf'), makePdfBytes('t1'));
+    fs.writeFileSync(path.join(rootDir, 'subfolder', 'test2.pdf'), makePdfBytes('t2'));
+
+    // 1. ensureSourceFileDiscovered creates active unenrolled row
+    const sf1 = store.ensureSourceFileDiscovered(actor, root.id, {
+      relativePath: 'subfolder/test1.pdf',
+      filename: 'test1.pdf',
+      sizeBytes: 100,
+      modifiedAt: new Date().toISOString()
+    });
+    assert.ok(sf1.id, 'must create source_files row');
+    assert.equal(sf1.status, 'active');
+    assert.equal(sf1.documentId, null);
+
+    // Calling again returns the existing row idempotently
+    const sf1Again = store.ensureSourceFileDiscovered(actor, root.id, {
+      relativePath: 'subfolder/test1.pdf',
+      filename: 'test1.pdf'
+    });
+    assert.equal(sf1Again.id, sf1.id);
+
+    // 2. iteratePdfEntries with subDir yields only files in subfolder
+    const entries = [...iteratePdfEntries(rootDir, 'subfolder')];
+    assert.equal(entries.length, 2);
+    assert.ok(entries.some(e => e.relativePath === 'subfolder/test1.pdf'));
+    assert.ok(entries.some(e => e.relativePath === 'subfolder/test2.pdf'));
+  } finally {
+    try { store.close(); } catch {}
+    fs.rmSync(tempDir, { recursive: true, force: true });
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+}
+
 async function testM4FinalRemediation() {
   await testWebImportDefaultArchiving();
   await testBlobOnlyWebImportMigration();
@@ -4103,6 +4147,7 @@ async function testM4FinalRemediation() {
   await testM4SourceFileVersionEndpoint();
   await testM4PinnedIpRealDial();
   await testM4NativeListCarriesAttachments();
+  await testM4AutoDiscoveryAndSourceFileIds();
 }
 
 try {
