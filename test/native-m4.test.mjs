@@ -1745,10 +1745,10 @@ async function testM4AuditFixBoundedScan() {
     assert.equal(report.scannedFiles, total);
     assert.equal(report.newDocuments, total);
     assert.equal(report.duplicates, 0);
-    const enrolledCount = store.db.prepare(
-      'SELECT COUNT(*) AS c FROM documents WHERE owner_key = ? AND deleted_at IS NULL'
-    ).get(actor).c;
-    assert.equal(enrolledCount, total);
+    const discoveredCount = store.db.prepare(
+      'SELECT COUNT(*) AS c FROM source_files WHERE owner_key = ? AND root_id = ? AND deleted_at IS NULL'
+    ).get(actor, root.id).c;
+    assert.equal(discoveredCount, total);
 
     // Second scan: everything unchanged, nothing rehashed.
     scanRes = await call(handler, `/canvas/native/library-roots/${root.id}/scan`, { method: 'POST', cookie });
