@@ -2289,8 +2289,8 @@
                 <button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-slate-300 hover:text-slate-100" data-native-action="move" title="移动文件">📂</button>
                 <button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-amber-400 hover:text-amber-300" data-native-action="remove-from-library" title="从文库移除（文件保留）">📤</button>
                 ${item.sourceFile.status === 'trashed'
-                  ? '<button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-emerald-300 hover:text-emerald-200" data-native-action="restore">♻️ 恢复</button>'
-                  : '<button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-rose-300 hover:text-rose-200" data-native-action="trash">🗑 移入回收站</button>'}
+                  ? '<button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-emerald-300 hover:text-emerald-200" data-native-action="restore" title="从回收站恢复">♻️</button>'
+                  : '<button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-rose-300 hover:text-rose-200" data-native-action="trash" title="移入回收站">🗑</button>'}
               </div>` : ''}
             </div>
           </div>
@@ -2509,12 +2509,12 @@
           : '';
         const actions = entry.type === 'pdf' ? `
           <div class="flex flex-wrap gap-1 mt-1.5 source-actions">
-            ${lib?.attachmentId ? `<button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-blue-300 hover:text-blue-200" data-source-action="open">📖 打开</button>` : ''}
-            <button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-slate-300 hover:text-slate-100" data-source-action="rename">✏️ 重命名</button>
-            <button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-slate-300 hover:text-slate-100" data-source-action="move">📂 移动</button>
+            ${lib?.attachmentId ? `<button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-blue-300 hover:text-blue-200" data-source-action="open" title="打开阅读">📖</button>` : ''}
+            <button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-slate-300 hover:text-slate-100" data-source-action="rename" title="重命名">✏️</button>
+            <button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-slate-300 hover:text-slate-100" data-source-action="move" title="移动">📂</button>
             ${lib?.status === 'trashed'
-              ? '<button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-emerald-300 hover:text-emerald-200" data-source-action="restore">♻️ 恢复</button>'
-              : '<button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-rose-300 hover:text-rose-200" data-source-action="trash">🗑 移入回收站</button>'}
+              ? '<button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-emerald-300 hover:text-emerald-200" data-source-action="restore" title="从回收站恢复">♻️</button>'
+              : '<button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-rose-300 hover:text-rose-200" data-source-action="trash" title="移入回收站">🗑</button>'}
           </div>` : '';
         div.innerHTML = `
           <div class="flex items-start gap-2">
