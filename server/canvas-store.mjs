@@ -5137,6 +5137,16 @@ export class CanvasStore {
     return sourceFileRow(row);
   }
 
+  findActiveSourceFileBySha(actorKey, sha256) {
+    if (!sha256) return null;
+    const row = this.db.prepare(`
+      SELECT sf.* FROM source_files sf
+      WHERE sf.owner_key = ? AND sf.sha256 = ? AND sf.status = 'active' AND sf.deleted_at IS NULL
+      ORDER BY sf.created_at ASC LIMIT 1
+    `).get(actorKey, sha256);
+    return sourceFileRow(row);
+  }
+
   // Version-guarded mutation used by file operations after a filesystem
   // mutation: a lost race (412) lets the caller trigger compensation.
   updateSourceFileGuarded(actorKey, sourceFileId, expectedVersion, changes = {}) {
@@ -5176,6 +5186,9 @@ export class CanvasStore {
     const existing = this.db.prepare(
       'SELECT id, status, deleted_at FROM source_files WHERE root_id = ? AND relative_path = ? AND owner_key = ?'
     ).get(rootId, relativePath, actorKey);
+    const mtime = typeof modifiedAt === 'number'
+      ? Math.round(modifiedAt)
+      : (modifiedAt ? new Date(modifiedAt).getTime() : Date.now());
     if (existing) {
       if (existing.deleted_at || existing.status === 'missing') {
         const timestamp = nowIso();
@@ -5183,7 +5196,7 @@ export class CanvasStore {
           UPDATE source_files
           SET status = 'active', deleted_at = NULL, size_bytes = ?, modified_at = ?, last_seen_at = ?, updated_at = ?, version = version + 1
           WHERE id = ?
-        `).run(sizeBytes || 0, modifiedAt || timestamp, timestamp, timestamp, existing.id);
+        `).run(sizeBytes || 0, mtime, timestamp, timestamp, existing.id);
       }
       return this.getSourceFile(actorKey, existing.id);
     }
@@ -5192,8 +5205,8 @@ export class CanvasStore {
       filename: filename || relativePath,
       sha256: null,
       sizeBytes: sizeBytes || 0,
-      modifiedAt: modifiedAt || new Date().toISOString(),
-      lastSeenAt: new Date().toISOString(),
+      modifiedAt: mtime,
+      lastSeenAt: nowIso(),
       status: 'active'
     });
     return this.getSourceFile(actorKey, sf.id);

@@ -775,7 +775,8 @@ async function scanPhaseC(store, actorKey, root, scanId, report, { batchDelayMs,
     if (!staged.length) break;
     store.transaction(() => {
       for (const st of staged) {
-        const canonical = store.findEnrolledSourceFileBySha(actorKey, st.sha256);
+        const canonical = store.findEnrolledSourceFileBySha(actorKey, st.sha256)
+          || store.findActiveSourceFileBySha(actorKey, st.sha256);
         if (canonical) {
           store.createSourceFile(actorKey, rootId, {
             relativePath: st.relative_path,

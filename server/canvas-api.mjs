@@ -2470,7 +2470,7 @@ export function createCanvasHandler(store, {
               relativePath: entry.relativePath,
               filename: entry.name,
               sizeBytes: entry.sizeBytes || 0,
-              modifiedAt: entry.modifiedAt ? new Date(entry.modifiedAt).toISOString() : new Date().toISOString()
+              modifiedAt: typeof entry.modifiedAt === 'number' ? entry.modifiedAt : Date.now()
             });
           } catch (e) { console.error('AUTO_DISCOVER_FAIL:', entry.relativePath, e.message); }
         }
@@ -2532,7 +2532,7 @@ export function createCanvasHandler(store, {
               relativePath: entry.relativePath,
               filename: entry.filename,
               sizeBytes: entry.sizeBytes,
-              modifiedAt: new Date(entry.mtimeMs).toISOString()
+              modifiedAt: typeof entry.mtimeMs === 'number' ? entry.mtimeMs : Date.now()
             });
           }
         } catch (e) {
