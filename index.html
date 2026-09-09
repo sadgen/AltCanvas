@@ -2284,10 +2284,10 @@
               </div>
               ${item.isNative && item.sourceFile ? `
               <div class="flex flex-wrap gap-1 mt-1.5 native-item-actions">
-                <button type="button" class="px-1.5 py-0.5 rounded bg-indigo-950/60 border border-indigo-800/60 text-[10px] text-indigo-300 hover:text-indigo-200" data-native-action="add-topic" title="把该文献加入研究主题">📚 主题</button>
-                <button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-slate-300 hover:text-slate-100" data-native-action="rename-original" title="重命名磁盘上的原始文件（文库文件名不变）">✏️ 原始文件</button>
-                <button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-slate-300 hover:text-slate-100" data-native-action="move" title="移动原始文件到其他目录">📂 移动</button>
-                <button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-amber-400 hover:text-amber-300" data-native-action="remove-from-library" title="从文库移除此文献（原始文件保留在磁盘上）">📤 从文库移除</button>
+                <button type="button" class="px-1.5 py-0.5 rounded bg-indigo-950/60 border border-indigo-800/60 text-[10px] text-indigo-300 hover:text-indigo-200" data-native-action="add-topic" title="加入研究主题">📚</button>
+                <button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-slate-300 hover:text-slate-100" data-native-action="rename-original" title="重命名原始文件">✏️</button>
+                <button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-slate-300 hover:text-slate-100" data-native-action="move" title="移动文件">📂</button>
+                <button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-amber-400 hover:text-amber-300" data-native-action="remove-from-library" title="从文库移除（文件保留）">📤</button>
                 ${item.sourceFile.status === 'trashed'
                   ? '<button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-emerald-300 hover:text-emerald-200" data-native-action="restore">♻️ 恢复</button>'
                   : '<button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-rose-300 hover:text-rose-200" data-native-action="trash">🗑 移入回收站</button>'}
@@ -2320,7 +2320,6 @@
             const lib = item.sourceFile || {};
             const entry = { relativePath: lib.relativePath || '', name: lib.filename || '', library: lib };
             if (nativeActionBtn.dataset.nativeAction === 'remove-from-library') {
-              if (!confirm('确定从文库移除此文献？\n（原始文件不会被删除，之后可重新识别入库）')) return;
               const docId = item.key;
               const version = item.version;
               m4Fetch(`/native/documents/${docId}`, {
