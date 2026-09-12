@@ -2386,3 +2386,32 @@ generate-topics 5.9s）以 sadgen 会话真实复测全部 200，分类与中文
 8. **全套测试通过**：
    - `test/canvas.test.mjs`、`test/canvas-ui.test.mjs` 补充断言并 100% 通过；
    - `git diff --check` 干净。
+
+## 2026-09-12 会话二（画板二次优化：卡片紧贴内容、边缘连线、AI 整理画板、顶栏极简再收敛，`a1a4217`）
+
+用户实机反馈四点：卡片底部仍有空白、连线被卡片遮挡、多篇研读后卡片过多难梳理、
+顶栏按钮依旧过多难懂。逐项修复：
+
+1. **卡片高度彻底自适应**：未手动调整过的卡片渲染时直接 `height: auto`
+   （`createCanvasNodeElement` 分支 + `autoFitAllCanvasNodes` 兜底），内容区
+   `max-height: 500px` 内部滚动；仅手动拖拽过尺寸（`node.manuallyResized`）
+   才固定高度。`node.height` 渲染后回写真实像素，连线锚点随之精准。
+2. **连线重构**：新增 `getNodePerimeterAnchor`（源/目标卡片外周长交点锚定，
+   连线完全走卡片外部空间），SVG `path` 三次贝塞尔曲线 + 关系配色
+   （contradicts 红/虚线、supports 绿、extends 蓝、其余紫靛）+ `marker`
+   箭头；`.canvas-edges` 提升 `z-index: 12` 且 `pointer-events: none`，
+   连线不再被卡片遮蔽也不挡交互。
+3. **AI 整理画板**：新增 `POST /canvas/boards/:id/ai/organize`（AI 提炼
+   核心结论/共识/分歧/延伸生成置顶综述卡片 + 按主题簇重排全部卡片坐标），
+   前端 `organizeCanvasWithAi` + 工具栏「🧹 整理画板」按钮（≥2 卡可用）。
+4. **顶栏极简再收敛**：常驻仅 6 个控件（绘制导图/对比补充、整理画板、
+   手写卡片、连线、✨ AI 分析[整合中译/总结/更多 AI]、清空画板、缩放）；
+   `加入标注/中译/总结/跨报告关联/快速导入/证据转批注/历史/导出/导入`
+   全部 `hidden` 但保留 ID（脚本与测试契约不变）。
+5. **品牌 Logo**（`c8ce12f`）：新增 `assets/logo.svg`（画板圆角卡片 +
+   三节点知识峰「A」+ AI 星光，蓝→靛→紫渐变与顶栏字一致）；dev-server
+   新增 `/assets/` 静态路由，Dockerfile 同步 COPY；index.html 接入
+   favicon 与顶栏 Logo 图标。SVG 经 headless Edge 多尺寸渲染验证，
+   16px favicon 下依然清晰。
+6. 部署：lxc `git pull` + `npm test` 10 套全绿 + 服务重启，
+   `/assets/logo.svg` 200（image/svg+xml），首页引用生效。
