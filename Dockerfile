@@ -10,6 +10,7 @@ COPY scripts/ ./scripts/
 
 # Copy static assets and frontend UI
 COPY styles/ ./styles/
+COPY assets/ ./assets/
 COPY index.html test-reader.html ./
 
 # Copy only the compiled vendor distributions

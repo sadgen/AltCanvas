@@ -118,6 +118,7 @@ const mimeTypes = {
 
 const routes = [
   ['/styles/', path.join(root, 'styles')],
+  ['/assets/', path.join(root, 'assets')],
   ['/reader/', path.join(root, 'vendor/reader/build/web')],
   ['/web-library/', path.join(root, 'vendor/web-library/build')],
   ['/static/', path.join(root, 'vendor/web-library/build/static')],
