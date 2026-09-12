@@ -1974,6 +1974,16 @@ assert.match(html, /id="btn-canvas-ai-organize"/, 'Canvas toolbar must provide æ
 assert.match(html, /function organizeCanvasWithAi\(/, 'organizeCanvasWithAi function must exist');
 assert.match(html, /function getNodePerimeterAnchor\(/, 'getNodePerimeterAnchor function must exist for perimeter edge clipping');
 
+// --- Version badge contract: server injects package.json version at startup ---
+assert.equal((html.match(/__APP_VERSION__/g) || []).length, 1,
+  'version badge must carry exactly one __APP_VERSION__ placeholder for server-side injection');
+assert.doesNotMatch(html, />v\d+\.\d+\.\d+</,
+  'no hardcoded semver may remain in index.html; bump package.json instead');
+assert.match(devServer, /replace\(\/__APP_VERSION__\/g, packageVersion\)/,
+  'dev-server must inject the package.json version into index.html at startup');
+assert.match(devServer, /buildIndexContentSecurityPolicy\(indexHtmlBody\)/,
+  'CSP hashes must be computed from the served (version-rendered) body');
+
 assert.match(devServer, /style-src-attr 'unsafe-inline'/, 'CSP must permit dynamic Canvas geometry styles');
 assert.match(devServer, /script-src 'self'/, 'script CSP must remain restricted');
 

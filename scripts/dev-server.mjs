@@ -11,8 +11,7 @@ function contentHash(value) {
   return `'sha256-${crypto.createHash('sha256').update(value).digest('base64')}'`;
 }
 
-function buildIndexContentSecurityPolicy() {
-  const html = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
+function buildIndexContentSecurityPolicy(html) {
   const scripts = [...html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/gi)]
     .map(match => contentHash(match[1]));
   const styles = [...html.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/gi)]
@@ -36,7 +35,13 @@ function buildIndexContentSecurityPolicy() {
   ].join('; ');
 }
 
-const indexContentSecurityPolicy = buildIndexContentSecurityPolicy();
+// package.json is the single source of truth for the displayed version: the
+// badge in index.html is a placeholder replaced at startup, so the UI can
+// never drift from the released version.
+const packageVersion = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version;
+const indexHtmlBody = fs.readFileSync(path.join(root, 'index.html'), 'utf8')
+  .replace(/__APP_VERSION__/g, packageVersion);
+const indexContentSecurityPolicy = buildIndexContentSecurityPolicy(indexHtmlBody);
 
 // Load .env configuration before importing server modules
 const envPath = path.resolve(root, '.env');
@@ -283,19 +288,38 @@ const server = http.createServer(async (req, res) => {
 
     const ext = path.extname(filePath).toLowerCase();
     const contentType = mimeTypes[ext] || 'application/octet-stream';
-    res.writeHead(200, {
+    const commonHeaders = {
       'Content-Type': contentType,
-      'Content-Length': stats.size,
-      'Cache-Control': ext === '.html' ? 'no-cache' : 'public, max-age=3600',
       'X-Content-Type-Options': 'nosniff',
       'Referrer-Policy': 'no-referrer',
       'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), payment=(), usb=()',
       'X-Frame-Options': 'SAMEORIGIN',
-      ...(filePathName === '/index.html' ? {
+    };
+
+    if (filePathName === '/index.html') {
+      // Served from the startup-rendered body so the injected
+      // package.json version and the CSP hashes always match.
+      res.writeHead(200, {
+        ...commonHeaders,
+        'Content-Type': 'text/html; charset=utf-8',
+        'Content-Length': Buffer.byteLength(indexHtmlBody),
+        'Cache-Control': 'no-cache',
         'Content-Security-Policy': process.env.NODE_ENV === 'production'
           ? indexContentSecurityPolicy
-          : buildIndexContentSecurityPolicy()
-      } : {}),
+          : buildIndexContentSecurityPolicy(indexHtmlBody),
+      });
+      if (req.method === 'HEAD') {
+        res.end();
+        return;
+      }
+      res.end(indexHtmlBody);
+      return;
+    }
+
+    res.writeHead(200, {
+      ...commonHeaders,
+      'Content-Length': stats.size,
+      'Cache-Control': ext === '.html' ? 'no-cache' : 'public, max-age=3600',
     });
     if (req.method === 'HEAD') {
       res.end();
