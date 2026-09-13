@@ -32,7 +32,10 @@ for (const id of [
   'doc-meta-modal', 'doc-meta-panel', 'btn-close-doc-meta', 'input-doc-meta-clean-title', 'input-doc-meta-institution', 'input-doc-meta-year', 'input-doc-meta-report-title', 'input-doc-meta-subtitle', 'input-doc-meta-summary', 'btn-doc-meta-ai-extract', 'btn-cancel-doc-meta', 'btn-save-doc-meta', 'btn-doc-edit-title',
   'btn-canvas-quick-import', 'quick-import-modal', 'quick-import-panel', 'btn-close-quick-import', 'input-quick-import-query', 'btn-quick-import-resolve', 'quick-import-result-card', 'btn-cancel-quick-import', 'btn-quick-import-topic',
   'quick-import-directory-section', 'quick-import-target-root', 'quick-import-target-dir', 'quick-import-filename', 'quick-import-dir-topics', 'btn-quick-import-directory',
-  'canvas-evidence-popover', 'evidence-popover-panel', 'btn-close-evidence-popover', 'evidence-popover-title', 'evidence-popover-page-badge', 'evidence-popover-doc-title', 'evidence-popover-quote-box', 'btn-dismiss-evidence-popover', 'btn-evidence-popover-jump'
+  'canvas-evidence-popover', 'evidence-popover-panel', 'btn-close-evidence-popover', 'evidence-popover-title', 'evidence-popover-page-badge', 'evidence-popover-doc-title', 'evidence-popover-quote-box', 'btn-dismiss-evidence-popover', 'btn-evidence-popover-jump',
+  // 画板分层视图：紧凑卡片 + 详情面板 + 大纲导读
+  'canvas-node-detail', 'canvas-node-detail-type', 'canvas-node-detail-title', 'canvas-node-detail-body', 'canvas-node-detail-actions', 'canvas-node-detail-close',
+  'canvas-outline', 'canvas-outline-content', 'btn-canvas-outline', 'btn-canvas-density'
 ]) {
   assert.equal((html.match(new RegExp(`id=["']${id}["']`, 'g')) || []).length, 1, `${id} must exist exactly once`);
 }
@@ -197,6 +200,30 @@ assert.doesNotMatch(html, /(?:localStorage|sessionStorage)\.setItem\([^\n]*input
   'a personal AI key must never be stored in browser storage');
 assert.match(html, /不会自动发送整篇 PDF/,
   'AI UI must disclose the exact selected-card data boundary');
+
+// --- 画板分层视图：紧凑卡片 / 详情面板 / 大纲导读 ---
+assert.match(html, /function deriveCanvasGist\(/,
+  'compact cards must derive a one-sentence gist from the card body');
+assert.match(html, /function openCanvasNodeDetail\(/,
+  'clicking a compact card must open the full-content detail panel');
+assert.match(html, /function closeCanvasNodeDetail\(/);
+assert.match(html, /function renderCanvasOutline\(/,
+  'outline mode must render a linear guided reading view');
+assert.match(html, /function setCanvasOutlineMode\(/);
+assert.match(html, /function setCanvasCompactMode\(/);
+assert.match(html, /function focusCanvasNode\(/,
+  'outline items must center the viewport on the target card');
+assert.match(html, /canvasCompactMode \? 'canvas-node-compact' : ''/,
+  'compact rendering must be driven by the density toggle');
+assert.match(html, /localStorage\.setItem\('altcanvas\.canvasCompact'/,
+  'the density preference must persist across sessions');
+assert.match(html, /canvas-node-gist/,
+  'compact cards must clamp the body to a short gist instead of full text');
+assert.match(html, /if \(key === 'o'\)/,
+  'outline mode must have a dedicated keyboard shortcut');
+const canvasApi = fs.readFileSync(new URL('../server/canvas-api.mjs', import.meta.url), 'utf8');
+assert.match(canvasApi, /每个 body 的第一句必须是不超过 40 字的核心结论句/,
+  'document-map prompt must require a concise first sentence so compact cards get a real gist');
 
 // --- T1 Topic Workspaces, Research Inbox, and Batch Actions ---
 // --- T3 Cross-Report Relations & Progressive Expansion ---

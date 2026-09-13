@@ -54,6 +54,46 @@
     .canvas-node-header { cursor: move; user-select: none; touch-action: none; }
     .canvas-node-body { max-height: 500px; overflow-y: auto; overflow-x: hidden; overflow-wrap: anywhere; }
     .canvas-node-text { white-space: pre-wrap; word-break: break-word; }
+    .canvas-node-compact { cursor: pointer; }
+    .canvas-node-compact .canvas-node-body { max-height: none; overflow: visible; }
+    .canvas-node-gist {
+      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+      overflow: hidden; color: #94a3b8;
+    }
+    .canvas-node-detail {
+      position: absolute; top: 0; right: 0; bottom: 0; width: 320px; z-index: 30;
+      display: flex; flex-direction: column;
+      background: rgba(2,6,23,.97); border-left: 1px solid #1e293b;
+      box-shadow: -18px 0 40px rgba(0,0,0,.45);
+    }
+    .canvas-node-detail.hidden, .canvas-outline.hidden { display: none; }
+    .canvas-node-detail-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 12px; border-bottom: 1px solid #1e293b; flex-shrink: 0; }
+    .canvas-node-detail-type { font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: #818cf8; }
+    .canvas-node-detail-title { padding: 10px 12px 0; font-size: 13px; font-weight: 600; color: #e2e8f0; line-height: 1.5; overflow-wrap: anywhere; flex-shrink: 0; }
+    .canvas-node-detail-body { flex: 1; overflow-y: auto; padding: 10px 12px; font-size: 12px; line-height: 1.75; color: #cbd5e1; overflow-wrap: anywhere; white-space: pre-wrap; }
+    .canvas-node-detail-quote { margin-top: 10px; width: 100%; text-align: left; padding: 8px; border: 1px solid rgba(49,46,129,.7); border-radius: 6px; background: rgba(30,27,75,.3); color: #c7d2fe; font-size: 11px; line-height: 1.7; cursor: pointer; }
+    .canvas-node-detail-quote:hover { border-color: #6366f1; }
+    .canvas-node-detail-meta { margin-top: 10px; font-size: 10px; color: #64748b; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .canvas-node-detail-actions { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 12px; border-top: 1px solid #1e293b; flex-shrink: 0; }
+    .canvas-node-detail-action { padding: 4px 8px; border-radius: 6px; border: 1px solid #334155; background: rgba(30,41,59,.6); color: #cbd5e1; font-size: 11px; cursor: pointer; }
+    .canvas-node-detail-action:hover { border-color: #6366f1; color: #e0e7ff; }
+    .canvas-node-detail-action.is-danger { color: #fda4af; border-color: rgba(244,63,94,.4); }
+    .canvas-node-detail-action.is-danger:hover { border-color: #f43f5e; color: #fecdd3; }
+    .canvas-node-detail-action.is-static { cursor: default; color: #6ee7b7; border-color: rgba(16,185,129,.4); }
+    .canvas-outline { position: absolute; inset: 0; z-index: 20; background: rgba(2,6,23,.97); display: flex; flex-direction: column; }
+    .canvas-outline-content { flex: 1; overflow-y: auto; padding: 16px 18px 24px; }
+    .canvas-outline-section { margin-bottom: 18px; }
+    .canvas-outline-heading { font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: #64748b; margin-bottom: 6px; }
+    .canvas-outline-item {
+      display: flex; align-items: baseline; gap: 8px; width: 100%; text-align: left;
+      padding: 6px 8px; border-radius: 8px; border: 1px solid transparent; cursor: pointer;
+    }
+    .canvas-outline-item:hover { border-color: #334155; background: rgba(30,41,59,.5); }
+    .canvas-outline-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; transform: translateY(1px); }
+    .canvas-outline-item-title { font-size: 12px; font-weight: 600; color: #e2e8f0; flex-shrink: 0; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .canvas-outline-item-gist { font-size: 11px; color: #94a3b8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+    .canvas-outline-item-page { font-size: 10px; color: #475569; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; flex-shrink: 0; }
+    .canvas-outline-empty { padding: 24px; text-align: center; color: #64748b; font-size: 12px; line-height: 1.8; }
     .canvas-resize-handle {
       position: absolute; right: 0; bottom: 0; width: 18px; height: 18px;
       cursor: nwse-resize; touch-action: none;
@@ -412,6 +452,8 @@
           导入<input id="input-canvas-import-file" type="file" accept=".json,.altcanvas.json" class="hidden">
         </label>
         <span class="w-px h-5 bg-slate-800"></span>
+        <button id="btn-canvas-outline" type="button" aria-pressed="false" title="切换大纲导读视图 (O)：按概览/章节/概念/论点线性列出画板内容，点击条目定位卡片" class="px-2 py-1.5 rounded hover:bg-slate-800 text-slate-300">☰ 大纲</button>
+        <button id="btn-canvas-density" type="button" aria-pressed="true" title="紧凑视图：卡片只显示标题与摘要，点击卡片在右侧查看全文详情；切换为完整卡片显示全部内容" class="px-2 py-1.5 rounded hover:bg-slate-800 text-indigo-300">紧凑</button>
         <button id="btn-canvas-zoom-out" type="button" aria-label="缩小画板" class="px-2 py-1.5 rounded hover:bg-slate-800 text-slate-300">−</button>
         <button id="btn-canvas-zoom-reset" type="button" class="px-2 py-1.5 rounded hover:bg-slate-800 text-slate-400 font-mono">100%</button>
         <button id="btn-canvas-zoom-in" type="button" aria-label="放大画板" class="px-2 py-1.5 rounded hover:bg-slate-800 text-slate-300">+</button>
@@ -441,6 +483,18 @@
             </defs>
           </svg>
           <div id="canvas-nodes"></div>
+        </div>
+        <div id="canvas-node-detail" class="canvas-node-detail hidden" role="complementary" aria-label="卡片详情面板">
+          <div class="canvas-node-detail-header">
+            <span id="canvas-node-detail-type" class="canvas-node-detail-type"></span>
+            <button id="canvas-node-detail-close" type="button" class="canvas-node-detail-action" title="关闭详情 (Esc)">×</button>
+          </div>
+          <div id="canvas-node-detail-title" class="canvas-node-detail-title"></div>
+          <div id="canvas-node-detail-body" class="canvas-node-detail-body custom-scrollbar"></div>
+          <div id="canvas-node-detail-actions" class="canvas-node-detail-actions"></div>
+        </div>
+        <div id="canvas-outline" class="canvas-outline hidden" role="region" aria-label="大纲导读视图">
+          <div id="canvas-outline-content" class="canvas-outline-content custom-scrollbar"></div>
         </div>
       </div>
     </aside>
@@ -1210,6 +1264,9 @@
     }
 
     let canvasSelectedNodeIds = new Set();
+    let canvasCompactMode = localStorage.getItem('altcanvas.canvasCompact') !== 'off';
+    let canvasOutlineMode = false;
+    let canvasDetailNodeId = null;
     let currentAiTask = 'translate';
     let aiConfig = { configured: false, provider: '', model: '' };
     let aiDocumentGenerationInFlight = false;
@@ -5410,13 +5467,21 @@
       autoFitAllCanvasNodes();
       renderCanvasEdges();
       updateCanvasImportState();
+      if (canvasDetailNodeId) {
+        if (canvasCompactMode && canvasNodes.has(canvasDetailNodeId)) {
+          openCanvasNodeDetail(canvasDetailNodeId);
+        } else {
+          closeCanvasNodeDetail();
+        }
+      }
+      if (canvasOutlineMode) renderCanvasOutline();
     }
 
     function createCanvasNodeElement(node) {
       const sourceRef = node.sourceRefId ? canvasSources.get(node.sourceRefId) : null;
       const element = document.createElement('article');
       const isSelected = canvasSelectedNodeIds.has(node.id);
-      element.className = `canvas-node ${canvasConnectSourceId === node.id ? 'is-connect-source' : ''} ${isSelected ? 'is-selected' : ''} ${node.type === 'ai_output' ? 'border-purple-800/80 bg-purple-950/20' : ''}`;
+      element.className = `canvas-node ${canvasConnectSourceId === node.id ? 'is-connect-source' : ''} ${isSelected ? 'is-selected' : ''} ${node.type === 'ai_output' ? 'border-purple-800/80 bg-purple-950/20' : ''} ${canvasCompactMode ? 'canvas-node-compact' : ''}`;
       element.dataset.nodeId = node.id;
       element.tabIndex = 0;
       element.style.left = `${node.x}px`;
@@ -5492,6 +5557,10 @@
       }
 
       const isEditable = node.type === 'manual_note' || node.type === 'ai_output' || node.type === 'annotation';
+      const titleHtml = showTitle && node.type !== 'ai_output' ? `<div class="font-semibold text-slate-200 mb-1.5">${escapeHTML(node.title)}</div>` : '';
+      const bodyContentHtml = canvasCompactMode
+        ? `${titleHtml}<div class="canvas-node-gist ${node.type === 'annotation' ? 'font-serif' : ''}" title="点击卡片查看全文详情">${escapeHTML(deriveCanvasGist(cleanBody, showTitle ? node.title : ''))}</div>`
+        : `${titleHtml}<div class="canvas-node-text ${node.type === 'annotation' ? 'font-serif text-slate-300' : 'text-slate-300'}">${escapeHTML(cleanBody)}</div>${sourceQuoteHtml}${footerHtml}`;
       const sourceQuoteHtml = node.type === 'ai_output' && sourceRef?.quoteSnapshot
         ? `<button type="button" class="canvas-node-jump-page block w-full mt-2 p-2 rounded border border-indigo-900/70 bg-indigo-950/30 text-left text-[10px] leading-relaxed text-indigo-200 hover:border-indigo-700" title="在 PDF 中定位并高亮这段逐字原文">“${escapeHTML(sourceRef.quoteSnapshot)}”</button>`
         : '';
@@ -5521,7 +5590,7 @@
             <button type="button" class="canvas-node-delete text-rose-400/80 hover:text-rose-300" title="从画板移除">×</button>
           </div>
         </div>
-        <div class="canvas-node-body custom-scrollbar flex-1 p-2.5 text-[11px] leading-relaxed">${showTitle && node.type !== 'ai_output' ? `<div class="font-semibold text-slate-200 mb-1.5">${escapeHTML(node.title)}</div>` : ''}<div class="canvas-node-text ${node.type === 'annotation' ? 'font-serif text-slate-300' : 'text-slate-300'}">${escapeHTML(cleanBody)}</div>${sourceQuoteHtml}${footerHtml}</div>
+        <div class="canvas-node-body custom-scrollbar flex-1 p-2.5 text-[11px] leading-relaxed">${bodyContentHtml}</div>
         <div class="canvas-resize-handle" role="button" aria-label="调整卡片大小" tabindex="0"></div>
       `;
 
@@ -5591,11 +5660,13 @@
             canvasSelectedNodeIds.add(node.id);
           }
         } else {
-          if (canvasSelectedNodeIds.has(node.id) && canvasSelectedNodeIds.size === 1) {
-            canvasSelectedNodeIds.clear();
-          } else {
-            canvasSelectedNodeIds.clear();
+          const wasOnlySelected = canvasSelectedNodeIds.has(node.id) && canvasSelectedNodeIds.size === 1;
+          canvasSelectedNodeIds.clear();
+          if (!wasOnlySelected) {
             canvasSelectedNodeIds.add(node.id);
+            if (canvasCompactMode) openCanvasNodeDetail(node.id);
+          } else {
+            closeCanvasNodeDetail();
           }
         }
         renderCanvasSelectedState();
@@ -5613,6 +5684,216 @@
         scheduleCanvasLayoutSave();
       });
       return element;
+    }
+
+    function deriveCanvasGist(body, title = '') {
+      let text = String(body || '').trim();
+      const t = String(title || '').trim();
+      if (t && text.startsWith(t)) text = text.slice(t.length).trim();
+      if (!text) return '空白卡片';
+      const sentence = text.match(/^[\s\S]*?[。！？；!?;\n]/);
+      let gist = (sentence ? sentence[0] : text).trim();
+      if (gist.length > 90) gist = `${gist.slice(0, 89)}…`;
+      return gist;
+    }
+
+    function canvasNodeOutlineKind(node) {
+      const title = node.title || '';
+      if (title.startsWith('全文概览') || node.color === '#7c3aed') return 'overview';
+      if (title.startsWith('章节 ·') || node.color === '#2563eb') return 'section';
+      if (title.startsWith('概念 ·') || node.color === '#0891b2') return 'concept';
+      if (title.startsWith('论点 ·') || node.color === '#d97706') return 'claim';
+      return 'notes';
+    }
+
+    function openCanvasNodeDetail(nodeId) {
+      const node = canvasNodes.get(nodeId);
+      if (!node) {
+        closeCanvasNodeDetail();
+        return;
+      }
+      canvasDetailNodeId = nodeId;
+      const sourceRef = node.sourceRefId ? canvasSources.get(node.sourceRefId) : null;
+      const typeNames = {
+        annotation: '文献标注', manual_note: '手写卡片', zotero_item: '文献',
+        attachment: '附件', image: '图片', ai_output: 'AI 输出', group: '分组'
+      };
+      document.getElementById('canvas-node-detail-type').textContent = typeNames[node.type] || node.type;
+      const titleEl = document.getElementById('canvas-node-detail-title');
+      titleEl.textContent = node.title || '';
+      titleEl.classList.toggle('hidden', !node.title);
+      const bodyEl = document.getElementById('canvas-node-detail-body');
+      bodyEl.replaceChildren();
+      const textDiv = document.createElement('div');
+      textDiv.textContent = cleanAnnotationText(node.body) || '空白卡片';
+      bodyEl.appendChild(textDiv);
+      if (sourceRef?.annotationKey) {
+        const meta = document.createElement('div');
+        meta.className = 'canvas-node-detail-meta';
+        const pageLabel = getAnnotationPageLabel(sourceRef) || sourceRef.pageLabel;
+        meta.textContent = `#${sourceRef.annotationKey}${pageLabel ? ` · p.${pageLabel}` : ''}`;
+        bodyEl.appendChild(meta);
+      }
+      if (node.type === 'ai_output' && sourceRef?.quoteSnapshot) {
+        const quoteBtn = document.createElement('button');
+        quoteBtn.type = 'button';
+        quoteBtn.className = 'canvas-node-detail-quote';
+        quoteBtn.title = '在 PDF 中定位并高亮这段逐字原文';
+        quoteBtn.textContent = `“${sourceRef.quoteSnapshot}”`;
+        quoteBtn.onclick = event => {
+          event.stopPropagation();
+          jumpToDocumentSource(sourceRef);
+        };
+        bodyEl.appendChild(quoteBtn);
+      }
+      const actions = document.getElementById('canvas-node-detail-actions');
+      actions.replaceChildren();
+      const addAction = (label, handler, options = {}) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = `canvas-node-detail-action${options.danger ? ' is-danger' : ''}`;
+        button.textContent = label;
+        if (options.title) button.title = options.title;
+        button.onclick = event => {
+          event.stopPropagation();
+          handler();
+        };
+        actions.appendChild(button);
+        return button;
+      };
+      if (node.type === 'ai_output' && sourceRef) {
+        if (sourceRef.annotationKey) {
+          const badge = addAction('已转批注 ✓', () => {}, { title: '证据已转为正式 PDF 批注' });
+          badge.classList.add('is-static');
+        } else if (evidenceConvertibleSource(sourceRef)) {
+          addAction('转批注', () => convertEvidenceToAnnotation(node, sourceRef), { title: '把这条证据转成正式 PDF 批注并关联到本卡片' });
+        }
+      }
+      if (node.type === 'ai_output' && sourceRef?.quoteSnapshot) {
+        addAction('🔍 核验', () => openQuickEvidencePopover(node, sourceRef), { title: '原位快速核验该观点在 PDF 中的证据引用与段落' });
+      }
+      if (sourceRef) {
+        addAction('🔗 相关观点', () => openCrossReportRelationsModal(node), { title: '发现本卡片与主题内其他研报的跨报告关联' });
+      }
+      if (sourceRef?.annotationKey) {
+        addAction('跳转标注 ↗', () => jumpToSourceAnnotation(sourceRef), { title: '点击在阅读器中跳转定位' });
+      } else if (sourceRef?.attachmentKey) {
+        addAction(`原文 ${sourceRef.pageLabel ? `p.${sourceRef.pageLabel}` : ''} ↗`, () => jumpToDocumentSource(sourceRef), { title: '在 PDF 中定位并高亮逐字引用' });
+      }
+      if (node.type === 'ai_output') {
+        addAction('溯源输入', () => focusAiInputSources(node.id), { title: '在画板上高亮关联的输入卡片' });
+      }
+      addAction('✎ 编辑', () => {
+        closeCanvasNodeDetail();
+        const element = document.querySelector(`.canvas-node[data-node-id="${node.id}"]`);
+        if (element) editCanvasNote(node, element);
+      }, { title: '编辑卡片内容' });
+      addAction('删除', () => deleteCanvasNode(node), { danger: true, title: '从画板移除' });
+      document.getElementById('canvas-node-detail').classList.remove('hidden');
+    }
+
+    function closeCanvasNodeDetail() {
+      canvasDetailNodeId = null;
+      document.getElementById('canvas-node-detail')?.classList.add('hidden');
+    }
+
+    function focusCanvasNode(nodeId) {
+      const node = canvasNodes.get(nodeId);
+      if (!node || !canvasBoard) return;
+      const surface = document.getElementById('canvas-cards');
+      const viewportState = canvasViewport();
+      viewportState.x = surface.clientWidth / 2 - (node.x + node.width / 2) * viewportState.zoom;
+      viewportState.y = surface.clientHeight / 2 - (node.y + node.height / 2) * viewportState.zoom;
+      updateCanvasTransform();
+      scheduleCanvasLayoutSave();
+    }
+
+    function renderCanvasOutline() {
+      const container = document.getElementById('canvas-outline-content');
+      if (!container) return;
+      container.replaceChildren();
+      if (!canvasNodes.size) {
+        const empty = document.createElement('div');
+        empty.className = 'canvas-outline-empty';
+        empty.textContent = '画板还是空的；生成或加入卡片后会在这里按大纲列出。';
+        container.appendChild(empty);
+        return;
+      }
+      const groups = { overview: [], section: [], concept: [], claim: [], notes: [] };
+      for (const node of canvasNodes.values()) groups[canvasNodeOutlineKind(node)].push(node);
+      const byPosition = (a, b) => (a.y - b.y) || (a.x - b.x);
+      const headings = { overview: '全文概览', section: '章节', concept: '概念', claim: '论点', notes: '标注与手写' };
+      const dotColors = { overview: '#7c3aed', section: '#2563eb', concept: '#0891b2', claim: '#d97706', notes: '#64748b' };
+      for (const kind of ['overview', 'section', 'concept', 'claim', 'notes']) {
+        const kindNodes = groups[kind].sort(byPosition);
+        if (!kindNodes.length) continue;
+        const section = document.createElement('div');
+        section.className = 'canvas-outline-section';
+        const heading = document.createElement('div');
+        heading.className = 'canvas-outline-heading';
+        heading.textContent = `${headings[kind]} · ${kindNodes.length}`;
+        section.appendChild(heading);
+        for (const node of kindNodes) {
+          const sourceRef = node.sourceRefId ? canvasSources.get(node.sourceRefId) : null;
+          const item = document.createElement('button');
+          item.type = 'button';
+          item.className = 'canvas-outline-item';
+          const dot = document.createElement('span');
+          dot.className = 'canvas-outline-dot';
+          dot.style.background = node.color || dotColors[kind];
+          const title = document.createElement('span');
+          title.className = 'canvas-outline-item-title';
+          title.textContent = node.title || (node.type === 'annotation' ? '文献标注' : '手写卡片');
+          const gist = document.createElement('span');
+          gist.className = 'canvas-outline-item-gist';
+          gist.textContent = deriveCanvasGist(cleanAnnotationText(node.body), node.title || '');
+          item.append(dot, title, gist);
+          const pageLabel = sourceRef ? (getAnnotationPageLabel(sourceRef) || sourceRef.pageLabel) : null;
+          if (pageLabel) {
+            const page = document.createElement('span');
+            page.className = 'canvas-outline-item-page';
+            page.textContent = `p.${pageLabel}`;
+            item.appendChild(page);
+          }
+          item.onclick = () => {
+            canvasSelectedNodeIds.clear();
+            canvasSelectedNodeIds.add(node.id);
+            renderCanvasSelectedState();
+            updateCanvasAiToolbar();
+            openCanvasNodeDetail(node.id);
+            focusCanvasNode(node.id);
+          };
+          section.appendChild(item);
+        }
+        container.appendChild(section);
+      }
+    }
+
+    function setCanvasOutlineMode(on) {
+      canvasOutlineMode = Boolean(on);
+      const button = document.getElementById('btn-canvas-outline');
+      button.setAttribute('aria-pressed', String(canvasOutlineMode));
+      button.classList.toggle('text-indigo-300', canvasOutlineMode);
+      button.classList.toggle('text-slate-300', !canvasOutlineMode);
+      document.getElementById('canvas-outline').classList.toggle('hidden', !canvasOutlineMode);
+      if (canvasOutlineMode) {
+        closeCanvasNodeDetail();
+        renderCanvasOutline();
+      }
+    }
+
+    function setCanvasCompactMode(on) {
+      canvasCompactMode = Boolean(on);
+      try {
+        localStorage.setItem('altcanvas.canvasCompact', canvasCompactMode ? 'on' : 'off');
+      } catch {}
+      const button = document.getElementById('btn-canvas-density');
+      button.textContent = canvasCompactMode ? '紧凑' : '完整';
+      button.setAttribute('aria-pressed', String(canvasCompactMode));
+      button.classList.toggle('text-indigo-300', canvasCompactMode);
+      button.classList.toggle('text-slate-300', !canvasCompactMode);
+      if (!canvasCompactMode) closeCanvasNodeDetail();
+      renderCanvas();
     }
 
     function getNodePerimeterAnchor(source, target) {
@@ -7490,6 +7771,9 @@
       document.getElementById('btn-refresh-cards').onclick = () => loadCanvasSnapshot().catch(err => showToast(`刷新画板失败: ${errorMessage(err)}`, 'error'));
       document.getElementById('btn-canvas-zoom-in').onclick = () => setCanvasZoom(canvasViewport().zoom * 1.2);
       document.getElementById('btn-canvas-zoom-out').onclick = () => setCanvasZoom(canvasViewport().zoom / 1.2);
+      document.getElementById('btn-canvas-outline').onclick = () => setCanvasOutlineMode(!canvasOutlineMode);
+      document.getElementById('btn-canvas-density').onclick = () => setCanvasCompactMode(!canvasCompactMode);
+      document.getElementById('canvas-node-detail-close').onclick = closeCanvasNodeDetail;
       document.getElementById('btn-canvas-zoom-reset').onclick = () => {
         if (!canvasReady) return;
         canvasBoard.viewport = { x: 0, y: 0, zoom: 1 };
@@ -7626,6 +7910,11 @@
           void showProvenanceHistory();
           return;
         }
+        if (key === 'o') {
+          event.preventDefault();
+          setCanvasOutlineMode(!canvasOutlineMode);
+          return;
+        }
       }
       if (!editing && (event.ctrlKey || event.metaKey) && !event.shiftKey
         && event.key.toLowerCase() === 'z' && canvasUndoStack.length) {
@@ -7636,6 +7925,10 @@
       if (event.key === 'Escape') {
         if (!document.getElementById('canvas-evidence-popover').classList.contains('hidden')) {
           closeQuickEvidencePopover();
+        } else if (!document.getElementById('canvas-node-detail')?.classList.contains('hidden')) {
+          closeCanvasNodeDetail();
+        } else if (canvasOutlineMode) {
+          setCanvasOutlineMode(false);
         } else if (!document.getElementById('quick-import-modal').classList.contains('hidden')) {
           closeQuickImportModal();
         } else if (!document.getElementById('cross-report-modal').classList.contains('hidden')) {

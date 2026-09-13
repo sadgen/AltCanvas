@@ -3773,6 +3773,7 @@ ${textSnippet.slice(0, 8000) || '无'}`;
                   '每个 concept.body 必须给出文中定义、作用和使用语境，不能只写名词解释。',
                   '每个 claim.body 必须同时写清论点、对应证据或方法、适用条件/限制。',
                   '每张卡片只覆盖其 pageStart–pageEnd 页内有依据的内容；不要把全文页码填给局部卡片。',
+                  '每个 body 的第一句必须是不超过 40 字的核心结论句，直接陈述要点本身（不要“本节介绍了”之类的铺垫），供画板紧凑视图单句展示；其后再展开细节。',
                   '每个 evidenceQuote 必须逐字复制自对应 evidencePage 的原文，不得翻译、改写或自行补全。'
                 ].join('\n') },
                 { role: 'user', content: `文档标题：${title}\n总页数：${body.pages.length}\n\n${chunkSummaries.map((summary, index) => `【页段 ${index + 1}】\n${summary}`).join('\n\n')}` }
