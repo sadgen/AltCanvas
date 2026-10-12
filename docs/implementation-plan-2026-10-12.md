@@ -51,3 +51,12 @@ SSH 别名 lxc 指向 192.168.5.237，用户 sadgen，目录 /home/sadgen/Projec
 生产上线前在线 SQLite 备份及密钥备份已完成：`backups/release-20261012-030`，保存旧提交 746c9f7 与数据计数、AI 配置校验摘要。部署阶段使用 fast-forward 同步，运行测试后再重启服务并核验数据计数和配置未变。
 
 有意保留：现有 schema、来源兼容字段、历史迁移、既有 Reader 和跨文章画板。本次没有做大规模重写或切换框架；后续若升级到新的多证据/树形节点 schema，应独立迁移并保留旧图。
+
+## 上线结果
+
+- 应用提交 `92ea085` 已推送至 `origin/feat/m4-native-library`，生产 fast-forward 同步完成。
+- 5.237 生产目录 `npm ci --omit=dev` 与完整 11 套 `npm test` 全部通过，服务重启后 active。
+- 首页、`/auth/session`、`/assets/text-reader.js` 均 HTTP 200，发布版本 v0.3.0。
+- 数据计数与上线前备份一致；加密 AI 设置校验一致，CPA 设置未变。
+- 备份和旧代码版本留存；若需回滚，只回退应用代码并重启，当前版本未做破坏性数据迁移，不应为了回滚覆盖后续用户数据。
+- 人工验收：硬刷新 → 选择文献执行识别（确认既有主题及多主题）→ 阅读标注并加入右侧 → 对旧分析使用“重新分析”→ 查看结论/边界与引用回跳；再上传 TXT/EPUB 验证阅读标注。回复“完成/看日志”后由 Agent 查看生产 `.debug/dev.log`、`.debug/browser.log`。

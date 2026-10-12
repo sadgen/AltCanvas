@@ -2477,3 +2477,10 @@ generate-topics 5.9s）以 sadgen 会话真实复测全部 200，分类与中文
 - 真实 CPA：使用 sadgen 现有配置对两页人工文章执行新版分析，临时库得到 5 节点、8 关系、5 处匹配引用，约 44 秒，包含边界说明。不打印密钥或完整模型输出，不改生产文库/账户。
 - 生产在线备份：`backups/release-20261012-030`，包含 SQLite、对应加密密钥、旧提交、数据计数及 AI 配置校验摘要。备份时 active counts：documents=6、attachments=6、annotations=1、workspaces=4、nodes=15、source_files=155（以当前 5.237 库为准，不沿用旧日志中的 125 篇口径）。
 - 本节为上线前交接记录；实际提交、健康探测、数据/配置不变确认及 UI 验收步骤在上线后追加。
+
+### 上线确认
+
+- 应用提交 `92ea085` 已推送并部署，生产 `npm ci --omit=dev` 后完整 11 套测试通过；altcanvas.service 重启后 active，v0.3.0。
+- 首页、会话和文本阅读脚本接口均 HTTP 200。核对备份 manifest：生产 documents/attachments/annotations/workspaces/nodes/source_files 计数全部不变，AI 设置校验全部不变。
+- 人工操作：Ctrl+F5 后对已选文献执行识别，验证现有主题复用/多主题；划线后加入右侧；对既有分析点“重新分析”，核对导读与原文；上传 TXT/EPUB 验证标注和回跳。用户回复完成/看日志后直接读生产日志，不要求贴 Console。
+- 本地工作已提交，后续优先修复实机验收中出现的问题；大规模 schema/框架改造没有混入本次发布。
