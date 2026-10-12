@@ -27,7 +27,17 @@ if (!command) {
 }
 
 const { writeDevLog } = await import('../server/dev-logger.mjs');
-const child = spawn(command, args, {
+// npm.cmd cannot be spawned as an executable on Windows. Invoke its JS entry
+// through Node, preserving argument boundaries without shell interpolation.
+let executable = command;
+let commandArgs = args;
+if (process.platform === 'win32' && command === 'npm') {
+  const candidates = [process.env.npm_execpath,
+    ...String(process.env.PATH || '').split(path.delimiter).map(dir => path.join(dir, 'node_modules/npm/bin/npm-cli.js'))];
+  const npmCli = candidates.find(file => file && fs.existsSync(file));
+  if (npmCli) { executable = process.execPath; commandArgs = [npmCli, ...args]; }
+}
+const child = spawn(executable, commandArgs, {
   cwd: projectRoot,
   env: { ...process.env, DEBUG_STDIO_CAPTURE: 'true' },
   stdio: ['inherit', 'pipe', 'pipe'],

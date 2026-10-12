@@ -1,3 +1,4 @@
+import { isDocumentFile, documentExtension } from './document-formats.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -52,7 +53,7 @@ export function normalizeRelativePath(input, { allowHidden = false } = {}) {
 }
 
 // Validates a single filename segment (rename/import targets).
-export function normalizeFilename(input, { requirePdf = false } = {}) {
+export function normalizeFilename(input, { requirePdf = false, extension = null } = {}) {
   if (typeof input !== 'string' || input.trim().length === 0 || input.length > 255) {
     throw new NativePathError('filename must be a string of 1-255 characters');
   }
@@ -66,6 +67,7 @@ export function normalizeFilename(input, { requirePdf = false } = {}) {
   if (requirePdf && name.toLowerCase().endsWith('.pdf') === false) {
     throw new NativePathError('filename must keep the .pdf extension');
   }
+  if (extension && documentExtension(name) !== extension) throw new NativePathError('filename must keep the original extension');
   return name;
 }
 
@@ -113,6 +115,9 @@ export function openFileInsideRoot(rootPath, relativePath) {
   const target = resolveInsideRoot(rootReal, relativePath);
   let fd;
   try {
+    if (fs.lstatSync(target).isSymbolicLink()) {
+      throw new NativePathError('symbolic link targets are not addressable', 'symlink_rejected');
+    }
     fd = fs.openSync(target, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
   } catch (err) {
     if (err.code === 'ELOOP') {
@@ -125,6 +130,9 @@ export function openFileInsideRoot(rootPath, relativePath) {
   try {
     const stat = fs.fstatSync(fd);
     if (!stat.isFile()) throw new NativePathError('not a regular file', 'file_not_found');
+    const addressed = fs.lstatSync(target);
+    if (addressed.isSymbolicLink()) throw new NativePathError('symbolic link targets are not addressable', 'symlink_rejected');
+    if (addressed.dev !== stat.dev || addressed.ino !== stat.ino) throw new NativePathError('file changed while opening', 'file_unreadable');
     const real = fs.realpathSync(target);
     if (real !== rootReal && !real.startsWith(rootReal + path.sep)) {
       throw new NativePathError('resolved path escapes the library root', 'path_escape');
@@ -342,7 +350,7 @@ export function listDirectoryPage(rootPath, relativeDir = '', { cursor = 0, limi
     return {
       name: e.name,
       relativePath: childRelative,
-      type: e.name.toLowerCase().endsWith('.pdf') ? 'pdf' : 'file',
+      type: isDocumentFile(e.name) ? 'pdf' : 'file',
       sizeBytes: stat?.size ?? null,
       modifiedAt: stat ? Math.round(stat.mtimeMs) : null
     };

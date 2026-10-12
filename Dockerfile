@@ -2,7 +2,8 @@ FROM node:22-alpine
 WORKDIR /app
 
 # Copy package definition
-COPY package.json ./
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
 
 # Copy backend server modules
 COPY server/ ./server/

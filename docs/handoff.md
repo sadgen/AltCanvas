@@ -1,5 +1,7 @@
 # Agent 接续工作日志
 
+> 最新审计入口（2026-10-12）：`docs/product-audit-2026-10-12.md`。本次为三模块产品与代码审计，未修改应用行为或 CPA 配置；详细接续记录见文末。
+
 供接续开发的 AI agent（Codex 等）快速恢复上下文。新会话开工前先读本文件与
 `docs/canvas-design.md`（验收基线）。每次会话结束时在文末追加新小节。
 
@@ -2453,3 +2455,25 @@ generate-topics 5.9s）以 sadgen 会话真实复测全部 200，分类与中文
   3. 点"☰ 大纲"（或聚焦画板按 O）→ 大纲视图线性导读；点条目定位卡片。
   4. 对一篇新 PDF 点"🗺️ 绘制导图"，确认新卡片摘要是完整结论句。
   5. 点"紧凑"切回完整模式，确认旧的全内容卡片渲染无回归。
+
+## 2026-10-12 会话（三模块产品与代码审计）
+
+- 用户希望收敛为左侧文件导入/轻量 AI 元数据识别、中间阅读标注、右侧全文理解导图；局域网 CPA 接口暂不修改。
+- 已交付 `docs/product-audit-2026-10-12.md`，含源码定位、优先级、三模块边界、深读 prompt 草案、格式适配方案及验收标准。本次仅改文档，未改业务行为、生产数据或模型配置。
+- 重点发现：杜撰引用会自动替换为附近真实句子；文库导图默认只读前 40 页；50 篇识别最多提取 25 篇正文；目录识别绑定分类而上传未自动识别；批注入画板按钮隐藏且 onAddToNote 为空；AI 整理仅传卡片前 150 字并直接生成坐标；prompt 更新需同步缓存版本。
+- 建议先统一文本覆盖与引用状态，再改问题/推理/证据/限制的导读结构；保留 SQLite、Reader、来源追踪及 CPA 基础。EPUB/TXT 当前未贯通，不能只放宽文件选择器。
+- 验证：本机 Node 22.11 需要 `NODE_OPTIONS=--experimental-sqlite`；run-logged 调 npm 存在 Windows `spawn npm ENOENT`。将 TEMP/TMP 指向 `.debug/audit-temp`，获准沙箱外执行集成测试后，8 套通过；native-m4 因 Windows 临时目录清理 ENOTEMPTY 失败（历史已有同类记录，本次未独立证明根因）；deploy-config 单独通过，共 9/10 套通过。`git diff --check` 通过。
+- 没有生产或真实 CPA 效果实测，当前 checkout 的 vendor Reader 构建产物缺失。后续固定同一模型用短论文、>40 页报告、规则说明、扫描件及文本格式对比理解质量，按人机调试流程进行 UI 验收。
+- 开工前已有未跟踪 `package-lock.json`，未改动。下一轮实施以审计报告中的分阶段方案为入口。
+
+## 2026-10-12 会话二（三模块 v0.3.0 开发与上线）
+
+- 用户明确要求保留主题识别、优先复用现有主题、必要时新增、一篇可多主题；授权本地开发完成后推送并部署 5.237。完整计划和实施记录见 `docs/implementation-plan-2026-10-12.md`。
+- 确认 SSH lxc=192.168.5.237（当前 hostname desktop-vm），生产用户 sadgen、路径 `/home/sadgen/Projects/AltCanvas`、systemd 用户服务 altcanvas.service；上线前生产代码为 746c9f7，本地/远程分支 HEAD 为 ce5a9a0（后者仅补交接文档）。
+- 实现：现有主题优先/多主题阈值采纳；必要新增的服务端守卫；50 篇均提取文本；上传自动识别；去除旧阻塞首页识别；PDF 全文无 40 页截断；引用待核验而不伪造锚点；v3 导读 prompt、输出预算/截断拒绝与重新分析；确定性整理布局与并发守卫；按编辑标记/历史 provenance 保护人工修改；恢复标注与未保存选区加入右侧。
+- TXT/EPUB 已贯通扫描、上传、存储 MIME、安全纯文本阅读、标注、来源回跳和文件生命周期。新增 fflate 0.8.3，npm audit 无漏洞。新增 `server/document-formats.mjs`、`server/reading-policy.mjs`、`assets/text-reader.js` 和行为级回归测试；原有未跟踪 lock 文件先保存至 `.debug/package-lock.before-audit.json` 后由 npm 规范更新并纳入发布。
+- 本地发现过去被 ENOTEMPTY 遮住的真实问题：Windows 不支持 O_NOFOLLOW 导致内链未拒绝；非法 Range 路径未释放文件句柄。均修复并验证；native-m4 可走过基础 FS/Range，后续仍受 Windows 无法模拟 POSIX chmod 限制。没有跳过相应断言，Linux 作为该套完整验收环境。
+- 验证：Linux `/tmp/altcanvas-validation-20261012` 最终 11 套测试全部通过（含新增格式/分类/41 页/选区/人工保护/Range 资源测试）；本地相关测试及语法、diff 检查通过。一次 Linux 测试因上游 IPv6 TLS socket 错误崩溃，补充 socket error 监听后全套重新通过。
+- 真实 CPA：使用 sadgen 现有配置对两页人工文章执行新版分析，临时库得到 5 节点、8 关系、5 处匹配引用，约 44 秒，包含边界说明。不打印密钥或完整模型输出，不改生产文库/账户。
+- 生产在线备份：`backups/release-20261012-030`，包含 SQLite、对应加密密钥、旧提交、数据计数及 AI 配置校验摘要。备份时 active counts：documents=6、attachments=6、annotations=1、workspaces=4、nodes=15、source_files=155（以当前 5.237 库为准，不沿用旧日志中的 125 篇口径）。
+- 本节为上线前交接记录；实际提交、健康探测、数据/配置不变确认及 UI 验收步骤在上线后追加。

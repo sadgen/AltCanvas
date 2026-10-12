@@ -10,9 +10,12 @@ archived implementation is preserved on the git tag
 
 ## Highlights & Features
 
+- **Reading workflow (v0.3)** — PDF, TXT and EPUB can enter the same native library. TXT/EPUB use a safe plain-text chapter view with persistent annotations and text-block navigation. Metadata recognition uses the opening pages; classification reuses existing topics and supports multiple topics per document. Necessary new topics require an explanation and a matching document.
+- **Trustworthy document coverage** — Full-document mapping reads beyond 40 pages, rejects documents over the analysis budget explicitly, and marks unmatched quotes as awaiting verification. Reanalysis bypasses the versioned AI cache while preserving manually edited source cards. The CPA connection settings stay unchanged.
+
 - **Spatial Canvas Workspace** — A 2D infinite spatial workspace for synthesizing research notes, cross-document connections, and PDF annotations with fluid panning and cursor-anchored zooming (`Ctrl/Cmd + Wheel`).
 - **Full-Text AI Understanding Canvas (🧠 理解全文)** — Extracts PDF text across pages, performs chunked comprehension, and builds an editable structured map (overview, sections, core concepts, key claims & evidence) within an atomic SQLite transaction.
-- **Verbatim Evidence Anchoring & Direct Highlighting** — Every AI card carries a verbatim PDF evidence quote. Clicking a quote jumps to the exact page and renders a clean, non-polluting session highlight in the embedded reader using true character-layer geometry.
+- **Verbatim Evidence Anchoring & Direct Highlighting** — Matched quotes navigate to their source. Unmatched quotations remain unverified and cannot be converted into annotations; the system never replaces them with an unrelated sentence to manufacture evidence.
 - **Evidence-to-Annotation Conversion (🔖 证据转批注)** — Convert AI evidence quotes into permanent, formal PDF annotations in your native library (individually or in batch), automatically relinking canvas cards with provenance auditing.
 - **Native Library & File Management (M4)** — Browse and manage real disk directories of PDFs, import with SHA-256 content deduplication, rename or move original files safely, and organize documents into single-level research topics without ever duplicating files.
 - **Reader-Driven AI Workflow** — Automatic Chinese translation directly written into PDF highlight notes upon creation (`划线后自动中译`), plus one-click card translation and synthesis. An optional server-side translation adapter (M3.1) is loopback-first and SSRF-gated when a remote endpoint is explicitly enabled.
@@ -73,8 +76,11 @@ implementation and acceptance baseline is documented in
 ## Local development
 
 ```sh
+npm ci
 node scripts/dev-server.mjs
 ```
+
+PDF reading requires the compiled `vendor/reader/build/web` distribution. TXT/EPUB do not execute embedded HTML or external resources; they use text-block numbers rather than printed book pages. Scanned PDFs require OCR before text-based AI analysis. Full analysis currently accepts up to 500 pages/blocks and 600,000 characters, also subject to the request-byte budget.
 
 The workspace is then available at `http://localhost:8088`. On an empty
 database the UI offers a one-time setup screen to create the initial

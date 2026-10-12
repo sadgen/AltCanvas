@@ -1,5 +1,7 @@
 # AltCanvas Canvas 设计与实施基线
 
+> 当前产品已迁移为 M4 原生文库与本地账户。下文涉及 Altero、OIDC 和收件箱的段落是历史实施基线。当前架构以 README、`m4-native-library-manager.md` 和 `implementation-plan-2026-10-12.md` 为准；2026-10-12 的导读升级不改变数据所有权或 CPA 配置。
+
 状态：S0 自动收口完成、HTTPS 实机验收中；C4 多人协作延期  
 基线日期：2026-08-27；计划调整：2026-08-30
 

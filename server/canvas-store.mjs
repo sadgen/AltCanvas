@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { documentMime } from './document-formats.mjs';
 import fs from 'fs';
 import path from 'path';
 import { DatabaseSync } from 'node:sqlite';
@@ -2491,6 +2492,12 @@ export class CanvasStore {
       `).run(type, values.x, values.y, values.width, values.height, values.zIndex,
         values.title, values.body, values.color, nowIso(), nodeId, version);
       if (!result.changes) throw new CanvasConflictError('node version conflict');
+      if (node.type === 'ai_output' && node.sourceRefId && (changes.title !== undefined || changes.body !== undefined)) {
+        const ref = this.db.prepare('SELECT position_json FROM source_refs WHERE id = ?').get(node.sourceRefId);
+        const position = JSON.parse(ref?.position_json || '{}');
+        position.userEdited = true;
+        this.db.prepare('UPDATE source_refs SET position_json = ? WHERE id = ?').run(JSON.stringify(position), node.sourceRefId);
+      }
       this.recordEvent({ workspaceId: board.workspaceId, boardId: node.boardId, nodeId, actorKey, type: 'node.updated', payload: changes });
     });
     return this.getNode(actorKey, nodeId);
@@ -2502,6 +2509,9 @@ export class CanvasStore {
     const board = this.requireBoard(actorKey, node.boardId);
     let sourceRefId;
     this.transaction(() => {
+      if (node.sourceRefId && this.getSourceRef(actorKey, node.sourceRefId)?.position?.userEdited) {
+        source = { ...source, position: { ...source.position, userEdited: true } };
+      }
       sourceRefId = this.createSourceRef(actorKey, source);
       const result = this.db.prepare(`
         UPDATE nodes SET source_ref_id = ?, version = version + 1, updated_at = ?
@@ -3180,6 +3190,13 @@ export class CanvasStore {
            document.attachmentKey || null, document.attachmentKey || null);
 
     const isUpdateInPlace = existingDocNodes.length > 0;
+    // Older cards predate the position marker: provenance still identifies
+    // explicit title/body edits, unlike routine layout version increments.
+    const userEditedIds = new Set(this.db.prepare(`
+      SELECT DISTINCT node_id FROM provenance_events
+      WHERE board_id = ? AND event_type = 'node.updated'
+        AND (json_type(payload_json, '$.title') IS NOT NULL OR json_type(payload_json, '$.body') IS NOT NULL)
+    `).all(boardId).map(row => row.node_id));
 
     // Check existing nodes on the board for calculating layout offset if placing a new document
     const existingBoardNodes = this.db.prepare(`
@@ -3305,6 +3322,12 @@ export class CanvasStore {
           const existingSlot = getExistingSlot(item.kind, kindIndex);
 
           if (existingSlot) {
+            if (userEditedIds.has(existingSlot.id) || JSON.parse(existingSlot.position_json || '{}').userEdited) {
+              nodeIds.set(item.key, existingSlot.id);
+              createdNodeIds.push(existingSlot.id);
+              reusedNodeIds.add(existingSlot.id);
+              continue;
+            }
             // Update node in place
             const layout = layoutMap.get(item.key) || { width: 380, height: 260 };
             const finalHeight = layout.height || existingSlot.height;
@@ -3333,7 +3356,10 @@ export class CanvasStore {
                        pageIndex: Math.max(0, item.evidencePage - 1),
                        pageStart: item.pageStart,
                        pageEnd: item.pageEnd,
-                       textQuote: item.evidenceQuote
+                       textQuote: item.evidenceQuote,
+              locationKind: document.locationKind || 'pdf-page',
+              evidenceStatus: item.evidenceQuote ? 'located' : 'unverified',
+              modelEvidenceQuote: item.modelEvidenceQuote || null
                      }), timestamp, existingSlot.source_ref_id);
             }
 
@@ -3355,7 +3381,10 @@ export class CanvasStore {
                 pageIndex: Math.max(0, item.evidencePage - 1),
                 pageStart: item.pageStart,
                 pageEnd: item.pageEnd,
-                textQuote: item.evidenceQuote
+                textQuote: item.evidenceQuote,
+              locationKind: document.locationKind || 'pdf-page',
+              evidenceStatus: item.evidenceQuote ? 'located' : 'unverified',
+              modelEvidenceQuote: item.modelEvidenceQuote || null
               },
               quoteSnapshot: item.evidenceQuote
             });
@@ -3373,6 +3402,7 @@ export class CanvasStore {
         const overviewNodeId = nodeIds.get('overview');
         // Soft delete leftover old nodes, migrating external user edges to document overview
         for (const oldNode of existingDocNodes) {
+          if (userEditedIds.has(oldNode.id) || JSON.parse(oldNode.position_json || '{}').userEdited) continue;
           if (!reusedNodeIds.has(oldNode.id)) {
             if (overviewNodeId && overviewNodeId !== oldNode.id) {
               const touchingEdges = this.db.prepare(`
@@ -3472,7 +3502,10 @@ export class CanvasStore {
               pageIndex: Math.max(0, item.evidencePage - 1),
               pageStart: item.pageStart,
               pageEnd: item.pageEnd,
-              textQuote: item.evidenceQuote
+              textQuote: item.evidenceQuote,
+              locationKind: document.locationKind || 'pdf-page',
+              evidenceStatus: item.evidenceQuote ? 'located' : 'unverified',
+              modelEvidenceQuote: item.modelEvidenceQuote || null
             },
             quoteSnapshot: item.evidenceQuote
           });
@@ -3501,8 +3534,8 @@ export class CanvasStore {
         }, null)?.section;
         edgeInputs.push({
           from: nearest?.key || 'overview', to: item.key,
-          relation: item.kind === 'claim' ? 'supports' : 'related',
-          label: item.kind === 'claim' ? '论点与证据' : '核心概念'
+          relation: 'related',
+          label: item.kind === 'claim' ? '相关结论' : '核心概念'
         });
       }
       edgeInputs.push(...graph.relations);
@@ -3749,7 +3782,7 @@ export class CanvasStore {
       const blob = this.upsertBlob({ sha256, relativePath, sizeBytes, mimeType });
 
       // 3. Document Creation
-      let cleanTitle = originalFilename.replace(/\.pdf$/i, '').trim();
+      let cleanTitle = originalFilename.replace(/\.(pdf|txt|epub)$/i, '').trim();
       try { cleanTitle = decodeURIComponent(cleanTitle); } catch {}
       if (!cleanTitle) cleanTitle = '未命名文献';
 
@@ -4254,7 +4287,7 @@ export class CanvasStore {
     const blobRoot = path.join(blobDir, 'sha256');
     if (fs.existsSync(blobRoot)) {
       for (const filePath of walk(blobRoot)) {
-        const sha256 = path.basename(filePath).replace(/\.pdf$/i, '');
+        const sha256 = path.basename(filePath).replace(/\.(pdf|txt|epub)$/i, '');
         const row = this.db.prepare('SELECT 1 FROM blobs WHERE sha256 = ?').get(sha256);
         if (row) continue;
         try {
@@ -5265,14 +5298,15 @@ export class CanvasStore {
     if (row.documentId) {
       return { duplicate: false, document: this.getDocument(actorKey, row.documentId), sourceFile: row };
     }
-    const title = row.filename.replace(/\.pdf$/i, '').trim() || '未命名文献';
+    const title = row.filename.replace(/\.(pdf|txt|epub)$/i, '').trim() || '未命名文献';
     return this.transaction(() => {
       const document = this.createDocument(actorKey, { title });
       const attachment = this.createSourceFileAttachment(actorKey, document.id, {
         sourceFileId: row.id,
         originalFilename: row.filename,
         title,
-        sizeBytes: row.sizeBytes
+        sizeBytes: row.sizeBytes,
+        mimeType: documentMime(row.filename)
       });
       const updated = this.updateSourceFile(actorKey, row.id, {
         documentId: document.id,

@@ -1,3 +1,4 @@
+import { documentExtension } from './document-formats.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
@@ -145,8 +146,8 @@ function requireRootForRow(store, actorKey, row) {
 // filename (document title). FS first, guarded DB update second, compensation
 // rename back if the DB update loses a race.
 export async function renameSourceFile(store, actorKey, sourceFileId, expectedVersion, rawFilename) {
-  const filename = normalizeFilename(rawFilename, { requirePdf: true });
   const row = requireOperableRow(store, actorKey, sourceFileId, expectedVersion);
+  const filename = normalizeFilename(rawFilename, { extension: documentExtension(row.filename) });
   const root = requireRootForRow(store, actorKey, row);
   const dir = dirname(row.relativePath);
   const targetRel = joinRelative(dir, filename);
@@ -215,7 +216,7 @@ export async function moveSourceFile(store, actorKey, sourceFileId, expectedVers
   const targetDir = rawTargetDir ? normalizeRelativePath(rawTargetDir) : '';
   const row = requireOperableRow(store, actorKey, sourceFileId, expectedVersion);
   const root = requireRootForRow(store, actorKey, row);
-  const filename = rawFilename ? normalizeFilename(rawFilename, { requirePdf: true }) : row.filename;
+  const filename = rawFilename ? normalizeFilename(rawFilename, { extension: documentExtension(row.filename) }) : row.filename;
   const targetRel = joinRelative(targetDir, filename);
   if (targetRel === row.relativePath) {
     return { sourceFile: row, operation: null, unchanged: true };
@@ -299,7 +300,7 @@ export async function trashSourceFile(store, actorKey, sourceFileId, expectedVer
   const row = requireOperableRow(store, actorKey, sourceFileId, expectedVersion,
     { allowStatuses: ['active', 'duplicate', 'unreadable'] });
   const root = requireRootForRow(store, actorKey, row);
-  const trashRel = `${TRASH_DIR_NAME}/${row.id}.pdf`;
+  const trashRel = `${TRASH_DIR_NAME}/${row.id}${documentExtension(row.filename)}`;
   const trashAbs = resolveInsideRoot(root.absolutePath, trashRel);
 
   const operation = journal(store, actorKey, 'file.trash', {
@@ -364,11 +365,11 @@ export async function restoreSourceFile(store, actorKey, sourceFileId, expectedV
   const row = requireOperableRow(store, actorKey, sourceFileId, expectedVersion,
     { allowStatuses: ['trashed'] });
   const root = requireRootForRow(store, actorKey, row);
-  const trashAbs = resolveInsideRoot(root.absolutePath, `${TRASH_DIR_NAME}/${row.id}.pdf`);
+  const trashAbs = resolveInsideRoot(root.absolutePath, `${TRASH_DIR_NAME}/${row.id}${documentExtension(row.filename)}`);
 
   let targetRel = row.relativePath;
   if (alternativeFilename) {
-    const filename = normalizeFilename(alternativeFilename, { requirePdf: true });
+    const filename = normalizeFilename(alternativeFilename, { extension: documentExtension(row.filename) });
     targetRel = joinRelative(dirname(row.relativePath), filename);
   }
 
@@ -395,7 +396,7 @@ export async function restoreSourceFile(store, actorKey, sourceFileId, expectedV
 
   const operation = journal(store, actorKey, 'file.restore', {
     sourceFileId: row.id,
-    sourcePath: `${TRASH_DIR_NAME}/${row.id}.pdf`,
+    sourcePath: `${TRASH_DIR_NAME}/${row.id}${documentExtension(row.filename)}`,
     targetPath: targetRel
   }, { filename: path.posix.basename(targetRel) });
 
@@ -439,11 +440,11 @@ export async function deleteSourceFilePermanent(store, actorKey, sourceFileId, e
   const row = requireOperableRow(store, actorKey, sourceFileId, expectedVersion,
     { allowStatuses: ['trashed'] });
   const root = requireRootForRow(store, actorKey, row);
-  const trashAbs = resolveInsideRoot(root.absolutePath, `${TRASH_DIR_NAME}/${row.id}.pdf`);
+  const trashAbs = resolveInsideRoot(root.absolutePath, `${TRASH_DIR_NAME}/${row.id}${documentExtension(row.filename)}`);
 
   const operation = journal(store, actorKey, 'file.delete_permanent', {
     sourceFileId: row.id,
-    sourcePath: `${TRASH_DIR_NAME}/${row.id}.pdf`
+    sourcePath: `${TRASH_DIR_NAME}/${row.id}${documentExtension(row.filename)}`
   }, { documentId: row.documentId });
 
   try {

@@ -199,13 +199,13 @@ async function main() {
     const jsonRoots = parseNativeLibraryRootsConfig({
       NATIVE_LIBRARY_ROOTS: JSON.stringify([{ path: '/data/library', name: '研究文库' }])
     });
-    assert.deepEqual(jsonRoots, [{ absolutePath: '/data/library', displayName: '研究文库' }]);
+    assert.deepEqual(jsonRoots, [{ absolutePath: path.resolve('/data/library'), displayName: '研究文库' }]);
     const semiRoots = parseNativeLibraryRootsConfig({
       NATIVE_LIBRARY_ROOTS: '/data/library|研究文库;/data/papers'
     });
     assert.deepEqual(semiRoots, [
-      { absolutePath: '/data/library', displayName: '研究文库' },
-      { absolutePath: '/data/papers', displayName: 'papers' }
+      { absolutePath: path.resolve('/data/library'), displayName: '研究文库' },
+      { absolutePath: path.resolve('/data/papers'), displayName: 'papers' }
     ]);
     assert.throws(() => parseNativeLibraryRootsConfig({ NATIVE_LIBRARY_ROOTS: '[{"path": "relative"}]' }), /absolute/);
     assert.throws(() => parseNativeLibraryRootsConfig({ NATIVE_LIBRARY_ROOTS: '[broken' }), /valid JSON/);

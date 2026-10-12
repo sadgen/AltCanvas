@@ -113,6 +113,9 @@ export function requestWithPinnedIp(parsedUrl, pinnedAddress, options = {}, time
       resolve(res);
     });
 
+    // A failed pinned IPv6 TLS socket can emit after the request's fallback
+    // path has started. Keep a socket listener so it cannot crash the service.
+    req.once('socket', socket => socket.on('error', reject));
     req.on('error', reject);
     req.setTimeout(timeoutMs, () => {
       req.destroy(new Error(`Request timed out after ${timeoutMs}ms`));

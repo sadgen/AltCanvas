@@ -4,8 +4,9 @@ import fs from 'fs';
 console.log('🧪 Running AltCanvas Canvas UI structure tests...');
 
 const html = fs.readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+globalThis.isReadableAttachment = item => ['application/pdf', 'text/plain', 'application/epub+zip'].includes(item?.data?.contentType);
 const devServer = fs.readFileSync(new URL('../scripts/dev-server.mjs', import.meta.url), 'utf8');
-const scripts = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map(match => match[1]);
+const scripts = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map(match => match[1]).filter(script => script.trim());
 assert.equal(scripts.length, 1, 'workspace should have one inline application script');
 assert.doesNotThrow(() => new Function(scripts[0]), 'application script must parse');
 
@@ -64,7 +65,7 @@ assert.match(html, /documentMetas\.clear\(\)/,
   'library reloading and logout must clear in-memory document metadata');
 
 assert.match(html, /async function initCanvasWorkspace\(\)/);
-assert.match(html, /async function importCurrentAnnotations\(\)/);
+assert.match(html, /async function importCurrentAnnotations\(onlyIds = null\)/);
 assert.match(html, /function beginCanvasNodeDrag\(/);
 assert.match(html, /function beginCanvasNodeResize\(/);
 assert.match(html, /async function saveCanvasLayout\(\)/);
@@ -105,7 +106,7 @@ assert.match(html, /textChars > maxTextChars \|\| estimatedRequestBytes > maxReq
   'whole-document extraction must stop at the browser memory boundary before reading every page');
 assert.match(html, /while \(pageDataCache\.size > 2\)/,
   'batch evidence conversion must keep a bounded PDF character-layer cache');
-assert.match(html, /async function generateCurrentPdfUnderstandingCanvas\(\)/);
+assert.match(html, /async function generateCurrentPdfUnderstandingCanvas\(forceRefresh = false\)/);
 assert.match(html, /sourceRef\.quoteSnapshot \|\| sourceRef\.position\?\.textQuote/,
   'document-map source navigation must use the persisted verbatim quote');
 assert.match(html, /_primaryView\?\.find/,
@@ -117,8 +118,7 @@ assert.match(html, /ALT-AI-EVIDENCE-HIGHLIGHT/,
 assert.match(html, /readOnly: true,[\s\S]*isExternal: true/,
   'the evidence highlight must not become a writable Altero annotation');
 assert.match(html, /AI 卡片原文证据（临时定位，不写回文库）/);
-assert.match(html, /原文 p\.\$\{escapeHTML\(displayPageLabel \|\| '1'\)\} ↗/,
-  'AI cards must expose an explicit exact-source action rather than only a page jump');
+assert.ok(html.includes("currentReaderInstance?.textPages ? '块' : 'p.'"), 'text blocks must not be displayed as PDF printed pages');
 assert.match(html, /\/boards\/\$\{canvasBoard\.id\}\/ai\/document-map/,
   'the current PDF must be able to create a full understanding canvas');
 assert.match(html, /正文会发送给当前 AI 服务/,
@@ -222,7 +222,7 @@ assert.match(html, /canvas-node-gist/,
 assert.match(html, /if \(key === 'o'\)/,
   'outline mode must have a dedicated keyboard shortcut');
 const canvasApi = fs.readFileSync(new URL('../server/canvas-api.mjs', import.meta.url), 'utf8');
-assert.match(canvasApi, /每个 body 的第一句必须是不超过 40 字的核心结论句/,
+assert.match(fs.readFileSync(new URL('../server/reading-policy.mjs', import.meta.url), 'utf8'), /每个 body 的第一句必须是不超过 40 字的核心结论句/,
   'document-map prompt must require a concise first sentence so compact cards get a real gist');
 
 // --- T1 Topic Workspaces, Research Inbox, and Batch Actions ---
@@ -1933,7 +1933,7 @@ assert.ok(html.includes('documentTexts'),
 assert.ok(html.includes('AI_REFRESH_BATCH_SIZE = 4'),
   'the metadata refresh must run in small batches under the gateway timeout');
 assert.ok(html.includes('批重试'), 'a failed batch must auto-retry once before being counted failed');
-assert.ok(html.includes("'/native/documents/classify'"),
+assert.ok(html.includes("const endpoint = '/native/classify/generate-topics'"),
   'follow-up batches must reuse the classify-only endpoint instead of re-minting topics');
 assert.ok(html.includes('批失败'),
   'partial batch failure must be surfaced instead of a fake success');

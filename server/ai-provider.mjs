@@ -121,6 +121,7 @@ export async function requestAiCompletion({ messages, temperature = 0.4, maxToke
     }
     let payload;
     try { payload = JSON.parse(text); } catch { throw new Error('AI 模型返回了无效 JSON'); }
+    if (payload?.choices?.[0]?.finish_reason === 'length') throw new Error('AI 输出达到长度上限，未保存不完整结果，请重试或缩小分析范围');
     const content = payload?.choices?.[0]?.message?.content;
     if (typeof content !== 'string' || !content.trim()) throw new Error('AI 模型未返回有效内容');
     return content.trim();

@@ -208,6 +208,15 @@
       *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
     }
   </style>
+<style>
+.text-reader-toolbar { position: sticky; top: 0; padding: 12px; background: #1e293b; z-index: 2; display: flex; gap: 16px; font-size: 12px; }
+.text-reader-toolbar button,.text-reader-annotation button { padding: 4px 8px; border: 1px solid #475569; border-radius: 4px; }
+.text-reader-content { max-width: 850px; margin: auto; padding: 24px; }
+.text-reader-content h3 { color: #a5b4fc; margin: 16px 0; }
+.text-reader-block { white-space: pre-wrap; line-height: 1.9; font-size: 15px; user-select: text; }
+.text-reader-annotation { margin: 12px 0; padding: 10px; border-left: 3px solid #facc15; display: flex; flex-wrap: wrap; gap: 8px; font-size: 12px; }
+.text-reader-annotation textarea { background: #0f172a; padding: 6px; width: 100%; }
+</style><script src="/assets/text-reader.js"></script>
 </head>
 <body data-mobile-pane="library" class="bg-slate-900 text-slate-100 h-screen w-screen flex flex-col overflow-hidden">
   <!-- Top Bar -->
@@ -250,7 +259,7 @@
       </button>
 
       <!-- Native PDF Upload Trigger -->
-      <input type="file" id="native-pdf-file-input" accept=".pdf,application/pdf" class="hidden">
+      <input type="file" id="native-pdf-file-input" accept=".pdf,.txt,.epub,application/pdf,text/plain,application/epub+zip" class="hidden">
       <button id="btn-upload-pdf-top" type="button" class="px-2.5 py-1 bg-emerald-950/80 hover:bg-emerald-900 text-emerald-300 border border-emerald-700/60 rounded transition flex items-center gap-1.5 shadow-sm" title="直接上传本地 PDF 文献到原生文库">
         <svg class="w-3.5 h-3.5 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path></svg>
         <span>上传 PDF</span>
@@ -406,6 +415,7 @@
 
       <!-- Container for embedding the native Zotero Reader Iframe -->
       <div id="reader-wrapper" class="w-full h-full hidden relative bg-slate-900">
+        <div id="text-reader" class="hidden absolute inset-0 overflow-auto bg-slate-900"></div>
         <div id="reader-frame-scale" class="w-full h-full">
           <iframe id="reader-frame" data-src="/reader/reader.html" title="Zotero PDF 阅读器" class="w-full h-full border-0"></iframe>
         </div>
@@ -440,7 +450,8 @@
         <span class="w-px h-5 bg-slate-800"></span>
         <button id="btn-canvas-clear" type="button" title="清空全部卡片和连线；可按 Ctrl+Z 撤销" class="px-2 py-1.5 rounded hover:bg-rose-950 text-rose-400 disabled:opacity-40 disabled:cursor-not-allowed transition" disabled>清空画板</button>
         <!-- 冗余或次级功能：保持 ID 存在于 DOM 供脚本与测试契约调用，但隐藏以免杂乱 -->
-        <button id="btn-canvas-import" type="button" class="hidden" title="把当前 PDF 标注加入画板">加入标注</button>
+        <button id="btn-canvas-import" type="button" class="px-2 py-1 rounded bg-slate-800 text-xs" title="把当前 PDF 标注加入画板">加入标注</button>
+        <button id="btn-canvas-reanalyze" type="button" class="px-2 py-1 rounded bg-slate-800 text-xs" title="绕过缓存重新阅读全文">重新分析</button>
         <button id="btn-canvas-ai-translate" type="button" class="hidden" title="将选中卡片一键忠实翻译为中文">🌐 中译</button>
         <button id="btn-canvas-ai-synthesize" type="button" class="hidden" title="一键综合总结选中卡片">✨ 总结</button>
         <button id="btn-canvas-cross-report" type="button" class="hidden" title="发现当前选中卡片与主题内其他研报的跨报告观点关联与冲突证据">🔗 跨报告关联</button>
@@ -1802,6 +1813,7 @@
       let textSnippet = '';
       if (currentReaderInstance && currentItem?.key === metaKey) {
         try {
+          if (currentReaderInstance.textPages) textSnippet = currentReaderInstance.textPages.slice(0, 2).map(p => p.text).join('\n');
           const pdfDoc = currentReaderInstance._primaryView?._iframeWindow?.PDFViewerApplication?.pdfDocument;
           if (pdfDoc) {
             const pageCount = pdfDoc.numPages || 1;
@@ -2105,6 +2117,16 @@
       if (await saveAiConfig()) closeSettingsModal();
     };
 
+    function isReadableAttachment(item) {
+      return ['application/pdf', 'text/plain', 'application/epub+zip'].includes(item?.data?.contentType);
+    }
+    async function fetchTextDocument(attachmentId) {
+      const response = await fetch(`/canvas/native/attachments/${encodeURIComponent(attachmentId)}/text`);
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error?.message || '文本读取失败');
+      return payload.data;
+    }
+
     // --- Collections & Library Loading ---
     function nativeDocumentToLibraryItem(doc) {
       if (!doc) return null;
@@ -2324,7 +2346,7 @@
 
       for (const item of filtered) {
         const isSelected = currentItem?.key === item.key;
-        const isPdfAttachment = item.data?.itemType === 'attachment' && item.data?.contentType === 'application/pdf';
+        const isPdfAttachment = item.data?.itemType === 'attachment' && isReadableAttachment(item);
 
         const div = document.createElement('div');
         div.role = 'button';
@@ -2995,7 +3017,7 @@
         // 第二步：走与文库完全相同的 AI 流程（读正文取名 + 归入宏观大类）
         btn.textContent = '⏳ AI 识别与归类...';
         await refreshLibraryMetadataWithAi(documentIds, { onProgress: t => { if (btn) btn.textContent = t; } });
-        showToast(`AI 完成：${documentIds.length} 篇文献已入库并完成识别归类`, 'success');
+        showToast(`已入库 ${documentIds.length} 篇，识别与归类状态请查看文库`, 'info');
         selectedSourceFileIds.clear();
         await Promise.all([loadSourceFiles(), loadNativeLibrary().catch(() => {})]);
         if (userWorkspaces) {
@@ -3010,17 +3032,6 @@
         btn.textContent = '✨ AI 识别入库';
         updateSourceFileSelectionUI();
       }
-    }
-
-    // 从 source_file 所在磁盘路径提取 PDF 前几页文本（复用 PDF.js 基础设施）
-    async function extractSourceFilePdfText(sourceFileId) {
-      // For source_files not yet enrolled, we read the file directly from disk
-      // via the same /canvas/native/attachments/:id/file pattern — but un-enrolled
-      // source_files don't have attachments. Instead, the server endpoint
-      // /native/source-files/:id/recognize handles text extraction internally
-      // when textSnippet is empty. So we return '' here and let the server
-      // do a direct file read if needed.
-      return '';
     }
 
     async function sourceNewDirFlow() {
@@ -3110,7 +3121,7 @@
         return;
       }
       if (libraryFilterState === 'no-pdf') {
-        const filtered = allItems.filter(item => !(item.children || []).some(c => c.data?.contentType === 'application/pdf'));
+        const filtered = allItems.filter(item => !(item.children || []).some(c => isReadableAttachment(c)));
         renderFilteredNativeItems(filtered, '暂无无 PDF 的文献');
         return;
       }
@@ -3148,7 +3159,7 @@
       return hostPdfjsPromise;
     }
 
-    const AI_REFRESH_TEXT_MAX_DOCS = 25;
+    const AI_REFRESH_TEXT_MAX_DOCS = 50;
     const AI_REFRESH_TEXT_CHARS = 8000;
     // 双重超时约束：应用内 AI 调用超时（AI_TIMEOUT_MS，默认 60s）+ 网关读
     // 超时（nginx 300s）。批内带正文请求必须远小于两者，失败自动重试一次。
@@ -3156,6 +3167,11 @@
 
     async function extractAttachmentPdfText(attachmentId, { maxPages = 3, maxChars = AI_REFRESH_TEXT_CHARS } = {}) {
       if (!attachmentId) return '';
+      const itemAttachment = allItems.flatMap(i => i.children || []).find(a => a.key === attachmentId);
+      if (itemAttachment && itemAttachment.data?.contentType !== 'application/pdf') {
+        const book = await fetchTextDocument(attachmentId);
+        return `${book.title} ${(book.authors || []).join(', ')}\n${book.pages.slice(0, 2).map(p => p.text).join('\n')}`.slice(0, maxChars);
+      }
       try {
         const pdfjs = await loadHostPdfjs();
         const doc = await pdfjs.getDocument({
@@ -3170,7 +3186,7 @@
             const textContent = await page.getTextContent();
             const pageText = textContent.items.map(item => item.str || '').join(' ').replace(/\s+/g, ' ').trim();
             if (pageText) text += `\n--- Page ${p + 1} ---\n` + pageText;
-            if (text.length >= maxChars) break;
+            if (text.length >= maxChars || (p === 0 && pageText.length >= 800)) break;
           }
           return text.slice(0, maxChars);
         } finally {
@@ -3182,8 +3198,22 @@
       }
     }
 
-    async function extractAttachmentPdfPages(attachmentId, { maxPages = 40, maxChars = 500_000 } = {}) {
+    function assertFullTextBudget(pages) {
+      const textChars = pages.reduce((n, p) => n + p.text.length, 0);
+      if (pages.length > 500 || textChars > 600_000 || new Blob([JSON.stringify(pages)]).size > 700 * 1024) {
+        throw new Error('全文超过分析上限（500 页/60 万字符/700 KiB），未执行部分分析');
+      }
+      if (!pages.some(p => p.text.trim())) throw new Error('文档没有可提取文本，扫描件需要 OCR');
+    }
+
+    async function extractAttachmentPdfPages(attachmentId, { maxPages = 500, maxChars = 600_000 } = {}) {
       if (!attachmentId) return [];
+      const attachment = allItems.flatMap(i => i.children || []).find(a => a.key === attachmentId);
+      if (attachment && attachment.data?.contentType !== 'application/pdf') {
+        const book = await fetchTextDocument(attachmentId);
+        assertFullTextBudget(book.pages);
+        return book.pages;
+      }
       try {
         const pdfjs = await loadHostPdfjs();
         const doc = await pdfjs.getDocument({
@@ -3193,22 +3223,24 @@
         try {
           const pages = [];
           let totalChars = 0;
-          const count = Math.min(maxPages, doc.numPages || 1);
+          if (doc.numPages > maxPages) throw new Error('全文超过 500 页上限，未执行部分分析');
+          const count = doc.numPages || 1;
           for (let p = 0; p < count; p++) {
             const page = await doc.getPage(p + 1);
             const textContent = await page.getTextContent();
             const pageText = textContent.items.map(item => item.str || '').join(' ').replace(/\s+/g, ' ').trim();
             totalChars += pageText.length;
             if (pageText) pages.push({ pageNumber: p + 1, text: pageText });
-            if (totalChars >= maxChars) break;
+            if (totalChars > maxChars) throw new Error('全文超过字符上限，未执行部分分析');
           }
+          assertFullTextBudget(pages);
           return pages;
         } finally {
           try { doc.destroy(); } catch {}
         }
       } catch (err) {
         console.warn('PDF pages extraction failed', err);
-        return [];
+        throw err;
       }
     }
 
@@ -3236,7 +3268,7 @@
       try {
         for (const itemKey of keys) {
           let item = allItems.find(i => i.key === itemKey);
-          let pdfAttachment = (item?.children || []).find(c => c.data?.contentType === 'application/pdf')
+          let pdfAttachment = (item?.children || []).find(c => isReadableAttachment(c))
             || (item?.data?.itemType === 'attachment' ? item : null);
           if (!pdfAttachment && itemKey) {
             try {
@@ -3287,7 +3319,7 @@
             let pages = [];
             try {
               pages = await extractAttachmentPdfPages(attachmentKey);
-            } catch {}
+            } catch (err) { throw err; }
             if (!pages.length) continue;
 
             setCanvasSaveState(`AI 对比与融合 [${processed + 1}/${keys.length}] 《${title.slice(0, 14)}》…`);
@@ -3350,7 +3382,7 @@
           if (!meta || meta.source !== 'ai_classification') return true;
           const hasTopicBinding = (item.topics || []).length > 0;
           if (!hasTopicBinding) return true;
-          const attachment = (item.children || []).find(c => c.data?.contentType === 'application/pdf');
+          const attachment = (item.children || []).find(c => isReadableAttachment(c));
           if (!attachment) return false;
           if (meta.attachmentKey !== (attachment.key || attachment.data?.key)) return true;
           const recognizedVersion = meta.attachmentVersion;
@@ -3365,17 +3397,17 @@
       let extracted = 0;
       for (const item of targets) {
         if (extracted >= AI_REFRESH_TEXT_MAX_DOCS) break;
-        const attachment = (item.children || []).find(c => c.data?.contentType === 'application/pdf');
+        const attachment = (item.children || []).find(c => isReadableAttachment(c));
         if (!attachment) continue;
         extracted += 1;
         const progressText = `⏳ 读取正文 ${extracted}...`;
         if (onProgress) onProgress(progressText);
         texts[item.key] = await extractAttachmentPdfText(attachment.key || attachment.data?.key);
+        if (!texts[item.key].trim()) showToast(`《${item.data?.title || item.key}》无可提取文本，需 OCR 或手工编辑`, 'info');
       }
 
       // Batched execution: every request stays well under gateway timeouts.
-      // Batch 1 may mint the topic taxonomy (generate-topics); later batches
-      // only classify + name against the existing topics (documents/classify).
+      // Every batch reuses existing topics; new topics require a necessity reason.
       const totals = { created: 0, applied: 0, analyzed: 0, extracted: Object.keys(texts).length, batches: 0, failedBatches: 0 };
       const batches = [];
       for (let i = 0; i < targets.length; i += AI_REFRESH_BATCH_SIZE) {
@@ -3386,12 +3418,13 @@
       let lastError = null;
       for (let b = 0; b < batches.length; b++) {
         const batch = batches[b];
-        const documentIds = batch.map(t => t.key);
+        const documentIds = batch.filter(t => texts[t.key]?.trim()).map(t => t.key);
+        if (!documentIds.length) { totals.failedBatches += 1; continue; }
         const batchTexts = {};
         for (const id of documentIds) {
           if (texts[id]) batchTexts[id] = texts[id];
         }
-        const endpoint = b === 0 ? '/native/classify/generate-topics' : '/native/documents/classify';
+        const endpoint = '/native/classify/generate-topics';
         // 上游（AI 网关/模型）瞬时 500/超时较常见：每批自动重试一次。
         for (let attempt = 0; attempt <= 1; attempt++) {
           try {
@@ -3405,36 +3438,23 @@
             const data = gen.data || {};
             totals.created += (data.createdWorkspaces || []).length;
             totals.batches += 1;
-            // 产品规则：识别 = 取名 + 归类一起完成。每篇文献取最高置信度的
-            // 建议强制归入该宏观大类（不再设阈值丢弃——被丢弃的文献会变成
-            // "有名字但永远未分类"）。同篇多主题建议只归入最契合的一个。
-            const bestPerDoc = new Map();
+            // 产品规则：识别 = 取名 + 归类一起完成。每篇文献采纳所有实质相关的
+            // 主题建议（置信度 ≥0.7，保留既有关系，支持多主题），避免
+            // 强制将弱相关文献塞入任意主题。
+            const byWorkspace = new Map();
             for (const [documentId, list] of Object.entries(data.classifications || {})) {
               totals.analyzed += 1;
-              let top = null;
-              for (const s of (list || [])) {
-                if (s && typeof s.confidence === 'number'
-                  && (!top || s.confidence > top.confidence)) {
-                  top = s;
-                }
-              }
-              if (top && top.workspaceId) {
-                bestPerDoc.set(documentId, top.workspaceId);
+              for (const suggestion of (list || [])) {
+                if (!suggestion?.workspaceId || !Number.isFinite(suggestion.confidence) || suggestion.confidence < 0.7) continue;
+                if (!byWorkspace.has(suggestion.workspaceId)) byWorkspace.set(suggestion.workspaceId, new Set());
+                byWorkspace.get(suggestion.workspaceId).add(documentId);
               }
             }
-            totals.applied += bestPerDoc.size;
-            if (bestPerDoc.size) {
-              const byWorkspace = new Map();
-              for (const [documentId, workspaceId] of bestPerDoc) {
-                if (!byWorkspace.has(workspaceId)) byWorkspace.set(workspaceId, []);
-                byWorkspace.get(workspaceId).push(documentId);
-              }
-              for (const [workspaceId, ids] of byWorkspace) {
-                const res = await m4Fetch('/native/documents/batch-topics', {
-                  method: 'POST', body: { documentIds: ids, topicIds: [workspaceId] }
-                });
-                totals.applied -= (res.data || []).length - (res.data || []).filter(r => r.ok).length;
-              }
+            for (const [workspaceId, ids] of byWorkspace) {
+              const res = await m4Fetch('/native/documents/batch-topics', {
+                method: 'POST', body: { documentIds: [...ids], topicIds: [workspaceId] }
+              });
+              totals.applied += (res.data || []).filter(r => r.ok).length;
             }
             break;
           } catch (err) {
@@ -3585,7 +3605,7 @@
       if (docLib.libraryType === 'native') {
         const item = await getNativeLibraryItem(doc.itemKey);
         if (!item) return null;
-        const attachment = (item.children || []).find(child => child.data?.contentType === 'application/pdf')
+        const attachment = (item.children || []).find(child => isReadableAttachment(child))
           || (item.data?.itemType === 'attachment' ? item : null);
         return attachment ? { doc, item, attachment } : null;
       }
@@ -3599,7 +3619,7 @@
         item = await response.json();
       }
 
-      if (item.data?.itemType === 'attachment' && item.data?.contentType === 'application/pdf') {
+      if (item.data?.itemType === 'attachment' && isReadableAttachment(item)) {
         return { doc, item, attachment: item };
       }
       const childrenUrl = getApiUrl(`${libraryApiPrefix(docLib)}/items/${encodeURIComponent(doc.itemKey)}/children`);
@@ -3607,7 +3627,7 @@
       if (!childrenResponse.ok) return null;
       const children = await childrenResponse.json();
       const attachment = Array.isArray(children)
-        ? children.find(child => child.data?.contentType === 'application/pdf')
+        ? children.find(child => isReadableAttachment(child))
         : null;
       return attachment ? { doc, item, attachment } : null;
     }
@@ -3692,6 +3712,8 @@
       const { signal } = documentController;
       currentItem = item;
       currentReaderInstance = null;
+      document.getElementById('text-reader').classList.add('hidden');
+      document.getElementById('reader-frame-scale').classList.remove('hidden');
       updateCanvasAiToolbar();
       currentDocumentLibrary = normalizeLibraryContext(libraryContext || (item?.isNative ? { libraryType: 'native', libraryId: 'local' } : null));
       const isNativeDoc = item?.isNative || currentDocumentLibrary?.libraryType === 'native';
@@ -3715,7 +3737,7 @@
         let pdfAttachment = null;
 
         if (isNativeDoc) {
-          pdfAttachment = (item.children || []).find(c => c.data?.contentType === 'application/pdf')
+          pdfAttachment = (item.children || []).find(c => isReadableAttachment(c))
             || (item.data?.itemType === 'attachment' ? item : null);
           if (!pdfAttachment && item.key) {
             try {
@@ -3740,7 +3762,7 @@
               }
             } catch {}
           }
-        } else if (item.data?.itemType === 'attachment' && item.data?.contentType === 'application/pdf') {
+        } else if (item.data?.itemType === 'attachment' && isReadableAttachment(item)) {
           // Direct standalone PDF attachment
           pdfAttachment = item;
         } else {
@@ -3750,7 +3772,7 @@
           if (!res.ok) throw new Error('未能获取子附件');
           const children = await res.json();
           if (requestId !== openRequestId) return;
-          pdfAttachment = children.find(c => c.data?.contentType === 'application/pdf');
+          pdfAttachment = children.find(c => isReadableAttachment(c));
         }
 
         if (!pdfAttachment) {
@@ -3838,7 +3860,19 @@
         document.getElementById('reader-wrapper').classList.remove('hidden');
 
         loadingText.textContent = '正在初始化阅读器引擎...';
-        await initReaderEngine(pdfAttachment.key, readerAnnotations, requestId, signal, currentDocumentLibrary);
+        if (pdfAttachment.data?.contentType !== 'application/pdf' && isNativeDoc) {
+          const book = await fetchTextDocument(pdfAttachment.key);
+          if (requestId !== openRequestId) return;
+          document.getElementById('reader-frame-scale').classList.add('hidden');
+          const container = document.getElementById('text-reader'); container.classList.remove('hidden');
+          currentReaderInstance = createTextReader({ container, pages: book.pages, annotations: readerAnnotations,
+            onSaveAnnotations: annotations => currentAttachment?.key === pdfAttachment.key ? handleSaveAnnotations(annotations) : Promise.resolve(),
+            onDeleteAnnotations: ids => currentAttachment?.key === pdfAttachment.key ? handleDeleteAnnotations(ids) : Promise.resolve(),
+            onAddToNote: annotations => currentAttachment?.key === pdfAttachment.key && importCurrentAnnotations(annotations.map(a => clientAnnotationIdMap.get(a.id) || a.id)) });
+          loadingOverlay.classList.add('hidden'); updateCanvasAiToolbar();
+        } else {
+          await initReaderEngine(pdfAttachment.key, readerAnnotations, requestId, signal, currentDocumentLibrary);
+        }
 
       } catch (err) {
         if (err?.name === 'AbortError' || requestId !== openRequestId) return;
@@ -3956,7 +3990,7 @@
         onChangeSidebarView: () => {},
         onToggleSidebar: () => {},
         onOpenLink: (url) => { if (url) window.open(url, '_blank', 'noopener,noreferrer'); },
-        onAddToNote: () => {},
+        onAddToNote: annotations => addReaderSelectionToCanvas(annotations),
         onOpenTagsPopup: () => {},
         onCopyImage: () => {},
         onSaveImageAs: () => {},
@@ -3983,6 +4017,7 @@
       });
 
       if (requestId !== openRequestId) return;
+      currentReaderInstance.enableAddToNote?.(true);
       document.getElementById('reader-loading').classList.add('hidden');
       updateCanvasAiToolbar();
       scheduleAcxMobileToolbar();
@@ -4234,6 +4269,7 @@
           await reloadAndSyncReaderAnnotations(currentAttachment.key);
         } else {
           renderAnnotationCards();
+          if (currentReaderInstance?.textPages) await reloadAndSyncReaderAnnotations(currentAttachment.key);
         }
         return;
       }
@@ -5426,6 +5462,7 @@
       const imported = new Set([...canvasSources.values()].map(sourceRef => sourceRef.annotationKey).filter(Boolean));
       const available = [...currentAnnotationsMap.keys()].filter(key => !imported.has(key)).length;
       button.disabled = !canvasReady || !currentAttachment || available === 0;
+      button.hidden = available === 0;
       button.textContent = available > 0 ? `加入当前标注 (${available})` : '加入当前标注';
       button.title = currentAttachment ? '把当前 PDF 中尚未加入的标注持久化到画板' : '请先打开 PDF 文档';
     }
@@ -5568,7 +5605,7 @@
       const crossReportBtnHtml = `<button type="button" class="canvas-node-cross-report text-indigo-400 hover:text-indigo-300 underline cursor-pointer" title="发现本卡片与主题内其他研报的跨报告关联">🔗 相关观点</button>`;
       const quickVerifyBtnHtml = sourceRef ? `<button type="button" class="canvas-node-quick-verify text-indigo-400 hover:text-indigo-300 underline cursor-pointer" title="原位快速核验该观点在 PDF 中的证据引用与段落">🔍 核验</button>` : '';
       if (node.type === 'ai_output') {
-        footerHtml = `<div class="mt-2 pt-1.5 border-t border-purple-900/50 text-[9px] text-purple-400 font-mono flex items-center justify-between gap-2"><span>✨ AI 智能生成</span><span class="flex gap-2">${quickVerifyBtnHtml}${crossReportBtnHtml}${sourceRef?.annotationKey ? '<span class="text-emerald-400" title="证据已转为正式 PDF 批注">已转批注 ✓</span>' : (evidenceConvertibleSource(sourceRef) ? '<button type="button" class="canvas-node-annotate text-emerald-400 hover:text-emerald-300 underline cursor-pointer" title="把这条证据转成正式 PDF 批注并关联到本卡片">转批注</button>' : '')}${sourceRef?.attachmentKey ? `<button type="button" class="canvas-node-jump-page text-indigo-300 hover:text-indigo-200 underline cursor-pointer" title="在 PDF 中定位并高亮逐字引用">原文 p.${escapeHTML(displayPageLabel || '1')} ↗</button>` : ''}<button type="button" class="canvas-node-focus-sources text-purple-300 hover:text-purple-200 underline cursor-pointer" title="在画板上高亮关联的输入卡片">溯源输入</button></span></div>`;
+        footerHtml = `<div class="mt-2 pt-1.5 border-t border-purple-900/50 text-[9px] text-purple-400 font-mono flex items-center justify-between gap-2"><span>✨ AI 智能生成</span><span class="flex gap-2">${quickVerifyBtnHtml}${crossReportBtnHtml}${sourceRef?.annotationKey ? '<span class="text-emerald-400" title="证据已转为正式 PDF 批注">已转批注 ✓</span>' : (evidenceConvertibleSource(sourceRef) ? '<button type="button" class="canvas-node-annotate text-emerald-400 hover:text-emerald-300 underline cursor-pointer" title="把这条证据转成正式 PDF 批注并关联到本卡片">转批注</button>' : '')}${sourceRef?.attachmentKey ? `<button type="button" class="canvas-node-jump-page text-indigo-300 hover:text-indigo-200 underline cursor-pointer" title="在 PDF 中定位并高亮逐字引用">原文 ${currentReaderInstance?.textPages ? '块' : 'p.'}${escapeHTML(displayPageLabel || '1')} ↗</button>` : ''}<button type="button" class="canvas-node-focus-sources text-purple-300 hover:text-purple-200 underline cursor-pointer" title="在画板上高亮关联的输入卡片">溯源输入</button></span></div>`;
       } else if (sourceRef?.annotationKey) {
         footerHtml = `<div class="mt-2 pt-1.5 border-t border-slate-800 text-[9px] text-slate-500 font-mono flex items-center justify-between"><span>#${escapeHTML(sourceRef.annotationKey)}</span><span class="flex items-center gap-2">${quickVerifyBtnHtml}${crossReportBtnHtml}${sourceRef.itemKey ? `<span class="text-slate-600">Doc #${escapeHTML(sourceRef.itemKey)}</span>` : ''}</span></div>`;
       } else {
@@ -5746,6 +5783,10 @@
         };
         bodyEl.appendChild(quoteBtn);
       }
+      if (node.type === 'ai_output' && sourceRef && !sourceRef.quoteSnapshot) {
+        const status = document.createElement('p'); status.className = 'text-xs text-amber-300';
+        status.textContent = '引用待核验：仅可按位置查看原文，尚未找到匹配引用。'; bodyEl.appendChild(status);
+      }
       const actions = document.getElementById('canvas-node-detail-actions');
       actions.replaceChildren();
       const addAction = (label, handler, options = {}) => {
@@ -5778,7 +5819,7 @@
       if (sourceRef?.annotationKey) {
         addAction('跳转标注 ↗', () => jumpToSourceAnnotation(sourceRef), { title: '点击在阅读器中跳转定位' });
       } else if (sourceRef?.attachmentKey) {
-        addAction(`原文 ${sourceRef.pageLabel ? `p.${sourceRef.pageLabel}` : ''} ↗`, () => jumpToDocumentSource(sourceRef), { title: '在 PDF 中定位并高亮逐字引用' });
+        addAction(`原文 ${sourceRef.pageLabel ? `${currentReaderInstance?.textPages ? '块' : 'p.'}${sourceRef.pageLabel}` : ''} ↗`, () => jumpToDocumentSource(sourceRef), { title: '定位原文；引用存在时高亮' });
       }
       if (node.type === 'ai_output') {
         addAction('溯源输入', () => focusAiInputSources(node.id), { title: '在画板上高亮关联的输入卡片' });
@@ -5822,7 +5863,7 @@
       const groups = { overview: [], section: [], concept: [], claim: [], notes: [] };
       for (const node of canvasNodes.values()) groups[canvasNodeOutlineKind(node)].push(node);
       const byPosition = (a, b) => (a.y - b.y) || (a.x - b.x);
-      const headings = { overview: '全文概览', section: '章节', concept: '概念', claim: '论点', notes: '标注与手写' };
+      const headings = { overview: '全文概览', section: '推理主线', concept: '必需概念', claim: '结论与边界', notes: '标注与手写' };
       const dotColors = { overview: '#7c3aed', section: '#2563eb', concept: '#0891b2', claim: '#d97706', notes: '#64748b' };
       for (const kind of ['overview', 'section', 'concept', 'claim', 'notes']) {
         const kindNodes = groups[kind].sort(byPosition);
@@ -6186,10 +6227,33 @@
       }
     }
 
-    async function importCurrentAnnotations() {
+    async function addReaderSelectionToCanvas(annotations) {
+      if (!canvasReady || !currentReaderInstance || !currentAttachment) return;
+      const attachmentKey = currentAttachment.key;
+      try {
+        const ids = [];
+        for (const annotation of annotations || []) {
+          const saved = annotation.id ? annotation : currentReaderInstance._annotationManager?.addAnnotation({ ...annotation, type: annotation.type || 'highlight', color: annotation.color || '#ffd400' });
+          if (!saved?.id) throw new Error('选区未能保存为标注');
+          const deadline = Date.now() + 10000;
+          let id;
+          while (currentAttachment?.key === attachmentKey && Date.now() < deadline) {
+            id = clientAnnotationIdMap.get(saved.id) || saved.id;
+            if (currentAnnotationsMap.has(id)) break;
+            await new Promise(resolve => setTimeout(resolve, 100));
+          }
+          if (currentAttachment?.key !== attachmentKey) return;
+          if (!currentAnnotationsMap.has(id)) throw new Error('标注保存尚未完成，请稍后重试加入');
+          ids.push(id);
+        }
+        await importCurrentAnnotations(ids);
+      } catch (err) { showToast(`加入理解图失败：${errorMessage(err)}`, 'error'); }
+    }
+
+    async function importCurrentAnnotations(onlyIds = null) {
       if (!canvasReady || !currentAttachment) return;
       const imported = new Set([...canvasSources.values()].map(sourceRef => sourceRef.annotationKey).filter(Boolean));
-      const entries = [...currentAnnotationsMap.entries()].filter(([key]) => !imported.has(key));
+      const entries = [...currentAnnotationsMap.entries()].filter(([key]) => !imported.has(key) && (!onlyIds || onlyIds.includes(key)));
       if (!entries.length) return;
       setCanvasSaveState('导入中…');
       let created = 0;
@@ -6748,6 +6812,11 @@
           await openItem(targetItem, sourceRef);
         }
         if (mobileMedia.matches) setMobilePane('reader');
+        if (currentReaderInstance?.textPages) {
+          const quote = sourceRef.quoteSnapshot || sourceRef.position?.textQuote || '';
+          currentReaderInstance.highlightQuote(pageIndex, quote);
+          return;
+        }
         const reader = document.getElementById('reader-frame').contentWindow?._reader || currentReaderInstance;
         await waitForReaderPageReady(reader, pageIndex, documentController?.signal);
         await Promise.resolve(reader.navigate({ pageIndex }));
@@ -6771,6 +6840,10 @@
 
     async function jumpToAnnotation(annotationId, pageIndex) {
       if (mobileMedia.matches) setMobilePane('reader');
+      if (currentReaderInstance?.textPages) {
+        currentReaderInstance.setSelectedAnnotations([annotationId]);
+        return;
+      }
       const frame = document.getElementById('reader-frame');
       const readerWin = frame.contentWindow;
 
@@ -6926,6 +6999,11 @@
       document.getElementById('btn-canvas-ai-translate').disabled = disabled;
       document.getElementById('btn-canvas-ai-synthesize').disabled = disabled;
       const docBtn = document.getElementById('btn-canvas-ai-document');
+      const reanalyzeBtn = document.getElementById('btn-canvas-reanalyze');
+      if (reanalyzeBtn) {
+        reanalyzeBtn.hidden = ![...canvasNodes.values()].some(n => n.type === 'ai_output' && canvasSources.get(n.sourceRefId)?.attachmentKey === currentAttachment?.key);
+        reanalyzeBtn.disabled = !canvasReady || !currentReaderInstance || !aiConfig.configured || aiDocumentGenerationInFlight;
+      }
       if (docBtn) {
         docBtn.disabled = !currentAttachment || !currentReaderInstance
           || !canvasReady || !aiConfig.configured || aiDocumentGenerationInFlight;
@@ -6993,6 +7071,11 @@
     }
 
     async function locatePdfEvidence(pageIndex, quote, pageDataCache = null) {
+      if (currentReaderInstance?.textPages) {
+        const text = currentReaderInstance.textPages[pageIndex]?.text || '';
+        const start = text.indexOf(quote);
+        return start >= 0 ? { pageIndex, textStart: start, textEnd: start + quote.length, locationKind: 'text-block' } : null;
+      }
       const pdfDocument = currentReaderInstance?._primaryView?._iframeWindow?.PDFViewerApplication?.pdfDocument;
       if (!pdfDocument?.getPageData) return null;
       let pageData = pageDataCache?.get(pageIndex);
@@ -7027,6 +7110,7 @@
     async function showPdfEvidenceHighlight(sourceRef, pageIndex) {
       const quote = cleanAnnotationText(sourceRef?.quoteSnapshot || sourceRef?.position?.textQuote || '');
       if (!quote || !currentReaderInstance) return false;
+      if (currentReaderInstance.textPages) return currentReaderInstance.highlightQuote(pageIndex, quote);
       const position = await locatePdfEvidence(pageIndex, quote);
       if (!position) return false;
       const annotationId = 'ALT-AI-EVIDENCE-HIGHLIGHT';
@@ -7053,6 +7137,7 @@
     }
 
     async function extractCurrentPdfPages() {
+      if (currentReaderInstance?.textPages) { assertFullTextBudget(currentReaderInstance.textPages); return currentReaderInstance.textPages; }
       const pdfDocument = currentReaderInstance?._primaryView?._iframeWindow?.PDFViewerApplication?.pdfDocument;
       const pdfApplication = currentReaderInstance?._primaryView?._iframeWindow?.PDFViewerApplication;
       const pageCount = Number(pdfDocument?.numPages || pdfDocument?.pdfInfo?.numPages
@@ -7078,7 +7163,7 @@
       return pages;
     }
 
-    async function generateCurrentPdfUnderstandingCanvas() {
+    async function generateCurrentPdfUnderstandingCanvas(forceRefresh = false) {
       if (!currentAttachment || !currentItem || !currentReaderInstance || !canvasBoard) {
         return showToast('请先打开一篇 PDF', 'error');
       }
@@ -7104,7 +7189,7 @@
               attachmentKey,
               attachmentVersion
             },
-            checkOnly: true
+            checkOnly: true, forceRefresh
           }
         });
 
@@ -7137,7 +7222,7 @@
                 attachmentKey,
                 attachmentVersion
               },
-              pages
+              pages, forceRefresh
             }
           });
         }
@@ -7757,7 +7842,7 @@
       });
 
       document.getElementById('btn-canvas-add-note').onclick = addCanvasNote;
-      document.getElementById('btn-canvas-import').onclick = importCurrentAnnotations;
+      document.getElementById('btn-canvas-import').onclick = () => importCurrentAnnotations();
       document.getElementById('btn-canvas-quick-import').onclick = openQuickImportModal;
       document.getElementById('btn-inbox-quick-import')?.addEventListener('click', openQuickImportModal);
       document.getElementById('btn-canvas-export-json').onclick = exportCurrentBoard;
@@ -7790,7 +7875,8 @@
         setCanvasSaveState(pressed ? '请选择起点卡片' : '已保存', pressed ? 'muted' : 'ok');
       };
       document.getElementById('btn-canvas-ai').onclick = () => openAiModal();
-      document.getElementById('btn-canvas-ai-document').onclick = generateCurrentPdfUnderstandingCanvas;
+      document.getElementById('btn-canvas-ai-document').onclick = () => generateCurrentPdfUnderstandingCanvas();
+      document.getElementById('btn-canvas-reanalyze').onclick = () => generateCurrentPdfUnderstandingCanvas(true);
       document.getElementById('btn-canvas-ai-organize').onclick = organizeCanvasWithAi;
       document.getElementById('btn-canvas-evidence-annotate').onclick = convertAllEvidenceToAnnotations;
       document.getElementById('btn-canvas-clear').onclick = clearCanvas;
@@ -8170,7 +8256,15 @@
         if (result.data.document && result.data.attachment) {
           await openNativeDocument(result.data.document, result.data.attachment);
         }
-        if (typeof loadCollectionsAndLibrary === 'function') loadCollectionsAndLibrary();
+        await loadNativeLibrary();
+        if (aiConfig.configured && result.data?.document?.id) {
+          try {
+            const totals = await refreshLibraryMetadataWithAi([result.data.document.id]);
+            if (totals.failedBatches) showToast('文件已入库，部分识别失败，可在文库重试', 'info');
+            await loadNativeLibrary();
+          } catch (err) { showToast(`文件已入库，AI 识别待重试：${errorMessage(err)}`, 'info'); }
+        }
+
       } catch (err) {
         showToast(`上传失败: ${err.message}`, 'error');
       }
@@ -8200,7 +8294,7 @@
 
       window.addEventListener('drop', async (e) => {
         if (!e.dataTransfer?.files?.length) return;
-        const pdfFiles = Array.from(e.dataTransfer.files).filter(f => f.name.toLowerCase().endsWith('.pdf') || f.type === 'application/pdf');
+        const pdfFiles = Array.from(e.dataTransfer.files).filter(f => /\.(pdf|txt|epub)$/i.test(f.name));
         if (!pdfFiles.length) return;
         e.preventDefault();
         e.stopPropagation();

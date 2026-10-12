@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { documentMime, documentExtension, extractTextDocument, validateDocumentBytes } from './document-formats.mjs';
+import { DOCUMENT_PROMPT_VERSION, readingNotesPrompt, readingGraphInstructions, clusteredLayout } from './reading-policy.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
@@ -96,7 +97,7 @@ async function streamUploadToFile(req, targetDir, maxBytes = MAX_UPLOAD_BYTES) {
     try {
       originalFilename = decodeURIComponent(String(req.headers['x-filename']));
     } catch {
-      originalFilename = String(req.headers['x-filename']);
+      originalFilename = 'document.pdf';
     }
   }
   let targetWorkspaceId = req.headers['x-target-workspace-id'] || null;
@@ -269,15 +270,14 @@ async function streamUploadToFile(req, targetDir, maxBytes = MAX_UPLOAD_BYTES) {
     const headBuf = Buffer.alloc(5);
     fs.readSync(fd, headBuf, 0, 5, 0);
     fs.closeSync(fd);
-    if (!headBuf.toString('ascii').startsWith('%PDF-')) {
-      cleanup();
-      const err = new Error('File is not a valid PDF (%PDF- header missing)');
-      err.status = 400;
-      throw err;
-    }
+    const stat = fs.statSync(tempFilePath);
+    try {
+      const ext = documentExtension(originalFilename);
+      if (ext !== '.pdf' && stat.size > 20 * 1024 * 1024) throw new TypeError('TXT/EPUB 文件超过 20 MiB 上限');
+      validateDocumentBytes(ext === '.pdf' ? headBuf : fs.readFileSync(tempFilePath), originalFilename);
+    } catch (invalid) { cleanup(); invalid.status = 400; throw invalid; }
 
     const sha256 = hash.digest('hex');
-    const stat = fs.statSync(tempFilePath);
     return {
       tempFilePath,
       sha256,
@@ -456,35 +456,8 @@ function searchableText(value) {
   return String(value || '').normalize('NFKC').replace(/[\s\u00ad]+/g, '').toLocaleLowerCase();
 }
 
-function textShingles(value) {
-  const normalized = searchableText(value);
-  const values = new Set();
-  for (let index = 0; index < normalized.length - 1; index++) values.add(normalized.slice(index, index + 2));
-  return values;
-}
-
-function pageSentences(page) {
-  const pieces = String(page.text || '').match(/[^。！？.!?\n]+[。！？.!?]?/g) || [];
-  return pieces.flatMap(piece => {
-    const text = piece.trim();
-    if (text.length < 8) return [];
-    if (text.length <= 420) return [{ pageNumber: page.pageNumber, text }];
-    const chunks = [];
-    for (let offset = 0; offset < text.length; offset += 320) {
-      const chunk = text.slice(offset, offset + 360).trim();
-      if (chunk.length >= 8) chunks.push({ pageNumber: page.pageNumber, text: chunk });
-    }
-    return chunks;
-  });
-}
-
-// Build the searchable corpus once per document-map request: exact matching
-// needs normalized page text, similarity fallback needs per-sentence shingles.
 function buildEvidenceIndex(pages) {
-  return {
-    normalizedPages: pages.map(page => ({ pageNumber: page.pageNumber, normalized: searchableText(page.text) })),
-    sentences: pages.flatMap(pageSentences).map(sentence => ({ ...sentence, shingles: textShingles(sentence.text) }))
-  };
+  return { normalizedPages: pages.map(page => ({ pageNumber: page.pageNumber, normalized: searchableText(page.text) })) };
 }
 
 function verifiedEvidence(item, evidenceIndex, pageStart, pageEnd, name, context) {
@@ -492,32 +465,15 @@ function verifiedEvidence(item, evidenceIndex, pageStart, pageEnd, name, context
   const needle = searchableText(quote);
   const requestedPage = Number.isInteger(item?.evidencePage) ? item.evidencePage : null;
   if (needle.length >= 8) {
-    const exactPages = evidenceIndex.normalizedPages.filter(page => page.normalized.includes(needle));
+    const exactPages = evidenceIndex.normalizedPages.filter(page => page.pageNumber >= pageStart && page.pageNumber <= pageEnd && page.normalized.includes(needle));
     const matchedPage = exactPages.find(page => page.pageNumber === requestedPage)
       || exactPages.find(page => page.pageNumber >= pageStart && page.pageNumber <= pageEnd)
       || exactPages[0];
     if (matchedPage) return { evidenceQuote: quote, evidencePage: matchedPage.pageNumber };
   }
 
-  const target = textShingles(`${context}\n${quote}`);
-  let best = null;
-  for (const candidate of evidenceIndex.sentences) {
-    let intersection = 0;
-    for (const value of candidate.shingles) if (target.has(value)) intersection++;
-    const similarity = candidate.shingles.size && target.size
-      ? (2 * intersection) / (candidate.shingles.size + target.size) : 0;
-    const inRange = candidate.pageNumber >= pageStart && candidate.pageNumber <= pageEnd;
-    const score = similarity + (inRange ? 0.05 : 0) + (candidate.pageNumber === requestedPage ? 0.03 : 0);
-    if (!best || score > best.score) best = { ...candidate, score, similarity };
-  }
-  // Every card must stay locatable: a fabricated citation (zero lexical
-  // overlap) still anchors to the highest-scoring sentence of its claimed
-  // page range. Only a corpus without usable sentences leaves a card with
-  // no evidence at all.
-  if (!best || (best.similarity <= 0 && best.score <= 0)) {
-    return { evidenceQuote: null, evidencePage: null };
-  }
-  return { evidenceQuote: best.text, evidencePage: best.pageNumber };
+  // A nearby real sentence is not evidence for a failed/fabricated quote.
+  return { evidenceQuote: null, evidencePage: null };
 }
 
 function normalizeDocumentGraph(raw, evidenceIndex, pageCount, fallbackTitle, existingNodeIds = []) {
@@ -533,6 +489,7 @@ function normalizeDocumentGraph(raw, evidenceIndex, pageCount, fallbackTitle, ex
       title, body,
       pageStart,
       pageEnd,
+      modelEvidenceQuote: String(item?.evidenceQuote || '').slice(0, 1200),
       evidenceQuote: evidence.evidenceQuote,
       evidencePage: evidence.evidencePage ?? pageStart
     };
@@ -1222,9 +1179,9 @@ async function runAiClassification({ store, actorKey, targetEntries, workspaces,
     '  "entry-id-1": {"cleanTitle": "【机构】规范中文标题（2025）", "institution": "机构", "reportTitle": "中文主标题", "subtitle": "", "year": "2025", "summary": "一句话中文摘要"}',
     '}}',
     '【规则】',
-    '1. confidence 为 0.0 到 1.0 之间的浮点数。若不符合主题或命中排除规则，置信度应低于 0.3；',
+    '1. 优先匹配已有主题，符合核心内容才给 confidence >=0.7；命中排除规则不推荐；无法合理覆盖可返回空数组，禁止硬塞；',
     '2. reason 简述推荐或不推荐的核心理由（30字以内）；',
-    '3. 同一篇文献可同时推荐给多个符合的主题（多对多归类）；',
+    '3. 同一篇文献必须推荐给所有实质相关的已有主题（多对多归类），不限定仅一个；不要因弱关键词关联推荐；',
     '4. 必须在同一次返回中为每篇文献生成 documentMetadata；cleanTitle 必须是准确、自然、可直接展示的简体中文名，保留真实可辨识的机构与年份；',
     '5. 若文献附带「正文节选」，标题/机构/年份的识别必须优先依据正文内容，元数据仅作辅助；',
     '6. 机构或年份无法确定时：cleanTitle 直接省略对应装饰，institution 与 year 字段留空字符串。严禁编造「未注明机构」「未知年份」之类的占位词。'
@@ -1271,20 +1228,19 @@ async function runAiClassification({ store, actorKey, targetEntries, workspaces,
   return { classifications, documentMetas };
 }
 
-const MAX_SYSTEM_TOPICS = 4;
+const DEFAULT_TOPIC_BUDGET = 1;
 
 // Shared M4 AI topic-taxonomy generation over classification-shaped entries.
-async function runAiTopicGeneration({ store, actorKey, targetEntries, maxTopics = MAX_SYSTEM_TOPICS, privateConfig, aiCompletion }) {
+async function runAiTopicGeneration({ store, actorKey, targetEntries, maxTopics = DEFAULT_TOPIC_BUDGET, privateConfig, aiCompletion }) {
   const existingWorkspaces = store.listWorkspaces(actorKey);
-  const effectiveMaxTopics = Math.max(2, Math.min(MAX_SYSTEM_TOPICS, maxTopics));
   const systemPrompt = [
     '你是资深学术研究与产业分析专家。请根据给定的文献列表，自动规划一套极度精炼、高层次的研究大类体系（Topic Taxonomy）。',
-    '【分类绝对精炼原则】',
-    `1. 严禁细分与碎片化：全知识库最多只允许提炼 3 到 ${effectiveMaxTopics} 个高层次、宽泛涵盖的宏观大类（例如：「全球宏观与市场策略」、「行业深度与产业投资」、「量化投资与资产配置」）。严禁出现微观、狭窄的碎片化主题；`,
-    '2. 严禁创建语义相近的平行主题：若文献与现有候选主题有任何交集或相关性，必须无条件优先合并归入已有主题！例如绝不允许同时存在“指数规则”与“指数政策”，必须合并归入单一宏观大类；',
-    '3. 只有当候选文献属于此前完全空白的全新顶级宏观领域时才允许补充新建主题；全库主题总数绝对不得超过 4 个；',
-    '4. 为每个主题提供：`name`（15字以内的凝练中文名称）、`researchQuestion`（核心研究问题）、`inclusionRules`（清晰的纳入规则）、`exclusionRules`（排除规则）；',
-    '5. 必须为每篇待分类文献推荐最契合的大类主题（强力归纳）：每篇文献都必须至少给出一条主题建议并给出与其契合度相称的置信度（契合即 0.7 以上），严禁因"不完全契合"而拒收或压低置信度；',
+    '【已有主题优先与多主题原则】',
+    '1. 必须首先尝试全部现有主题，只要其范围合理覆盖就复用；禁止换个近义名新增主题。',
+    '2. 每篇可归入多个实质相关主题，confidence >=0.7 表示核心内容匹配；弱相关不推荐，不强制归入最高分。',
+    '3. topics 默认返回空数组；仅当现有主题完全无法合理覆盖该文献时，才提出必要的新主题。',
+    '4. 每个新主题必须提供 necessityReason，具体说明为何现有主题均不适用；一次最多新建一个。',
+    '5. 新主题须有实际文献以 >=0.7 置信度归入，不为了凑数创建；不人为限定用户主题总数。',
     '6. 在同一次返回中为每篇文献生成规范中文名与元数据，不要要求第二次模型调用；',
     '7. 规范中文名必须自然可展示：若文献附带「正文节选」，标题/机构/年份的识别优先依据正文内容；无法确定时直接省略装饰并留空字段，严禁编造「未注明机构」「未知年份」等占位词；',
     '8. 只输出合法的 JSON 对象，严禁 Markdown 代码块。',
@@ -1292,7 +1248,7 @@ async function runAiTopicGeneration({ store, actorKey, targetEntries, maxTopics 
     '{',
     '  "topics": [',
     '    {',
-    '      "name": "全球宏观与市场策略",',
+    '      "name": "全球宏观与市场策略", "necessityReason": "说明现有主题为何无法合理覆盖这些文献",',
     '      "researchQuestion": "全球宏观经济波动、利率汇率周期及大类资产价格形成机制",',
     '      "inclusionRules": "宏观经济展望、央行货币政策、流动性与大类资产配置研报",',
     '      "exclusionRules": "纯个股微观财报"',
@@ -1311,7 +1267,7 @@ async function runAiTopicGeneration({ store, actorKey, targetEntries, maxTopics 
 
   const existingContext = existingWorkspaces.length
     ? existingWorkspaces.map((w, idx) => `[已有主题 ${idx + 1}] 名称: ${w.name}\n研究问题: ${w.researchQuestion || '无'}\n纳入规则: ${w.inclusionRules || '无'}`).join('\n\n')
-    : '（当前尚无已有主题）';
+    : '（当前尚无已有主题，可新建一个覆盖当前文献的新主题）';
 
   const docContexts = targetEntries.map(e => `[文献] ID: ${e.id}\n标题: ${e.title}\n作者: ${(e.creators || []).map(c => typeof c === 'string' ? c : (c.name || `${c.firstName || ''} ${c.lastName || ''}`)).join(', ')}\n年份: ${e.year || '未知'}\n摘要: ${(e.abstractNote || '').slice(0, 500)}\n标签: ${(e.tags || []).join(', ')}${e.textSnippet ? `\n正文节选（PDF 前几页）:\n${e.textSnippet}` : ''}`).join('\n\n');
 
@@ -1334,15 +1290,23 @@ async function runAiTopicGeneration({ store, actorKey, targetEntries, maxTopics 
 
   const createdWorkspaces = [];
   const allCurrentWorkspaces = [...existingWorkspaces];
-  // 「我的研究主题」是系统默认主题，不占用宏观大类名额。
-  const macroTopics = () => allCurrentWorkspaces.filter(w => w.name !== '我的研究主题');
 
   for (const topic of rawTopics) {
-    if (macroTopics().length >= MAX_SYSTEM_TOPICS) break;
+    if (createdWorkspaces.length >= 1) break;
     const rawName = String(topic?.name || '').trim().slice(0, 100);
     if (!rawName) continue;
     const existing = allCurrentWorkspaces.find(w => w.name.toLowerCase() === rawName.toLowerCase());
     if (existing) continue;
+    const necessityReason = String(topic?.necessityReason || '').trim();
+    if (existingWorkspaces.some(w => w.name !== '我的研究主题') && necessityReason.length < 10) continue;
+    const hasQualifiedDocument = targetEntries.some(entry => {
+      const list = rawClassifications[entry.id] || [];
+      if (!Array.isArray(list)) return false;
+      const covered = list.some(c => Number(c.confidence) >= 0.7 && existingWorkspaces.some(w =>
+        w.name !== '我的研究主题' && (w.id === c.workspaceId || w.name.toLowerCase() === String(c.topicName || c.workspaceName || '').trim().toLowerCase())));
+      return !covered && list.some(c => String(c.topicName || c.workspaceName || '').trim().toLowerCase() === rawName.toLowerCase() && Number(c.confidence) >= 0.7);
+    });
+    if (!hasQualifiedDocument) continue;
 
     const ws = store.createWorkspace(actorKey, {
       name: rawName,
@@ -2064,7 +2028,7 @@ export function createCanvasHandler(store, {
         let importResult;
         let newlyCreatedBlobPath = null;
         try {
-          const targetBlobPath = store.resolveBlobPath(sha256, '.pdf');
+          const targetBlobPath = store.resolveBlobPath(sha256, documentExtension(originalFilename));
           const relativePath = path.relative(store.getBlobStorageDir(), targetBlobPath);
 
           // Atomic check and move file only if blob doesn't already exist on disk
@@ -2081,7 +2045,7 @@ export function createCanvasHandler(store, {
             sha256,
             relativePath,
             sizeBytes,
-            mimeType: 'application/pdf',
+            mimeType: documentMime(originalFilename),
             originalFilename,
             targetWorkspaceId,
             forceNew
@@ -2738,99 +2702,8 @@ export function createCanvasHandler(store, {
         return;
       }
 
-      // Product rule (user 2026-09): recognition is SIMPLIFIED — AI reads PDF
-      // page-1 text and extracts ONLY title, authors, and institution. No
-      // topics, no summary, no confidence scores. The output feeds document
-      // creation (enrollment into 文库).
-      function extractPdfFirstPageText(absPath) {
-        try {
-          return execFileSync('pdftotext', ['-f', '1', '-l', '1', absPath, '-'], { timeout: 15000, encoding: 'utf8' }).replace(/\s+/g, ' ').trim().slice(0, 6000);
-        } catch { return ''; }
-      }
-
-      async function runAiSimpleRecognition(store, actorKey, items, privateConfig, aiCompletion) {
-        const systemPrompt = [
-          '你是研报元数据提取助手。从给定的 PDF 首页文本中提取以下信息：',
-          '1. title：报告的准确完整标题（保留原文语言）',
-          '2. authors：全部作者姓名数组（如 ["张三", "Li, David"]）',
-          '3. institution：发布机构/组织名称',
-          '只输出一个合法的 JSON 对象。',
-          'JSON 格式：{"title": "...", "authors": ["..."], "institution": "..."}',
-          '如果某个字段在文本中无法找到，返回空字符串或空数组。严禁编造。'
-        ].join('\n');
-
-        const results = [];
-        for (const item of items) {
-          const sf = store.getSourceFile(actorKey, item.sourceFileId);
-          if (!sf) { results.push({ sourceFileId: item.sourceFileId, error: 'not found' }); continue; }
-          if (sf.documentId) {
-            results.push({ sourceFileId: item.sourceFileId, documentId: sf.documentId, skipped: true, reason: 'already enrolled' });
-            continue;
-          }
-          // Get the absolute file path for text extraction
-          const root = store.db.prepare('SELECT absolute_path FROM library_roots WHERE id = ? AND deleted_at IS NULL').get(sf.rootId);
-          const absPath = root ? path.join(root.absolute_path, sf.relativePath) : null;
-          const text = item.textSnippet || (absPath ? extractPdfFirstPageText(absPath) : '');
-          const userContent = `标题提示（文件名）: ${sf.filename}\n\nPDF 首页文本:\n${text || '（未提供文本）'}`;
-          const aiResponse = await aiCompletion({
-            messages: [
-              { role: 'system', content: systemPrompt },
-              { role: 'user', content: userContent }
-            ],
-            temperature: 0.1,
-            maxTokens: 2000
-          }, privateConfig);
-
-          let parsed;
-          try {
-            parsed = JSON.parse(aiResponse.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, ''));
-          } catch {
-            parsed = {};
-          }
-          const title = String(parsed.title || sf.filename.replace(/\.pdf$/i, '')).trim().slice(0, 500) || sf.filename;
-          const authors = Array.isArray(parsed.authors) ? parsed.authors.map(a => String(a).trim()).filter(Boolean).slice(0, 100) : [];
-          const institution = String(parsed.institution || '').trim().slice(0, 200);
-
-          const enrolled = store.enrollExistingSourceFile(actorKey, item.sourceFileId);
-          if (enrolled.duplicate) {
-            results.push({ sourceFileId: item.sourceFileId, documentId: enrolled.document.id, skipped: true, reason: 'duplicate' });
-            continue;
-          }
-          store.db.prepare('UPDATE documents SET title = ?, updated_at = ? WHERE id = ?').run(title, new Date().toISOString(), enrolled.document.id);
-          for (const [idx, name] of authors.entries()) {
-            store.db.prepare('INSERT INTO document_creators (id, document_id, position, creator_type, first_name, last_name, name) VALUES (?, ?, ?, ?, ?, ?, ?)')
-              .run(crypto.randomUUID(), enrolled.document.id, idx, 'author', '', '', name);
-          }
-          if (institution) {
-            const now = new Date().toISOString();
-            store.db.prepare(`
-              INSERT INTO document_metas (id, owner_key, library_type, library_id, item_key, attachment_key, attachment_version, clean_title, institution, source, created_at, updated_at)
-              VALUES (?, ?, 'native', 'local', ?, ?, 1, ?, ?, 'ai_recognition', ?, ?)
-            `).run(crypto.randomUUID(), actorKey, enrolled.document.id, enrolled.attachment.id, title, institution, now, now);
-          }
-          results.push({ sourceFileId: item.sourceFileId, documentId: enrolled.document.id, title, authors, institution, skipped: false });
-        }
-        return results;
-      }
-
-      match = /^\/canvas\/native\/source-files\/recognize$/.exec(pathname);
-      if (match && method === 'POST') {
-        const body = await readJson(req, MAX_DOCUMENT_BODY_BYTES);
-        if (!body || typeof body !== 'object' || !Array.isArray(body.items)) {
-          throw new TypeError('body must contain an items array');
-        }
-        if (body.items.length > 50) throw new TypeError('items must contain at most 50 entries');
-        const privateConfig = store.getAiSettings(actor.actorKey);
-        if (!aiPublicConfig(privateConfig).configured) {
-          error(res, 503, 'ai_not_configured', 'AI 模型尚未配置');
-          return;
-        }
-        try {
-          const data = await runAiSimpleRecognition(store, actor.actorKey, body.items, privateConfig, aiCompletion);
-          json(res, 200, { data });
-        } catch (aiErr) {
-          error(res, aiErr?.name === 'AbortError' ? 504 : 502, 'ai_gateway_error', aiErr.message);
-        }
+      if (pathname === '/canvas/native/source-files/recognize' && method === 'POST') {
+        error(res, 410, 'feature_retired', '请先入库，再使用统一的文库识别与归类流程');
         return;
       }
 
@@ -2964,6 +2837,26 @@ export function createCanvasHandler(store, {
 
       // --- Native Attachment File Streaming with HTTP Range ---
       // Unified across managed blobs (M1) and library-root source files (M4).
+      match = /^\/canvas\/native\/attachments\/([0-9a-f-]+)\/text$/.exec(pathname);
+      if (match && method === 'GET') {
+        const content = store.getAttachmentContent(actor.actorKey, match[1]);
+        if (!content) throw new CanvasNotFoundError('attachment');
+        let opened;
+        try {
+          let bytes;
+          if (content.kind === 'source_file') {
+            opened = openFileInsideRoot(content.sourceFile.rootAbsolutePath, content.sourceFile.relativePath);
+            if (opened.stat.size > 20 * 1024 * 1024) throw new TypeError('文本文件超过 20 MiB 上限');
+            bytes = fs.readFileSync(opened.fd);
+          } else {
+            if (fs.statSync(content.filePath).size > 20 * 1024 * 1024) throw new TypeError('文本文件超过 20 MiB 上限');
+            bytes = fs.readFileSync(content.filePath);
+          }
+          json(res, 200, { data: extractTextDocument(bytes, content.fileName) });
+        } finally { if (opened) fs.closeSync(opened.fd); }
+        return;
+      }
+
       match = /^\/canvas\/native\/attachments\/([0-9a-f-]+)\/file$/.exec(pathname);
       if (match && ['GET', 'HEAD'].includes(method)) {
         const attachmentId = match[1];
@@ -3011,6 +2904,9 @@ export function createCanvasHandler(store, {
           throw err;
         }
 
+        // Also release handles on non-streaming responses such as invalid Range.
+        res.once('finish', () => readContext.release());
+        res.once('close', () => readContext.release());
         try {
           const fileSize = readContext.fileSize;
           const contentEtag = `W/"${content.sha256}"`;
@@ -3037,6 +2933,8 @@ export function createCanvasHandler(store, {
 
           const streamRange = (start, end) => {
             const stream = readContext.createStream(start, end);
+            stream.once('end', () => readContext.release());
+            stream.once('error', err => { readContext.release(); res.destroy?.(err); });
             stream.on('close', () => readContext.release());
             res.on('close', () => readContext.release());
             return stream;
@@ -3319,7 +3217,7 @@ export function createCanvasHandler(store, {
           const data = await runAiClassification({ store, actorKey: actor.actorKey, targetEntries, workspaces, privateConfig, aiCompletion });
           json(res, 200, { data });
         } catch (aiErr) {
-          error(res, aiErr?.name === 'AbortError' ? 504 : 502, 'ai_gateway_error', aiErr.message);
+          error(res, aiErr.status || (aiErr?.name === 'AbortError' ? 504 : 502), 'ai_gateway_error', aiErr.message);
         }
         return;
       }
@@ -3350,12 +3248,12 @@ export function createCanvasHandler(store, {
           error(res, 503, 'ai_not_configured', 'AI 模型尚未配置');
           return;
         }
-        const maxTopics = typeof body?.maxTopics === 'number' ? Math.max(2, Math.min(MAX_SYSTEM_TOPICS, Math.floor(body.maxTopics))) : MAX_SYSTEM_TOPICS;
+        const maxTopics = DEFAULT_TOPIC_BUDGET;
         try {
           const data = await runAiTopicGeneration({ store, actorKey: actor.actorKey, targetEntries, maxTopics, privateConfig, aiCompletion });
           json(res, 200, { data });
         } catch (aiErr) {
-          error(res, aiErr?.name === 'AbortError' ? 504 : 502, 'ai_gateway_error', aiErr.message);
+          error(res, aiErr.status || (aiErr?.name === 'AbortError' ? 504 : 502), 'ai_gateway_error', aiErr.message);
         }
         return;
       }
@@ -3581,12 +3479,12 @@ export function createCanvasHandler(store, {
         const prompt = `你是专业的投研与研报文献分析助手。请分析以下报告文本（前1-2页摘要/封面/导言）和文件名，提取并输出规范易读的中文研报元数据。
 
 要求：
-1. 机构来源 (institution)：提取发布机构（如中金公司、华泰证券、麦肯锡、高盛、清华大学等；无法确认则写"未知机构"或作者）。
+1. 机构来源 (institution)：提取发布机构（如中金公司、华泰证券、麦肯锡、高盛、清华大学等；无法确认则留空，不编造或使用未知机构占位）。
 2. 报告主标题 (reportTitle)：提取核心中文研报主标题。如果原标题是无意义文件名或含糊名称（如"周报"、"专题研究"），请根据正文提取精炼准确的业务研报名称。
 3. 副标题 (subtitle)：若有细分方向或具体副标题则提取，否则留空字符串 ""。
 4. 年份 (year)：提取发布年份（如 2024；无法确认则留空字符串 ""）。
 5. 规范中文标题 (cleanTitle)：组合成【机构】主标题：副标题 (年份) 格式。例如：【中金公司】人形机器人产业链深度：从核心零部件到整机制造（2024）。
-6. 一句话摘要 (summary)：用一句话概括本篇报告的核心结论或论述主题（50-100字）。
+6. 一句话摘要 (summary)：只描述首页可以确认的论述主题，不把首页推测当作全文核心结论。
 
 必须严格返回合法 JSON 对象，格式如下：
 {
@@ -3595,7 +3493,7 @@ export function createCanvasHandler(store, {
   "subtitle": "副标题",
   "year": "2024",
   "cleanTitle": "【机构名】报告主标题：副标题（2024）",
-  "summary": "一句话核心结论"
+  "summary": "文档主题（仅首页可确认的内容）"
 }
 
 参考输入：
@@ -3665,6 +3563,10 @@ ${textSnippet.slice(0, 8000) || '无'}`;
         if (!documentSource?.attachmentKey || !documentSource?.itemKey) {
           throw new TypeError('document itemKey and attachmentKey are required');
         }
+        if (documentSource.libraryType === 'native') {
+          const attachment = store.getAttachment(actor.actorKey, documentSource.attachmentKey);
+          documentSource.locationKind = attachment?.mimeType && attachment.mimeType !== 'application/pdf' ? 'text-block' : 'pdf-page';
+        }
         const title = string(body.title || 'PDF 全文理解', 'title', { min: 1, max: 500 });
         const attachmentVersion = documentSource.attachmentVersion ?? documentSource.annotationVersion ?? (Number.isFinite(body.attachmentVersion) ? body.attachmentVersion : null);
 
@@ -3675,8 +3577,8 @@ ${textSnippet.slice(0, 8000) || '无'}`;
           return;
         }
 
-        const promptVersion = 'altcanvas-document-map-v2';
-        const cachedAnalysis = store.getDocumentAnalysis(actor.actorKey, {
+        const promptVersion = DOCUMENT_PROMPT_VERSION;
+        const cachedAnalysis = body.forceRefresh ? null : store.getDocumentAnalysis(actor.actorKey, {
           libraryType: documentSource.libraryType,
           libraryId: documentSource.libraryId,
           attachmentKey: documentSource.attachmentKey,
@@ -3701,7 +3603,7 @@ ${textSnippet.slice(0, 8000) || '无'}`;
             id: n.id,
             type: n.type,
             title: n.title,
-            body: (n.body || '').slice(0, 300)
+            body: (n.body || '').slice(0, 1500)
           }));
         const existingNodeIds = existingNodes.map(n => n.id);
 
@@ -3743,14 +3645,11 @@ ${textSnippet.slice(0, 8000) || '无'}`;
             const chunkSummaries = await mapWithConcurrency(chunks, 3, (chunk, index) => aiCompletion({
               messages: [
                 { role: 'system', content: [
-                  '你是学术论文阅读助手。完整阅读所给页段并做结构化中间笔记。',
-                  '保留章节结构、关键概念定义、主要论点、方法、数据/证据、结论、限制，以及准确页码。',
-                  '每项重要发现都附带一段来自所给正文的逐字原文短引用（不要改写）及其页码，供后续核验。',
-                  '不要写泛泛评价，不要遗漏相互矛盾或限定性的内容。这是内部合成材料。'
+                  readingNotesPrompt
                 ].join('\n') },
                 { role: 'user', content: `文档《${title}》第 ${index + 1}/${chunks.length} 个页段：\n\n${chunk}` }
               ],
-              temperature: 0.2
+              temperature: 0.2, maxTokens: 4000
             }, privateConfig));
 
             // Stage 1: Pure document synthesis (topic-agnostic base graph)
@@ -3767,18 +3666,12 @@ ${textSnippet.slice(0, 8000) || '无'}`;
                   '"relations":[{"from":"section-0","to":"concept-0","relation":"supports","label":"使用"}]}',
                   '节点 ID 必须严格使用数组下标形成 section-N、concept-N、claim-N，或 overview。',
                   'relation 只能是 related/supports/contradicts/causes/cites/extends/same_method/context_differs/custom。',
-                  '生成 3–10 个 sections、3–10 个 concepts、3–10 个 claims；页码必须来自笔记。',
-                  'overview 必须按“研究问题 / 方法 / 核心发现 / 贡献 / 限制”五项组织，能独立帮助读者理解全文。',
-                  '每个 section.body 必须说明本节作用、关键内容及其在全文论证中的位置。',
-                  '每个 concept.body 必须给出文中定义、作用和使用语境，不能只写名词解释。',
-                  '每个 claim.body 必须同时写清论点、对应证据或方法、适用条件/限制。',
-                  '每张卡片只覆盖其 pageStart–pageEnd 页内有依据的内容；不要把全文页码填给局部卡片。',
-                  '每个 body 的第一句必须是不超过 40 字的核心结论句，直接陈述要点本身（不要“本节介绍了”之类的铺垫），供画板紧凑视图单句展示；其后再展开细节。',
+                  readingGraphInstructions,
                   '每个 evidenceQuote 必须逐字复制自对应 evidencePage 的原文，不得翻译、改写或自行补全。'
                 ].join('\n') },
                 { role: 'user', content: `文档标题：${title}\n总页数：${body.pages.length}\n\n${chunkSummaries.map((summary, index) => `【页段 ${index + 1}】\n${summary}`).join('\n\n')}` }
               ],
-              temperature: 0.25
+              temperature: 0.25, maxTokens: 12000
             }, privateConfig);
 
             baseGraph = normalizeDocumentGraph(parseAiJson(synthesis), buildEvidenceIndex(pages), body.pages.length, title);
@@ -3809,9 +3702,9 @@ ${textSnippet.slice(0, 8000) || '无'}`;
         if (existingNodes.length > 0) {
           try {
             const cardsBrief = [
-              ...(baseGraph.sections || []).map(s => `[${s.id}] (章节) ${s.title}: ${s.body.slice(0, 100)}`),
-              ...(baseGraph.concepts || []).map(c => `[${c.id}] (概念) ${c.title}: ${c.body.slice(0, 100)}`),
-              ...(baseGraph.claims || []).map(cl => `[${cl.id}] (论点) ${cl.title}: ${cl.body.slice(0, 100)}`)
+              ...(baseGraph.sections || []).map(s => `[${s.id}] (章节) ${s.title}: ${s.body.slice(0, 1500)}`),
+              ...(baseGraph.concepts || []).map(c => `[${c.id}] (概念) ${c.title}: ${c.body.slice(0, 1500)}`),
+              ...(baseGraph.claims || []).map(cl => `[${cl.id}] (论点) ${cl.title}: ${cl.body.slice(0, 1500)}`)
             ].join('\n');
 
             const boardContextText = existingNodes.map(n => `- [${n.id}] (${n.type}) ${n.title}: ${n.body}`).join('\n');
@@ -3831,7 +3724,7 @@ ${textSnippet.slice(0, 8000) || '无'}`;
                 ].join('\n') },
                 { role: 'user', content: `新文献《${title}》概览：${baseGraph.overview}\n\n新文献卡片：\n${cardsBrief}\n\n当前画板已有卡片：\n${boardContextText}` }
               ],
-              temperature: 0.2
+              temperature: 0.2, maxTokens: 6000
             }, privateConfig);
 
             const parsedBoardRelations = parseAiJsonArray(boardRelationAiRes);
@@ -3887,7 +3780,7 @@ ${textSnippet.slice(0, 8000) || '无'}`;
           return;
         }
 
-        const cardsBrief = activeNodes.map(n => `- [${n.id}] (${n.type}) ${n.title}: ${(n.body || '').slice(0, 150)}`).join('\n');
+        const cardsBrief = activeNodes.map(n => `- [${n.id}] (${n.type}) ${n.title}: ${(n.body || '').slice(0, 2000)}`).join('\n');
         const edgesBrief = (snapshot.edges || []).map(e => `${e.sourceNodeId} -(${e.relation}: ${e.label})-> ${e.targetNodeId}`).join('\n');
 
         try {
@@ -3897,11 +3790,11 @@ ${textSnippet.slice(0, 8000) || '无'}`;
                 '你是学术研究导师与知识图谱整理专家。请对当前画板的全部卡片进行深度梳理与结构重组。',
                 '任务要求：',
                 '1. 提炼全景对比综述（必须包含：核心结论、主要共识、关键分歧与争鸣、重要延伸线索）；',
-                '2. 空间排版规划：将卡片按学术主题聚类为 2~4 个主题簇（如：背景与问题、核心方法与论据、分歧争鸣、延伸应用），计算每张卡片的新 (x, y) 坐标，使同簇紧密聚合排列、簇间留出 120px 间距，消除重叠。',
+                '2. 空间排版规划：将卡片按学术主题聚类为 2~4 个主题簇（如：背景与问题、核心方法与论据、分歧争鸣、延伸应用），只返回 clusters，每组含 name 与 nodeIds；每张卡片仅归入一组，不生成坐标。',
                 '只输出一个 JSON 对象，不要 Markdown 代码围栏。',
                 'JSON 格式：',
                 '{"summaryTitle":"全景梳理与多篇对比综述","summaryBody":"【核心结论】...\\n\\n【共识点】\\n1. ...\\n\\n【主要分歧】\\n1. ...\\n\\n【延伸视角】\\n1. ...",',
-                '"layout":[{"id":"<卡片ID>","x":100,"y":200}]}'
+                '"clusters":[{"name":"问题与论证","nodeIds":["<卡片ID>"]}]}'
               ].join('\n') },
               { role: 'user', content: `当前画板卡片（共 ${activeNodes.length} 张）：\n${cardsBrief}\n\n当前卡片间关联：\n${edgesBrief || '无'}` }
             ],
@@ -3909,12 +3802,16 @@ ${textSnippet.slice(0, 8000) || '无'}`;
           }, privateConfig);
 
           const parsed = parseAiJson(organizeAiRes);
-          const layout = Array.isArray(parsed?.layout) ? parsed.layout : [];
+          const layout = clusteredLayout(activeNodes, Array.isArray(parsed?.clusters) ? parsed.clusters : []);
           const summaryBody = string(parsed?.summaryBody || '', 'summaryBody', { max: 10_000 });
           const summaryTitle = string(parsed?.summaryTitle || '全景梳理与对比综述', 'summaryTitle', { max: 200 });
 
           const timestamp = new Date().toISOString();
           store.transaction(() => {
+            const fresh = store.snapshot(actor.actorKey, boardId).nodes;
+            if (fresh.length !== activeNodes.length || activeNodes.some(n => fresh.find(f => f.id === n.id)?.version !== n.version)) {
+              const conflict = new Error('整理期间画板已修改，请重试'); conflict.status = 409; throw conflict;
+            }
             for (const item of layout) {
               const node = activeNodes.find(n => n.id === item?.id);
               if (!node) continue;
@@ -3957,7 +3854,7 @@ ${textSnippet.slice(0, 8000) || '无'}`;
           json(res, 200, { data: { snapshot: finalSnapshot, summaryTitle } });
           return;
         } catch (aiErr) {
-          error(res, aiErr?.name === 'AbortError' ? 504 : 502, 'ai_gateway_error', aiErr.message);
+          error(res, aiErr.status || (aiErr?.name === 'AbortError' ? 504 : 502), 'ai_gateway_error', aiErr.message);
           return;
         }
       }
@@ -4131,7 +4028,7 @@ ${textSnippet.slice(0, 8000) || '无'}`;
 
           json(res, 200, { data: { relations } });
         } catch (aiErr) {
-          error(res, aiErr?.name === 'AbortError' ? 504 : 502, 'ai_gateway_error', aiErr.message);
+          error(res, aiErr.status || (aiErr?.name === 'AbortError' ? 504 : 502), 'ai_gateway_error', aiErr.message);
         }
         return;
       }

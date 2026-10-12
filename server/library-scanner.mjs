@@ -1,3 +1,4 @@
+import { isDocumentFile, documentMime, documentExtension } from './document-formats.mjs';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -46,7 +47,7 @@ export function* iteratePdfEntries(rootPath, subDir = '') {
         yield* visit(relativePath);
         continue;
       }
-      if (!dirent.isFile() || !dirent.name.toLowerCase().endsWith('.pdf')) continue;
+      if (!dirent.isFile() || !isDocumentFile(dirent.name)) continue;
       let stat = null;
       try {
         stat = fs.statSync(path.join(rootReal, relativePath));
@@ -90,7 +91,7 @@ function sleep(ms) {
 // Enrolls a freshly discovered unique PDF into the library: source_files row,
 // native document and a source_file-backed attachment, all in one transaction.
 export function enrollScannedFile(store, actorKey, rootId, entry) {
-  const title = entry.filename.replace(/\.pdf$/i, '').trim() || '未命名文献';
+  const title = entry.filename.replace(/\.(pdf|txt|epub)$/i, '').trim() || '未命名文献';
   return store.transaction(() => {
     const document = store.createDocument(actorKey, { title });
     const sourceFile = store.createSourceFile(actorKey, rootId, {
@@ -105,7 +106,7 @@ export function enrollScannedFile(store, actorKey, rootId, entry) {
       sourceFileId: sourceFile.id,
       originalFilename: entry.filename,
       title,
-      sizeBytes: entry.sizeBytes
+      sizeBytes: entry.sizeBytes, mimeType: documentMime(entry.filename)
     });
     store.updateSourceFile(actorKey, sourceFile.id, {
       documentId: document.id,
@@ -483,7 +484,7 @@ async function reconcilePermanentDelete(store, op) {
   }
   const root = store.db.prepare('SELECT * FROM library_roots WHERE id = ? AND deleted_at IS NULL').get(row.root_id);
   if (root) {
-    const trashRel = `.altcanvas-trash/${row.id}.pdf`;
+    const trashRel = `.altcanvas-trash/${row.id}${documentExtension(row.filename)}`;
     const probe = safeProbeInsideRoot(root.absolute_path, trashRel);
     if (probe.reason === 'symlink' || probe.reason === 'escape' || probe.reason === 'invalid_path') {
       store.failFileOperation(op.id, 'unsafe_path');

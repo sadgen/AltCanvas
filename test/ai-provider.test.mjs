@@ -83,4 +83,11 @@ try {
   }
 }
 
-console.log('✅ Server-only credentials and AI endpoint SSRF boundaries passed');
+const truncationTestFetch = globalThis.fetch;
+try {
+  globalThis.fetch = async () => new Response(JSON.stringify({ choices: [{ finish_reason: 'length', message: { content: '{"partial":' } }] }), { status: 200 });
+  await assert.rejects(() => requestAiCompletion({ messages: [{ role: 'user', content: 'test' }], maxTokens: 10 }, {
+    baseUrl: 'https://8.8.8.8/v1', model: 'test-model', apiKey: ''
+  }), /长度上限/, 'truncated model output must not be accepted as a complete analysis');
+} finally { globalThis.fetch = truncationTestFetch; }
+console.log('✅ Server-only credentials, endpoint SSRF boundaries and truncation handling passed');
