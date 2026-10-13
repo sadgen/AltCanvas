@@ -3166,7 +3166,7 @@ export class CanvasStore {
     const createdNodeIds = [];
     const createdEdgeIds = [];
     const nodes = [
-      { key: 'overview', kind: 'overview', title: `全文概览 · ${graph.title || document.title || 'PDF 全文理解'}`, body: graph.overview,
+      { key: 'overview', kind: 'overview', readingGuide: graph.guide, title: `全文概览 · ${graph.title || document.title || 'PDF 全文理解'}`, body: graph.overview,
         pageStart: 1, pageEnd: document.pageCount, evidenceQuote: graph.evidenceQuote, evidencePage: graph.evidencePage },
       ...graph.sections.map((item, index) => ({ ...item, title: `章节 · ${item.title}`, key: `section-${index}`, kind: 'section' })),
       ...graph.concepts.map((item, index) => ({ ...item, title: `概念 · ${item.title}`, key: `concept-${index}`, kind: 'concept' })),
@@ -3357,6 +3357,7 @@ export class CanvasStore {
                        pageStart: item.pageStart,
                        pageEnd: item.pageEnd,
                        textQuote: item.evidenceQuote,
+              readingKind: item.kind, readingGuide: item.readingGuide || null,
               locationKind: document.locationKind || 'pdf-page',
               evidenceStatus: item.evidenceQuote ? 'located' : 'unverified',
               modelEvidenceQuote: item.modelEvidenceQuote || null
@@ -3382,6 +3383,7 @@ export class CanvasStore {
                 pageStart: item.pageStart,
                 pageEnd: item.pageEnd,
                 textQuote: item.evidenceQuote,
+              readingKind: item.kind, readingGuide: item.readingGuide || null,
               locationKind: document.locationKind || 'pdf-page',
               evidenceStatus: item.evidenceQuote ? 'located' : 'unverified',
               modelEvidenceQuote: item.modelEvidenceQuote || null
@@ -3503,6 +3505,7 @@ export class CanvasStore {
               pageStart: item.pageStart,
               pageEnd: item.pageEnd,
               textQuote: item.evidenceQuote,
+              readingKind: item.kind, readingGuide: item.readingGuide || null,
               locationKind: document.locationKind || 'pdf-page',
               evidenceStatus: item.evidenceQuote ? 'located' : 'unverified',
               modelEvidenceQuote: item.modelEvidenceQuote || null

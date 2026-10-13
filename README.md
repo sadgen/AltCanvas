@@ -10,6 +10,8 @@ archived implementation is preserved on the git tag
 
 ## Highlights & Features
 
+- **Structured reading guide (v0.4)** — The right pane follows the opened article and shows its question, takeaway, reasoning, evidence and limits in reading order. Explanations expand inline. Separate tabs keep annotations and actual cross-document comparisons accessible; the existing canvas remains available through the advanced view. Old analyses render without migration; reanalysis adds the versioned structured fields.
+
 - **Reading workflow (v0.3)** — PDF, TXT and EPUB can enter the same native library. TXT/EPUB use a safe plain-text chapter view with persistent annotations and text-block navigation. Metadata recognition uses the opening pages; classification reuses existing topics and supports multiple topics per document. Necessary new topics require an explanation and a matching document.
 - **Trustworthy document coverage** — Full-document mapping reads beyond 40 pages, rejects documents over the analysis budget explicitly, and marks unmatched quotes as awaiting verification. Reanalysis bypasses the versioned AI cache while preserving manually edited source cards. The CPA connection settings stay unchanged.
 

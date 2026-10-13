@@ -4,6 +4,8 @@
   <meta charset="UTF-8">
   <title>AltCanvas - AI Research Workspace</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="/assets/reading-guide.css">
+  <script src="/assets/reading-guide.js"></script>
   <link rel="icon" type="image/svg+xml" href="/assets/logo.svg">
   <link rel="apple-touch-icon" href="/assets/logo.svg">
   <link rel="stylesheet" href="/styles/altcanvas.css">
@@ -429,10 +431,11 @@
     <aside id="annotations-pane" aria-label="研究标注白板" class="w-96 bg-slate-950 flex flex-col flex-shrink-0">
       <div class="p-3 border-b border-slate-800 flex items-center justify-between">
         <div class="flex items-center gap-2">
-          <span class="text-xs font-semibold text-indigo-400 tracking-wider uppercase">研究画板</span>
+          <span class="text-xs font-semibold text-indigo-400 tracking-wider uppercase">文章理解</span>
           <span id="annotations-count" class="text-[10px] px-1.5 py-0.5 bg-indigo-950 text-indigo-300 rounded border border-indigo-800">0</span>
         </div>
         <div class="flex items-center gap-1">
+          <button id="btn-reading-view" type="button" class="text-[11px] text-slate-400 px-2 py-1">高级画板</button>
           <span id="canvas-save-state" class="text-[10px] text-slate-500">未连接</span>
           <button id="btn-refresh-cards" type="button" title="重新加载画板" aria-label="重新加载画板" class="text-slate-400 hover:text-slate-200 text-xs p-1 rounded hover:bg-slate-900">
             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
@@ -470,6 +473,7 @@
         <button id="btn-canvas-zoom-in" type="button" aria-label="放大画板" class="px-2 py-1.5 rounded hover:bg-slate-800 text-slate-300">+</button>
       </div>
 
+      <section id="reading-guide" aria-label="结构化文章导读"></section>
       <div id="canvas-cards" class="canvas-surface flex-1" tabindex="0" aria-label="空间画板；Delete 删除，Ctrl+Z 撤销，N 新建卡片，C 连线，H 历史">
         <div id="canvas-empty" class="absolute inset-0 z-10 flex items-center justify-center pointer-events-none p-6">
           <div class="text-center text-slate-500 text-xs leading-relaxed bg-slate-950/80 border border-slate-800 rounded-xl p-4">
@@ -522,7 +526,7 @@
     </button>
     <button type="button" class="mobile-nav-button" role="tab" aria-selected="false" aria-controls="annotations-pane" data-mobile-target="annotations" tabindex="-1">
       <svg aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 3h10a2 2 0 012 2v14l-4-3-3 3-3-3-4 3V5a2 2 0 012-2z"></path></svg>
-      <span>标注</span>
+      <span>导读</span>
     </button>
   </nav>
 
@@ -3711,6 +3715,8 @@
       documentController = new AbortController();
       const { signal } = documentController;
       currentItem = item;
+      currentAttachment = null;
+      currentAnnotationsMap.clear();
       currentReaderInstance = null;
       document.getElementById('text-reader').classList.add('hidden');
       document.getElementById('reader-frame-scale').classList.remove('hidden');
@@ -4020,6 +4026,7 @@
       currentReaderInstance.enableAddToNote?.(true);
       document.getElementById('reader-loading').classList.add('hidden');
       updateCanvasAiToolbar();
+      renderCanvas();
       scheduleAcxMobileToolbar();
     }
 
@@ -5479,7 +5486,54 @@
       document.getElementById('canvas-cards').style.backgroundSize = `${24 * viewportState.zoom}px ${24 * viewportState.zoom}px`;
     }
 
+    let readingGuideController = null;
+    let readingGuideEnabled = localStorage.getItem('altcanvas.readingView') !== 'canvas';
+
+    function setReadingView(guided) {
+      readingGuideEnabled = Boolean(guided);
+      localStorage.setItem('altcanvas.readingView', guided ? 'guide' : 'canvas');
+      closeCanvasNodeDetail();
+      document.getElementById('annotations-pane').classList.toggle('guided-mode', guided);
+      document.getElementById('reading-guide').classList.toggle('hidden', !guided);
+      document.getElementById('btn-reading-view').textContent = guided ? '高级画板' : '返回导读';
+      renderCanvas();
+      updateCanvasAiToolbar();
+    }
+
+    function renderReadingGuide() {
+      const root = document.getElementById('reading-guide');
+      if (!root || !globalThis.AltCanvasReadingGuide) return;
+      document.getElementById('annotations-pane').classList.toggle('guided-mode', readingGuideEnabled);
+      root.classList.toggle('hidden', !readingGuideEnabled);
+      document.getElementById('btn-reading-view').textContent = readingGuideEnabled ? '高级画板' : '返回导读';
+      if (!readingGuideController) readingGuideController = AltCanvasReadingGuide.mount(root, {
+        jump: source => jumpToDocumentSource(source),
+        jumpAnnotation: id => jumpToSourceAnnotation({ ...normalizeLibraryContext(currentDocumentLibrary), itemKey: currentItem?.key, attachmentKey: currentAttachment?.key, annotationKey: id, position: getAnnotationPosition(currentAnnotationsMap.get(id)?.data || {}) }),
+        edit: node => { setReadingView(false); const element = document.querySelector(`.canvas-node[data-node-id="${CSS.escape(node.id)}"]`); if (element) editCanvasNote(node, element); },
+        error: err => showToast(errorMessage(err), 'error'),
+        saveNote: async body => {
+          if (!canvasReady || !canvasBoard || !currentAttachment || !currentItem) throw new Error('请先打开文章');
+          const node = await canvasFetch(`/boards/${canvasBoard.id}/nodes`, { method: 'POST', body: {
+            type: 'manual_note', title: '阅读笔记', body, x: 40, y: 40, width: 380, height: 180, zIndex: canvasNodes.size + 1,
+            source: { ...normalizeLibraryContext(currentDocumentLibrary), itemKey: currentItem.key, attachmentKey: currentAttachment.key }
+          } });
+          canvasNodes.set(node.id, node);
+          await loadCanvasSnapshot();
+        }
+      });
+      const title = documentMetas.get(docMetaKey(currentDocumentLibrary?.libraryType || 'native', currentDocumentLibrary?.libraryId || 'local', currentItem?.key))?.cleanTitle || currentItem?.data?.title;
+      readingGuideController.render({ nodes: [...canvasNodes.values()], sources: canvasSources, edges: [...canvasEdges.values()], attachmentKey: currentAttachment?.key,
+        title, ready: canvasReady, annotations: [...currentAnnotationsMap.entries()].map(([id, value]) => ({ id, ...value })),
+        locationKind: currentReaderInstance?.textPages ? 'text-block' : 'pdf-page' });
+    }
+
     function renderCanvas() {
+      if (typeof renderReadingGuide === 'function') renderReadingGuide();
+      if (typeof readingGuideEnabled !== 'undefined' && readingGuideEnabled) {
+        document.getElementById('annotations-count').textContent = canvasNodes.size;
+        updateCanvasImportState();
+        return;
+      }
       const world = document.getElementById('canvas-world');
       const nodesContainer = document.getElementById('canvas-nodes');
       const empty = document.getElementById('canvas-empty');
@@ -7009,10 +7063,10 @@
           || !canvasReady || !aiConfig.configured || aiDocumentGenerationInFlight;
         const hasExistingCards = canvasNodes.size > 0;
         if (hasExistingCards) {
-          docBtn.textContent = '➕ 对比补充';
+          docBtn.textContent = readingGuideEnabled ? '阅读全文' : '➕ 对比补充';
           docBtn.title = '以当前画板为基础，分析新文献并补充对比、标出相同点与矛盾点';
         } else {
-          docBtn.textContent = '🗺️ 绘制导图';
+          docBtn.textContent = readingGuideEnabled ? '阅读全文' : '🗺️ 绘制导图';
           docBtn.title = '提取当前 PDF 核心观点与结构，生成知识导图';
         }
       }
@@ -7853,6 +7907,7 @@
       document.getElementById('btn-canvas-history').onclick = showProvenanceHistory;
       document.getElementById('btn-close-provenance').onclick = () => document.getElementById('provenance-modal').classList.add('hidden');
       document.getElementById('btn-done-provenance').onclick = () => document.getElementById('provenance-modal').classList.add('hidden');
+      document.getElementById('btn-reading-view').onclick = () => setReadingView(!readingGuideEnabled);
       document.getElementById('btn-refresh-cards').onclick = () => loadCanvasSnapshot().catch(err => showToast(`刷新画板失败: ${errorMessage(err)}`, 'error'));
       document.getElementById('btn-canvas-zoom-in').onclick = () => setCanvasZoom(canvasViewport().zoom * 1.2);
       document.getElementById('btn-canvas-zoom-out').onclick = () => setCanvasZoom(canvasViewport().zoom / 1.2);

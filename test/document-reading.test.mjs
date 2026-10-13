@@ -121,10 +121,12 @@ try {
   assert.deepEqual(writes.map(w=>w.topicIds[0]),[t1.id,t2.id]);
 
   const board=store.createBoard(actor,t1.id,{name:'阅读图'});
-  const graph={title:'样例',overview:'概览',evidenceQuote:'目录文本',evidencePage:1,
+  const graph={title:'样例',overview:'概览',evidenceQuote:'目录文本',evidencePage:1,guide:{question:'真实问题',takeaway:'真实结论',limitations:'范围有限'},
     sections:[{id:'section-0',title:'推理',body:'模型解释',pageStart:1,pageEnd:1,evidenceQuote:'目录文本',evidencePage:1}],concepts:[],claims:[],relations:[]};
   const input={model:'mock-model',promptVersion:'test',document:{libraryType:'native',libraryId:'local',itemKey:doc.id,attachmentKey:enrolled.attachment.id,pageCount:1},graph};
   const projected=store.projectDocumentAnalysisToBoard(actor,board.id,input);
+  const overview=projected.nodes.find(n=>n.title.startsWith('全文概览 ·'));
+  assert.equal(store.getSourceRef(actor,overview.sourceRefId).position.readingGuide.question,'真实问题','structured guide survives the snapshot/source projection');
   const section=projected.nodes.find(n=>n.title.startsWith('章节 ·'));
   store.updateNode(actor,section.id,section.version,{body:'我的人工补充'});
   store.projectDocumentAnalysisToBoard(actor,board.id,{...input,graph:{...graph,sections:[{...graph.sections[0],body:'新的 AI 解释'}]}});

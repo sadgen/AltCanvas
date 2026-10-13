@@ -2484,3 +2484,13 @@ generate-topics 5.9s）以 sadgen 会话真实复测全部 200，分类与中文
 - 首页、会话和文本阅读脚本接口均 HTTP 200。核对备份 manifest：生产 documents/attachments/annotations/workspaces/nodes/source_files 计数全部不变，AI 设置校验全部不变。
 - 人工操作：Ctrl+F5 后对已选文献执行识别，验证现有主题复用/多主题；划线后加入右侧；对既有分析点“重新分析”，核对导读与原文；上传 TXT/EPUB 验证标注和回跳。用户回复完成/看日志后直接读生产日志，不要求贴 Console。
 - 本地工作已提交，后续优先修复实机验收中出现的问题；大规模 schema/框架改造没有混入本次发布。
+
+## 2026-10-13 会话（结构化导读接入真实数据，v0.4.0）
+
+- 用户比较两个可交互样例后选择“结构化导读”，随后同意接入真实文章。沿用此前本地开发→推送→5.237 部署的授权与流程。
+- 右侧默认改为导读/我的标注/多篇对比，沿当前打开的文章筛选，显示核心结论、研究问题、推理步骤、概念、证据和边界。解释按需展开，来源按钮走既有定位链路。笔记保存为当前文章的 manual_note，存量标注直接读取持久化批注。高级画板可切换，原卡片和布局不删除。
+- 新增独立 `assets/reading-guide.js` 与 CSS，兼容旧概览标题格式；刷新保留同篇展开状态与草稿，切换文章清除跨文档视图状态。多篇对比只使用实际分析字段和实际跨文档 edges，没有关联时明确显示未生成。
+- AI prompt 升至 v4，增加 guide.question/takeaway/limitations/method；复用 source position JSON 与分析缓存，无 schema 迁移。新版字段随 snapshot/source 投影，旧图可直接显示；重新分析获得完整结构字段，保留人工修改。
+- 新增 `test/reading-guide.test.mjs` 行为测试，覆盖文章隔离、旧格式兼容、引用待核验、对比、草稿/展开保留、切换文章与纯文本渲染；文档测试补 source.guide 往返。Linux 隔离目录完整 12 套测试通过，本地相关行为/API/UI 结构测试通过。
+- 真实 CPA 临时样例约 35 秒生成 5 节点、7 关系、5 处匹配引用，并通过 question/takeaway/limitations 非空校验。模型地址和密钥未改。
+- 上线前备份 `backups/release-20261013-040`，旧提交 faec565；active counts documents=8、attachments=8、annotations=1、workspaces=4、nodes=22、source_files=155。实际上线与健康结果随后补充。

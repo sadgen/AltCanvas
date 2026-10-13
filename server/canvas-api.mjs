@@ -523,6 +523,7 @@ function normalizeDocumentGraph(raw, evidenceIndex, pageCount, fallbackTitle, ex
     overview,
     evidenceQuote: overviewEvidence.evidenceQuote,
     evidencePage: overviewEvidence.evidencePage ?? 1,
+    guide: Object.fromEntries(['question', 'takeaway', 'limitations', 'method'].map(field => [field, string(raw?.guide?.[field] || '', `guide.${field}`, { max: field === 'takeaway' ? 500 : 2000 })])),
     sections, concepts, claims, relations
   };
 }
@@ -3660,6 +3661,7 @@ ${textSnippet.slice(0, 8000) || '无'}`;
                   '只输出一个 JSON 对象，不要 Markdown 代码围栏。内容必须使用简体中文。',
                   'JSON schema:',
                   '{"title":"...","overview":"完整全文概览","evidenceQuote":"逐字原文","evidencePage":1,',
+                  '"guide":{"question":"具体研究问题","takeaway":"一句话结论","limitations":"适用条件与未解问题","method":"证据与方法"},',
                   '"sections":[{"title":"...","body":"章节作用和内容","pageStart":1,"pageEnd":3,"evidenceQuote":"逐字原文","evidencePage":2}],',
                   '"concepts":[{"title":"...","body":"定义、意义与上下文","pageStart":2,"pageEnd":2,"evidenceQuote":"逐字原文","evidencePage":2}],',
                   '"claims":[{"title":"...","body":"论点及证据/方法/限制","pageStart":4,"pageEnd":6,"evidenceQuote":"逐字原文","evidencePage":5}],',
