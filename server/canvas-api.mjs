@@ -2005,6 +2005,7 @@ export function createCanvasHandler(store, {
   // succeeds — otherwise a competing startup could reap files that an in-flight import
   // has promoted but not yet committed to the database.
 
+  const upstreamCompletion = aiCompletion;
   return async function handleCanvasApi(req, res, url) {
     const actor = actorFromRequest(req);
     if (!actor) {
@@ -2014,6 +2015,26 @@ export function createCanvasHandler(store, {
 
     const pathname = url.pathname.replace(/\/+$/, '') || '/';
     const method = req.method || 'GET';
+    // Bound the complete pipeline, and stop upstream work when the browser cancels.
+    const taskController = new AbortController();
+    let taskTimer;
+    let finished = false;
+    const aiCompletion = (options, config) => {
+      if (!taskTimer) {
+        taskTimer = setTimeout(() => taskController.abort(), pathname.endsWith('/ai/document-map') ? 240000 : 180000);
+        taskTimer.unref?.();
+      }
+      if (taskController.signal.aborted) {
+        const cancelled = new Error('AI 任务已取消或达到总时限，请稍后重试');
+        cancelled.name = 'AbortError';
+        throw cancelled;
+      }
+      return upstreamCompletion({ timeoutMs: 180000, ...options, signal: taskController.signal }, config);
+    };
+    const cleanup = () => { clearTimeout(taskTimer); };
+    res.once?.('finish', () => { finished = true; cleanup(); });
+    res.once?.('close', () => { if (!finished) taskController.abort(); cleanup(); });
+    req.once?.('aborted', () => { taskController.abort(); cleanup(); });
     let match;
     try {
       // ==========================================
@@ -3509,7 +3530,7 @@ ${textSnippet.slice(0, 8000) || '无'}`;
               { role: 'system', content: '你是严谨专业的研报元数据结构化提取助手，必须仅返回合法 JSON。' },
               { role: 'user', content: prompt }
             ],
-            temperature: 0.1,
+            temperature: 0.1, stage: 'metadata',
             maxTokens: 1000
           }, privateConfig);
 
@@ -3650,7 +3671,7 @@ ${textSnippet.slice(0, 8000) || '无'}`;
                 ].join('\n') },
                 { role: 'user', content: `文档《${title}》第 ${index + 1}/${chunks.length} 个页段：\n\n${chunk}` }
               ],
-              temperature: 0.2, maxTokens: 4000
+              temperature: 0.2, maxTokens: 4000, stage: 'read-chunk'
             }, privateConfig));
 
             // Stage 1: Pure document synthesis (topic-agnostic base graph)
@@ -3673,7 +3694,7 @@ ${textSnippet.slice(0, 8000) || '无'}`;
                 ].join('\n') },
                 { role: 'user', content: `文档标题：${title}\n总页数：${body.pages.length}\n\n${chunkSummaries.map((summary, index) => `【页段 ${index + 1}】\n${summary}`).join('\n\n')}` }
               ],
-              temperature: 0.25, maxTokens: 12000
+              temperature: 0.25, maxTokens: 12000, stage: 'synthesis'
             }, privateConfig);
 
             baseGraph = normalizeDocumentGraph(parseAiJson(synthesis), buildEvidenceIndex(pages), body.pages.length, title);
@@ -3726,7 +3747,7 @@ ${textSnippet.slice(0, 8000) || '无'}`;
                 ].join('\n') },
                 { role: 'user', content: `新文献《${title}》概览：${baseGraph.overview}\n\n新文献卡片：\n${cardsBrief}\n\n当前画板已有卡片：\n${boardContextText}` }
               ],
-              temperature: 0.2, maxTokens: 6000
+              temperature: 0.2, maxTokens: 6000, stage: 'relations', timeoutMs: 45000
             }, privateConfig);
 
             const parsedBoardRelations = parseAiJsonArray(boardRelationAiRes);
@@ -4658,6 +4679,8 @@ ${textSnippet.slice(0, 8000) || '无'}`;
         console.error('Canvas API error:', err);
         error(res, 500, 'internal_error', 'Canvas request failed');
       }
+    } finally {
+      cleanup();
     }
   };
 }

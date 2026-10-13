@@ -91,3 +91,23 @@ try {
   }), /长度上限/, 'truncated model output must not be accepted as a complete analysis');
 } finally { globalThis.fetch = truncationTestFetch; }
 console.log('✅ Server-only credentials, endpoint SSRF boundaries and truncation handling passed');
+
+const beforeAbortFetch = globalThis.fetch;
+try {
+  globalThis.fetch = async (_url, { signal }) => new Promise((_resolve, reject) => {
+    const abort = () => reject(new DOMException('aborted', 'AbortError'));
+    if (signal.aborted) abort();
+    else signal.addEventListener('abort', abort, { once: true });
+  });
+  const config = { baseUrl: 'https://8.8.8.8/v1', model: 'test' };
+  // Keep the test alive because production deadlines deliberately use unref timers.
+  const keepAlive = setInterval(() => {}, 100);
+  try {
+    await assert.rejects(requestAiCompletion({ messages: [], timeoutMs: 20 }, config),
+      e => e.name === 'AbortError' && /未返回结果/.test(e.message));
+    const cancelled = new AbortController();
+    const task = requestAiCompletion({ messages: [], signal: cancelled.signal }, config);
+    cancelled.abort();
+    await assert.rejects(task, e => e.name === 'AbortError' && /已取消/.test(e.message));
+  } finally { clearInterval(keepAlive); }
+} finally { globalThis.fetch = beforeAbortFetch; }

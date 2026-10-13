@@ -6,6 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <link rel="stylesheet" href="/assets/reading-guide.css">
   <script src="/assets/reading-guide.js"></script>
+  <script src="/assets/ai-wait.js"></script>
   <link rel="icon" type="image/svg+xml" href="/assets/logo.svg">
   <link rel="apple-touch-icon" href="/assets/logo.svg">
   <link rel="stylesheet" href="/styles/altcanvas.css">
@@ -443,6 +444,10 @@
         </div>
       </div>
 
+      <div id="ai-wait-status" hidden class="px-3 py-2 border-b border-slate-800 text-xs text-purple-200" role="status" aria-live="polite">
+        <span id="ai-wait-text"></span>
+        <button id="btn-ai-cancel" type="button" class="ml-2 underline">取消</button>
+      </div>
       <div class="canvas-toolbar px-2 py-2 border-b border-slate-800/80 bg-slate-950/70 flex items-center gap-1.5 text-[11px] overflow-x-auto whitespace-nowrap">
         <button id="btn-canvas-ai-document" type="button" class="px-2.5 py-1.5 rounded bg-purple-700 hover:bg-purple-600 text-white font-medium disabled:opacity-40 disabled:cursor-not-allowed transition" disabled title="提取当前 PDF 核心观点与结构，生成知识导图；正文会发送给当前 AI 服务">🗺️ 绘制导图</button>
         <button id="btn-canvas-ai-organize" type="button" class="px-2.5 py-1.5 rounded bg-purple-950/80 text-purple-200 border border-purple-800/60 hover:bg-purple-900/80 disabled:opacity-40 disabled:cursor-not-allowed transition" disabled title="通过 AI 综合梳理画板全部卡片：提炼全貌、共识与分歧，并按主题重新排布清晰导图">🧹 整理画板</button>
@@ -1788,13 +1793,12 @@
         });
         if (!res.ok) {
           const errData = await res.json().catch(() => ({}));
-          throw new Error(errData.message || `HTTP ${res.status}`);
+          throw new Error(errData.error?.message || errData.message || `HTTP ${res.status}`);
         }
         const updated = await res.json();
         if (updated.data) {
           documentMetas.set(docMetaKey(updated.data.libraryType, updated.data.libraryId, updated.data.itemKey), updated.data);
           renderItems();
-          renderInboxEntries();
           if (currentItem?.key === itemKey) {
             document.getElementById('current-doc-title').textContent = updated.data.cleanTitle;
           }
@@ -1808,74 +1812,82 @@
 
     async function extractDocumentChineseMetadata(item, { force = false } = {}) {
       if (!item) return null;
-      const metaKey = item.key;
-      const filename = item.data?.filename || item.filename || '';
-      const rawTitle = item.data?.title || item.title || '';
-      const libType = item.libraryType || (item.isNative ? 'native' : currentDocumentLibrary?.libraryType) || 'user';
-      const libId = item.libraryId || (item.isNative ? 'local' : currentDocumentLibrary?.libraryId) || config.userId;
-
-      let textSnippet = '';
-      if (currentReaderInstance && currentItem?.key === metaKey) {
-        try {
-          if (currentReaderInstance.textPages) textSnippet = currentReaderInstance.textPages.slice(0, 2).map(p => p.text).join('\n');
-          const pdfDoc = currentReaderInstance._primaryView?._iframeWindow?.PDFViewerApplication?.pdfDocument;
-          if (pdfDoc) {
-            const pageCount = pdfDoc.numPages || 1;
-            const extractPages = Math.min(3, pageCount);
-            for (let p = 0; p < extractPages; p++) {
-              const pageData = await pdfDoc.getPageData({ pageIndex: p });
-              textSnippet += `\n--- Page ${p + 1} ---\n` + pdfPageText(pageData);
-            }
-          }
-        } catch (e) {
-          // ignore extraction error, textSnippet will be empty and AI will use title/filename
-        }
-      }
-
-      showToast('正在使用 AI 识别研报机构与中文标题...', 'info');
+      const button = document.getElementById('btn-doc-meta-ai-extract');
+      if (button?.disabled) return null;
+      const oldLabel = button?.textContent;
+      if (button) { button.disabled = true; button.textContent = '正在识别…'; }
       try {
-        const res = await fetch('/canvas/documents/extract-metadata', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            libraryType: libType,
-            libraryId: libId,
-            itemKey: metaKey,
-            attachmentKey: currentAttachment?.key || null,
-            attachmentVersion: currentAttachment?.version ?? null,
-            filename,
-            rawTitle,
-            textSnippet: textSnippet.slice(0, 10_000),
-            forceRefresh: force
-          })
-        });
-        if (!res.ok) {
-          const errData = await res.json().catch(() => ({}));
-          throw new Error(errData.message || `HTTP ${res.status}`);
-        }
-        const result = await res.json();
-        if (result.data) {
-          documentMetas.set(docMetaKey(result.data.libraryType, result.data.libraryId, result.data.itemKey), result.data);
-          renderItems();
-          renderInboxEntries();
-          if (currentItem?.key === metaKey) {
-            document.getElementById('current-doc-title').textContent = result.data.cleanTitle;
+        const metaKey = item.key;
+        const filename = item.data?.filename || item.filename || '';
+        const rawTitle = item.data?.title || item.title || '';
+        const libType = item.libraryType || (item.isNative ? 'native' : currentDocumentLibrary?.libraryType) || 'user';
+        const libId = item.libraryId || (item.isNative ? 'local' : currentDocumentLibrary?.libraryId) || config.userId;
+
+        let textSnippet = '';
+        if (currentReaderInstance && currentItem?.key === metaKey) {
+          try {
+            if (currentReaderInstance.textPages) textSnippet = currentReaderInstance.textPages.slice(0, 2).map(p => p.text).join('\n');
+            const pdfDoc = currentReaderInstance._primaryView?._iframeWindow?.PDFViewerApplication?.pdfDocument;
+            if (pdfDoc) {
+              const pageCount = pdfDoc.numPages || 1;
+              const extractPages = Math.min(3, pageCount);
+              for (let p = 0; p < extractPages; p++) {
+                const pageData = await pdfDoc.getPageData({ pageIndex: p });
+                textSnippet += `\n--- Page ${p + 1} ---\n` + pdfPageText(pageData);
+                if (textSnippet.trim().length >= 800) break;
+              }
+            }
+          } catch (e) {
+            // ignore extraction error, textSnippet will be empty and AI will use title/filename
           }
-          if (currentEditingMetaItem?.key === metaKey) {
-            document.getElementById('input-doc-meta-clean-title').value = result.data.cleanTitle || '';
-            document.getElementById('input-doc-meta-institution').value = result.data.institution || '';
-            document.getElementById('input-doc-meta-year').value = result.data.year || '';
-            document.getElementById('input-doc-meta-report-title').value = result.data.reportTitle || '';
-            document.getElementById('input-doc-meta-subtitle').value = result.data.subtitle || '';
-            document.getElementById('input-doc-meta-summary').value = result.data.summary || '';
-          }
-          showToast(`已识别：${result.data.cleanTitle}`, 'success');
-          return result.data;
         }
-      } catch (err) {
-        showToast(`识别研报标题失败: ${errorMessage(err)}`, 'error');
+
+        showToast('正在使用 AI 识别研报机构与中文标题...', 'info');
+        try {
+          const res = await fetchAiRequest('/canvas/documents/extract-metadata', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              libraryType: libType,
+              libraryId: libId,
+              itemKey: metaKey,
+              attachmentKey: currentAttachment?.key || null,
+              attachmentVersion: currentAttachment?.version ?? null,
+              filename,
+              rawTitle,
+              textSnippet: textSnippet.slice(0, 10_000),
+              forceRefresh: force
+            })
+          });
+          if (!res.ok) {
+            const errData = await res.json().catch(() => ({}));
+            throw new Error(errData.error?.message || errData.message || `HTTP ${res.status}`);
+          }
+          const result = await res.json();
+          if (result.data) {
+            documentMetas.set(docMetaKey(result.data.libraryType, result.data.libraryId, result.data.itemKey), result.data);
+            renderItems();
+            if (currentItem?.key === metaKey) {
+              document.getElementById('current-doc-title').textContent = result.data.cleanTitle;
+            }
+            if (currentEditingMetaItem?.key === metaKey) {
+              document.getElementById('input-doc-meta-clean-title').value = result.data.cleanTitle || '';
+              document.getElementById('input-doc-meta-institution').value = result.data.institution || '';
+              document.getElementById('input-doc-meta-year').value = result.data.year || '';
+              document.getElementById('input-doc-meta-report-title').value = result.data.reportTitle || '';
+              document.getElementById('input-doc-meta-subtitle').value = result.data.subtitle || '';
+              document.getElementById('input-doc-meta-summary').value = result.data.summary || '';
+            }
+            showToast(`已识别：${result.data.cleanTitle}`, 'success');
+            return result.data;
+          }
+        } catch (err) {
+          showToast(`识别研报标题失败: ${errorMessage(err)}`, 'error');
+        }
+        return null;
+      } finally {
+        if (button) { button.disabled = false; button.textContent = oldLabel; }
       }
-      return null;
     }
 
     // --- Settings Modal Handling ---
@@ -2481,7 +2493,7 @@
       // Like canvasFetch, but keeps the full payload for non-2xx conflict data.
       const headers = { Accept: 'application/json', ...(options.headers || {}) };
       if (options.body !== undefined && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
-      const response = await fetch(`/canvas${path}`, {
+      const response = await fetchAiRequest(`/canvas${path}`, {
         ...options,
         headers,
         body: options.body === undefined || typeof options.body === 'string'
@@ -3463,7 +3475,7 @@
             break;
           } catch (err) {
             // 一批失败不拖垮整体：已完成批次的命名与归类都已生效。
-            if (err.code === 'ai_not_configured') throw err;
+            if (['ai_not_configured', 'ai_cancelled', 'ai_timeout', 'ai_busy'].includes(err.code) || err.status === 504) throw err;
             if (attempt === 0) continue;
             totals.failedBatches += 1;
             lastError = err;
@@ -5222,10 +5234,15 @@
       element.className = `text-[10px] ${tone === 'ok' ? 'text-emerald-500' : tone === 'error' ? 'text-rose-400' : 'text-slate-500'}`;
     }
 
+    function fetchAiRequest(url, options = {}) {
+      const isAi = options.method === 'POST' && (/\/ai\//.test(url) || url.includes('/native/classify/') || url.endsWith('/extract-metadata'));
+      return isAi && globalThis.AltCanvasAiWait ? AltCanvasAiWait.fetch(url, options) : fetch(url, options);
+    }
+
     async function canvasFetch(path, options = {}) {
       const headers = { Accept: 'application/json', ...(options.headers || {}) };
       if (options.body !== undefined && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
-      const response = await fetch(`/canvas${path}`, {
+      const response = await fetchAiRequest(`/canvas${path}`, {
         ...options,
         headers,
         body: options.body === undefined || typeof options.body === 'string'

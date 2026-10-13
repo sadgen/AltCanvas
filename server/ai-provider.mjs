@@ -1,5 +1,6 @@
 import dns from 'dns/promises';
 import { isPrivateNetworkHost } from './security.mjs';
+import { writeDevLog } from './dev-logger.mjs';
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_RESPONSE_BYTES = 512 * 1024;
@@ -83,12 +84,18 @@ async function readLimitedText(response) {
   return Buffer.concat(chunks).toString('utf8');
 }
 
-export async function requestAiCompletion({ messages, temperature = 0.4, maxTokens }, override = null) {
+export async function requestAiCompletion({ messages, temperature = 0.4, maxTokens, timeoutMs: requestedTimeout, signal, stage = 'completion' }, override = null) {
   const config = configuredValues(override);
   if (!config.model) throw new Error('服务器尚未配置 AI_MODEL');
   const targetUrl = await validateAiEndpoint(config.baseUrl, config);
   const controller = new AbortController();
-  const timeoutMs = Number(process.env.AI_TIMEOUT_MS || DEFAULT_TIMEOUT_MS);
+  const timeoutMs = Number(requestedTimeout || process.env.AI_TIMEOUT_MS || DEFAULT_TIMEOUT_MS);
+  const started = Date.now();
+  const safeStage = /^(metadata|classify|read-chunk|synthesis|relations|completion)$/.test(stage) ? stage : 'completion';
+  const cancel = () => controller.abort();
+  signal?.addEventListener('abort', cancel, { once: true });
+  if (signal?.aborted) controller.abort();
+  writeDevLog('info', 'ai.request.started', 'AI request started', { stage: safeStage, timeoutMs });
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   timer.unref?.();
   try {
@@ -125,7 +132,18 @@ export async function requestAiCompletion({ messages, temperature = 0.4, maxToke
     const content = payload?.choices?.[0]?.message?.content;
     if (typeof content !== 'string' || !content.trim()) throw new Error('AI 模型未返回有效内容');
     return content.trim();
+  } catch (error) {
+    if (controller.signal.aborted) {
+      const timeout = new Error(signal?.aborted
+        ? 'AI 任务已取消或达到总时限'
+        : `AI 上游在 ${Math.round(timeoutMs / 1000)} 秒内未返回结果，请稍后重试`);
+      timeout.name = 'AbortError';
+      throw timeout;
+    }
+    throw error;
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener('abort', cancel);
+    writeDevLog('info', 'ai.request.finished', 'AI request finished', { stage: safeStage, elapsedMs: Date.now() - started, aborted: controller.signal.aborted });
   }
 }
