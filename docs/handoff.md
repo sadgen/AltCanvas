@@ -2494,3 +2494,9 @@ generate-topics 5.9s）以 sadgen 会话真实复测全部 200，分类与中文
 - 新增 `test/reading-guide.test.mjs` 行为测试，覆盖文章隔离、旧格式兼容、引用待核验、对比、草稿/展开保留、切换文章与纯文本渲染；文档测试补 source.guide 往返。Linux 隔离目录完整 12 套测试通过，本地相关行为/API/UI 结构测试通过。
 - 真实 CPA 临时样例约 35 秒生成 5 节点、7 关系、5 处匹配引用，并通过 question/takeaway/limitations 非空校验。模型地址和密钥未改。
 - 上线前备份 `backups/release-20261013-040`，旧提交 faec565；active counts documents=8、attachments=8、annotations=1、workspaces=4、nodes=22、source_files=155。实际上线与健康结果随后补充。
+
+### v0.4.0 上线确认
+
+- 应用提交 c8afffe 已推送并在 5.237 部署。生产目录完整 12 套 npm test 全部通过，服务 active；首页版本 v0.4.0，reading-guide.js/css 均 HTTP 200。
+- 数据计数和加密 AI 配置与备份完全一致；服务日志只有预期 SQLite experimental warning，没有新增运行时异常。
+- 人工验收：Ctrl+F5 → 打开已分析文章，右侧应默认“导读”；点展开解释/查看依据；切“我的标注”保存笔记；切换文章检查对应内容；想看新结构字段时点“重新分析”。高级画板保留原数据。回复“完成/看日志”后读生产 `.debug/dev.log` 和 `.debug/browser.log`。
