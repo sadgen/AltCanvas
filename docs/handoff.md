@@ -2598,3 +2598,10 @@ generate-topics 5.9s）以 sadgen 会话真实复测全部 200，分类与中文
 - 新增 test/agent-library.test.mjs 与 test/library-menu.test.mjs；Linux 隔离完整 17 套测试通过；随后补充独立回滚及主题白名单/多主题测试，本地通过。菜单测试覆盖固定定位边界、键盘、关闭、纯文本、操作绑定。
 - 上线前在线备份 backups/release-20261014-046：旧提交37de12a，documents=191、attachments=191、annotations=1、workspaces=4、nodes=31、source_files=193，为外部 agent 处理后的当前状态。与最早 23 节点/10 文档的备份不同，不误判为本次部署修改。
 - 三份外部原始脚本 SHA256 与取回审计原件完全一致，备份于上述目录 agent-scripts-original（0700，脚本0600）；部署前移走未跟踪原件，防止 Git 拒绝覆盖，后续快进合入修复版本。
+
+
+### v0.4.6 上线确认
+
+- 应用提交 95dc519 已推送并在 5.237 通过 Git bundle 快进部署；生产完整 17 套测试通过，服务 active，首页/menu.js/list.css 均 HTTP 200。元数据脚本 --dry-run 显示 pendingEnroll=0/pendingClassify=0，复核数据库计数和 AI 配置与备份全部相同。真实 PDF 安全 FD 提取约 2925 字，无文档或凭据日志。
+- 最后补充标题中已有机构/年份时隐藏重复副行，相关纯函数/菜单行为和 UI 结构测试通过；补丁随交接提交部署。
+- 生产数据没有自动执行 AI 分类或元数据回填，原外部脚本原件保留。视觉和菜单实际操作待用户 Ctrl+F5 后验证，回复完成/看日志后直接读项目日志。

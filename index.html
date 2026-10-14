@@ -2349,6 +2349,14 @@
       }
     }
 
+    function compactArticleSubtitle(meta, title, topics = []) {
+      const values = [meta?.institution, meta?.year].filter(Boolean).map(String);
+      const unique = values.filter(value => !String(title).includes(value));
+      if (unique.length) return unique.join(' · ');
+      if (values.length) return '';
+      return topics.slice(0,1).map(topic => topic.name || topic.workspace_name).filter(Boolean).join('');
+    }
+
     function openLibraryMenu(trigger) {
       const sort=document.getElementById('select-library-sort');
       const actions=[{label:'刷新列表',run:()=>refreshCurrentLibraryView()},
@@ -2439,8 +2447,7 @@
         const isChecked = selectedDocumentKeys.has(item.key);
 
         div.classList.add('article-row');
-        const subtitle = [meta?.institution, meta?.year].filter(Boolean).join(' · ')
-          || (item.topics || []).slice(0,1).map(t => t.name || t.workspace_name).join('');
+        const subtitle = compactArticleSubtitle(meta, displayTitle, item.topics || []);
         div.innerHTML = `
           <div class="flex items-start gap-2">
             <input type="checkbox" class="item-select-checkbox mt-1 w-3.5 h-3.5 rounded cursor-pointer flex-shrink-0" ${isChecked ? 'checked' : ''} data-item-key="${escapeHTML(item.key)}" aria-label="选择文章">
@@ -3649,6 +3656,7 @@
           const meta = documentMetas.get(docMetaKey(docLib.libraryType, docLib.libraryId, doc.itemKey));
           const rawTitle = item.data?.title || item.data?.filename || `文献 #${doc.itemKey}`;
           const displayTitle = meta?.cleanTitle || rawTitle;
+          const subtitle = compactArticleSubtitle(meta, displayTitle);
           // 与文库列表一致：主题视图的行也带多选勾选框（勾选后可针对性 AI 识别与归类）。
           const wrapper = document.createElement('div');
           wrapper.className = 'w-full p-2.5 rounded text-xs transition border bg-slate-950/40 hover:bg-slate-900 border-slate-900 hover:border-indigo-800 text-slate-300 group';
@@ -3657,7 +3665,7 @@
             <input type="checkbox" class="item-select-checkbox w-3.5 h-3.5 mt-1 flex-shrink-0" data-item-key="${escapeHTML(item.key)}" ${selectedDocumentKeys.has(item.key) ? 'checked' : ''} aria-label="选择文章">
             <button type="button" class="min-w-0 flex-1 text-left article-open">
               <div class="article-title font-medium text-slate-200 line-clamp-2">${escapeHTML(displayTitle)}</div>
-              ${meta?.institution || meta?.year ? `<div class="article-meta">${escapeHTML([meta?.institution,meta?.year].filter(Boolean).join(' · '))}</div>` : ''}
+              ${subtitle ? `<div class="article-meta">${escapeHTML(subtitle)}</div>` : ''}
             </button><button type="button" class="article-more" aria-label="文章更多操作" aria-haspopup="menu" aria-expanded="false">⋯</button>
           </div>`;
           wrapper.querySelector('.item-select-checkbox').addEventListener('change', event => {

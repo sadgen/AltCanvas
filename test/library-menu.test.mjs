@@ -38,6 +38,11 @@ assert.equal(document.body.children.length, 0); assert.equal(anchor.attributes['
 // Run the actual article-menu wiring: rename must call the supported action, not rename-original.
 const html = fs.readFileSync(new URL('../index.html', import.meta.url), 'utf8');
 const helper = html.slice(html.indexOf('    function openArticleMenu('), html.indexOf('    function openSourceEntryMenu('));
+const subtitleContext=vm.createContext({});
+vm.runInContext(html.slice(html.indexOf('    function compactArticleSubtitle('),html.indexOf('    function openLibraryMenu(')),subtitleContext);
+assert.equal(subtitleContext.compactArticleSubtitle({institution:'机构',year:'2025'},'【机构】文章（2025）'),'', 'do not repeat metadata already visible in the title');
+assert.equal(subtitleContext.compactArticleSubtitle({institution:'机构',year:'2025'},'文章'),'机构 · 2025');
+
 let config, action;
 const wiring = vm.createContext({ AltCanvasLibraryMenu: { open(_trigger, value) { config = value; } },
   openDocMetaModal() {}, openAddToTopicModal() {}, handleSourceFileAction: value => { action = value; },
