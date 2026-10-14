@@ -45,7 +45,7 @@
     const button = (text, action, className='reading-guide-link') => { const b=el('button',className,text);b.type='button';b.onclick=action;return b; };
     function sourceLink(entry) {
       const label = entry.source.position?.locationKind === 'text-block' ? '文本块 ' : 'p.';
-      return button(`${entry.source.quoteSnapshot ? '查看依据' : '查看位置 · 引用待核验'} · ${label}${entry.source.pageLabel || 1} ↗`,()=>callbacks.jump(entry.source));
+      return button(`${entry.source.quoteSnapshot ? '查看依据' : '查看页码 · 引用待核验（无法高亮）'} · ${label}${entry.source.pageLabel || 1} ↗`,()=>callbacks.jump(entry.source));
     }
     function entryDetail(entry, index, mode='step') {
       const wrapper=el('section',mode==='step'?'reading-guide-step':'reading-guide-entry');

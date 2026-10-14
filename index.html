@@ -6892,6 +6892,7 @@
         await waitForReaderPageReady(reader, pageIndex, documentController?.signal);
         await Promise.resolve(reader.navigate({ pageIndex }));
         const evidenceQuery = cleanAnnotationText(sourceRef.quoteSnapshot || sourceRef.position?.textQuote || '').slice(0, 240);
+        if (!evidenceQuery) showToast('这张卡片尚无已核验的原文引用，目前只能定位页码', 'info');
         const highlighted = evidenceQuery ? await showPdfEvidenceHighlight(sourceRef, pageIndex) : false;
         browserDebug.report({ level: 'info', source: 'reader.evidence-location',
           message: `Evidence navigation: page=${pageIndex + 1}, hasQuote=${Boolean(evidenceQuery)}, highlighted=${highlighted}` });
