@@ -7,6 +7,8 @@
   <link rel="stylesheet" href="/assets/reading-guide.css">
   <script src="/assets/reading-guide.js"></script>
   <script src="/assets/ai-wait.js"></script>
+  <script src="/assets/library-menu.js"></script>
+  <link rel="stylesheet" href="/assets/library-list.css">
   <link rel="icon" type="image/svg+xml" href="/assets/logo.svg">
   <link rel="apple-touch-icon" href="/assets/logo.svg">
   <link rel="stylesheet" href="/styles/altcanvas.css">
@@ -306,6 +308,7 @@
             <svg class="w-3.5 h-3.5 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"></path></svg>
             研究文库
           </span>
+          <button id="btn-library-more" type="button" class="article-more" aria-label="文库更多操作" aria-haspopup="menu" aria-expanded="false">⋯</button>
           <button id="btn-refresh" class="text-slate-400 hover:text-slate-200 text-xs px-2 py-0.5 rounded bg-slate-900 hover:bg-slate-800 border border-slate-800 transition">刷新</button>
         </div>
 
@@ -2346,6 +2349,60 @@
       }
     }
 
+    function openLibraryMenu(trigger) {
+      const sort=document.getElementById('select-library-sort');
+      const actions=[{label:'刷新列表',run:()=>refreshCurrentLibraryView()},
+        {label:'AI 识别与归类',disabled:document.getElementById('btn-library-ai-classify').disabled,run:()=>libraryAiClassifyFlow()},
+        {label:'全选 / 取消全选',run:()=>document.getElementById('btn-library-toggle-select-all').click()},
+        {label:'管理研究主题',run:()=>document.getElementById('btn-manage-library-topic').click()},
+        {label:'查看回收站',run:()=>document.querySelector('[data-lib-filter="trash"]').click()}];
+      for(const [value,label] of [['recent','按最新文件排序'],['oldest','按最早文件排序'],['title','按名称排序']]) {
+        actions.push({label,run:()=>{sort.value=value;sort.dispatchEvent(new Event('change',{bubbles:true}));}});
+      }
+      AltCanvasLibraryMenu.open(trigger,{title:'文库操作',actions,error:err=>showToast(errorMessage(err),'error')});
+    }
+    document.getElementById('btn-library-more')?.addEventListener('click',event=>openLibraryMenu(event.currentTarget));
+
+    function openArticleMenu(item, trigger) {
+      const lib = item.sourceFile || {};
+      const details = [item.sourceFile?.filename || item.data?.filename || item.data?.title,
+        (item.topics || []).map(t => t.name || t.workspace_name).filter(Boolean).join(' / '), `文档编号：${item.key}`];
+      const actions = [{ label: '编辑标题与来源', run: () => openDocMetaModal(item) }];
+      if (item.isNative) {
+        actions.push({ label: '加入研究主题', run: () => openAddToTopicModal(item) });
+        if (item.sourceFile) {
+          const entry = { relativePath:lib.relativePath || '', name:lib.filename || '', library:lib };
+          actions.push({ label:'重命名原始文件',run:()=>handleSourceFileAction('rename',entry) },
+            { label:'移动原始文件',run:()=>handleSourceFileAction('move',entry) });
+          actions.push(lib.status === 'trashed' ? { label:'恢复原始文件',run:()=>handleSourceFileAction('restore',entry) }
+            : { label:'移入回收站',danger:true,run:()=>handleSourceFileAction('trash',entry) });
+        }
+        actions.push({ label:'从文库移除（保留文件）',danger:true,run:async()=>{
+          await m4Fetch(`/native/documents/${item.key}`,{method:'DELETE',headers:{'If-Match':`W/"${item.version}"`}});
+          showToast('已从文库移除，原始文件保留','success');await refreshCurrentLibraryView();
+        }});
+      }
+      AltCanvasLibraryMenu.open(trigger,{title:'文章操作',details,actions,error:err=>showToast(errorMessage(err),'error')});
+    }
+    function openSourceEntryMenu(entry, trigger) {
+      const lib=entry.library || {};
+      const actions=[];
+      if(entry.type === 'directory') actions.push({label:'选择目录中的文章',run:async()=>{
+        const result=await m4Fetch(`/native/library-roots/${sourceFilesState.rootId}/source-file-ids?path=${encodeURIComponent(entry.relativePath)}`);
+        for(const ref of result.data || [])selectedSourceFileIds.add(ref.sourceFileId);
+        updateSourceFileSelectionUI();
+      }});
+      else if (!(lib.sourceFileId || lib.id)) {
+        actions.push({label:'扫描文库后操作此文件',run:()=>sourceScanFlow()});
+      } else {
+        actions.push(lib.attachmentId ? {label:'打开阅读',run:()=>handleSourceFileAction('open',entry)} : {label:'加入文库',run:()=>handleSourceFileAction('enroll',entry)});
+        actions.push({label:'重命名原始文件',run:()=>handleSourceFileAction('rename',entry)},
+          {label:'移动原始文件',run:()=>handleSourceFileAction('move',entry)});
+        actions.push(lib.status === 'trashed' ? {label:'恢复文件',run:()=>handleSourceFileAction('restore',entry)} : {label:'移入回收站',danger:true,run:()=>handleSourceFileAction('trash',entry)});
+      }
+      AltCanvasLibraryMenu.open(trigger,{title:'文件操作',details:[entry.name,entry.relativePath,entry.modifiedAt ? `修改时间：${formatM4Time(entry.modifiedAt)}`:''],actions,error:err=>showToast(errorMessage(err),'error')});
+    }
+
     function renderItems() {
       if (currentLibraryView === 'files') return;   // 原始文件视图自管容器
       if (libraryTopicFilter) return;               // 主题筛选视图由 loadTopicLibraryDocuments 自管
@@ -2378,49 +2435,22 @@
         const meta = documentMetas.get(docMetaKey(itemLibType, itemLibId, item.key));
         const rawName = item.data?.title || item.data?.filename || '无标题文档';
         const displayTitle = meta?.cleanTitle || rawName;
-        const typeLabel = isPdfAttachment ? 'PDF 附件' : (item.data?.itemType || 'document');
-        const numChildren = item.meta?.numChildren || 0;
 
         const isChecked = selectedDocumentKeys.has(item.key);
 
+        div.classList.add('article-row');
+        const subtitle = [meta?.institution, meta?.year].filter(Boolean).join(' · ')
+          || (item.topics || []).slice(0,1).map(t => t.name || t.workspace_name).join('');
         div.innerHTML = `
           <div class="flex items-start gap-2">
-            <input type="checkbox" class="item-select-checkbox mt-1 w-3.5 h-3.5 rounded border-slate-700 bg-slate-900 text-indigo-500 focus:ring-0 cursor-pointer flex-shrink-0" ${isChecked ? 'checked' : ''} data-item-key="${escapeHTML(item.key)}" title="勾选加入针对性AI识别与归类">
+            <input type="checkbox" class="item-select-checkbox mt-1 w-3.5 h-3.5 rounded cursor-pointer flex-shrink-0" ${isChecked ? 'checked' : ''} data-item-key="${escapeHTML(item.key)}" aria-label="选择文章">
             <div class="min-w-0 flex-1">
-              <div class="flex items-start justify-between gap-1.5">
-                <div class="font-medium ${isSelected ? 'text-blue-300' : 'group-hover:text-blue-400 text-slate-200'} line-clamp-2 leading-snug flex-1">${escapeHTML(displayTitle)}</div>
-                <button type="button" class="btn-item-edit-meta p-0.5 text-slate-500 hover:text-blue-400 opacity-0 group-hover:opacity-100 transition flex-shrink-0" title="编辑易读中文名" aria-label="编辑研报元数据">
-                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
-                </button>
-              </div>
-              ${item.isNative ? `<div class="text-[10px] text-slate-500 truncate mt-0.5" title="原始文件名（磁盘文件名）">📄 ${escapeHTML(item.sourceFile?.filename || '未入库 / 无原始文件')}</div>` : ''}
-              ${meta?.cleanTitle && rawName !== meta.cleanTitle && !item.isNative ? `<div class="text-[10px] text-slate-500 truncate mt-0.5" title="${escapeHTML(rawName)}">${escapeHTML(rawName)}</div>` : ''}
-              ${item.isNative && item.sourceFile && item.sourceFile.status !== 'active' ? `<div class="mt-1"><span class="px-1.5 py-0.2 rounded bg-amber-950/60 border border-amber-800/60 text-[10px] text-amber-300">${escapeHTML(M4_SOURCE_STATUS_LABELS[item.sourceFile.status] || item.sourceFile.status)}</span></div>` : ''}
-              <div class="flex items-center justify-between mt-1.5 text-[11px] text-slate-500">
-              <div class="flex items-center gap-1 overflow-hidden">
-                <span class="px-1.5 py-0.2 rounded bg-slate-900 border border-slate-800 text-[10px] text-slate-400 flex-shrink-0">${escapeHTML(typeLabel)}</span>
-                ${(item.topics || []).slice(0, 2).map(t => `<span class="px-1.5 py-0.2 rounded bg-emerald-950/70 border border-emerald-800/60 text-[10px] text-emerald-300 truncate max-w-[110px]" title="已归入主题：${escapeHTML(t.name || t.workspace_name || '')}">🗂 ${escapeHTML(t.name || t.workspace_name || '')}</span>`).join('')}
-                ${meta?.institution ? `<span class="px-1.5 py-0.2 rounded bg-indigo-950/70 border border-indigo-800/60 text-[10px] text-indigo-300 truncate max-w-[90px]" title="${escapeHTML(meta.institution)}">🏛️ ${escapeHTML(meta.institution)}</span>` : ''}
-                ${meta?.year ? `<span class="px-1 py-0.2 rounded bg-slate-900 text-[10px] text-slate-400 font-mono">${escapeHTML(meta.year)}</span>` : ''}
-              </div>
-                <div class="flex items-center gap-1.5 font-mono text-[10px] flex-shrink-0">
-                  ${numChildren > 0 ? `<span class="text-slate-400">📎 ${numChildren}</span>` : ''}
-                  <span class="text-slate-500">${escapeHTML(item.key)}</span>
-                </div>
-              </div>
-              ${item.isNative && item.sourceFile ? `
-              <div class="flex flex-wrap gap-1 mt-1.5 native-item-actions">
-                <button type="button" class="px-1.5 py-0.5 rounded bg-indigo-950/60 border border-indigo-800/60 text-[10px] text-indigo-300 hover:text-indigo-200" data-native-action="add-topic" title="加入研究主题">📚</button>
-                <button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-slate-300 hover:text-slate-100" data-native-action="rename-original" title="重命名原始文件">✏️</button>
-                <button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-slate-300 hover:text-slate-100" data-native-action="move" title="移动文件">📂</button>
-                <button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-amber-400 hover:text-amber-300" data-native-action="remove-from-library" title="从文库移除（文件保留）">📤</button>
-                ${item.sourceFile.status === 'trashed'
-                  ? '<button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-emerald-300 hover:text-emerald-200" data-native-action="restore" title="从回收站恢复">♻️</button>'
-                  : '<button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-rose-300 hover:text-rose-200" data-native-action="trash" title="移入回收站">🗑</button>'}
-              </div>` : ''}
+              <div class="article-title font-medium text-slate-200 line-clamp-2">${escapeHTML(displayTitle)}</div>
+              ${subtitle ? `<div class="article-meta">${escapeHTML(subtitle)}</div>` : ''}
+              ${item.sourceFile && item.sourceFile.status !== 'active' ? `<div class="article-meta text-amber-300">${escapeHTML(M4_SOURCE_STATUS_LABELS[item.sourceFile.status] || item.sourceFile.status)}</div>` : ''}
             </div>
-          </div>
-        `;
+            <button type="button" class="article-more" aria-label="文章更多操作" aria-haspopup="menu" aria-expanded="false" title="更多">⋯</button>
+          </div>`;
         div.onclick = (e) => {
           const cb = e.target.closest('.item-select-checkbox');
           if (cb) {
@@ -2430,39 +2460,12 @@
             updateLibrarySelectionUI();
             return;
           }
-          if (e.target.closest('.btn-item-edit-meta')) {
-            e.stopPropagation();
-            openDocMetaModal(item);
-            return;
-          }
-          if (e.target.closest('[data-native-action="add-topic"]') && item.isNative) {
-            e.stopPropagation();
-            openAddToTopicModal(item);
-            return;
-          }
-          const nativeActionBtn = e.target.closest('[data-native-action]');
-          if (nativeActionBtn && item.isNative) {
-            e.stopPropagation();
-            const lib = item.sourceFile || {};
-            const entry = { relativePath: lib.relativePath || '', name: lib.filename || '', library: lib };
-            if (nativeActionBtn.dataset.nativeAction === 'remove-from-library') {
-              const docId = item.key;
-              const version = item.version;
-              m4Fetch(`/native/documents/${docId}`, {
-                method: 'DELETE',
-                headers: { 'If-Match': `W/"${version}"` }
-              }).then(() => {
-                showToast('已从文库移除（原始文件保留在磁盘上）', 'success');
-                return loadNativeLibrary().catch(() => {});
-              }).catch(err => showToast(`移除失败: ${errorMessage(err)}`, 'error'));
-              return;
-            }
-            handleSourceFileAction(nativeActionBtn.dataset.nativeAction, entry).catch(err => handleM4ConflictError(err, { entry, lib }));
-            return;
-          }
+          const more = e.target.closest('.article-more');
+          if (more) { e.stopPropagation(); openArticleMenu(item, more); return; }
           openItem(item);
         };
         div.onkeydown = (e) => {
+          if (e.target !== div) return;
           if (e.key === 'Enter' || e.key === ' ') {
             e.preventDefault();
             openItem(item);
@@ -2595,7 +2598,7 @@
       if (!container) return;
       const entries = sourceFilesState.entries || [];
       if (!entries.length) {
-        container.innerHTML = '<div class="text-center text-slate-500 py-10 text-xs">此目录为空（仅显示 PDF 与子目录）</div>';
+        container.innerHTML = '<div class="text-center text-slate-500 py-10 text-xs">此目录暂无可阅读文件或子目录</div>';
         return;
       }
       // Apply sort: directories always first, then files per sort mode
@@ -2633,29 +2636,16 @@
         const checkbox = entry.type === 'pdf' && lib?.sourceFileId
           ? `<input type="checkbox" class="source-select-checkbox w-3.5 h-3.5 rounded border-slate-700 bg-slate-900 text-indigo-500 focus:ring-0 cursor-pointer flex-shrink-0 mt-0.5" ${isSelected ? 'checked' : ''} data-sf-id="${escapeHTML(lib.sourceFileId)}" title="勾选进行 AI 识别入库">`
           : '';
-        const actions = entry.type === 'pdf' ? `
-          <div class="flex flex-wrap gap-1 mt-1.5 source-actions">
-            ${lib?.attachmentId ? `<button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-blue-300 hover:text-blue-200" data-source-action="open" title="打开阅读">📖</button>` : ''}
-            <button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-slate-300 hover:text-slate-100" data-source-action="rename" title="重命名">✏️</button>
-            <button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-slate-300 hover:text-slate-100" data-source-action="move" title="移动">📂</button>
-            ${lib?.status === 'trashed'
-              ? '<button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-emerald-300 hover:text-emerald-200" data-source-action="restore" title="从回收站恢复">♻️</button>'
-              : '<button type="button" class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-rose-300 hover:text-rose-200" data-source-action="trash" title="移入回收站">🗑</button>'}
-          </div>` : '';
+        div.classList.add('article-row');
         div.innerHTML = `
           <div class="flex items-start gap-2">
             ${checkbox}
             <div class="min-w-0 flex-1">
-              <div class="flex items-start justify-between gap-1.5">
-                <div class="font-medium text-slate-200 truncate flex-1" title="${escapeHTML(entry.relativePath)}">${entry.type === 'directory' ? '📁' : '📄'} ${escapeHTML(entry.name)}</div>
-                ${entry.type === 'directory' ? `<button type="button" class="px-1.5 py-0.5 rounded bg-indigo-950/60 border border-indigo-800/60 text-[10px] text-indigo-300 hover:text-indigo-200 flex-shrink-0" data-select-dir="${escapeHTML(entry.relativePath)}" title="勾选此目录下所有未入库的 PDF">📂 全选</button>` : statusBadge}
-              </div>
-              ${entry.type !== 'directory' ? libTitle : ''}
-              ${entry.type !== 'directory' ? `<div class="text-[10px] text-slate-500 mt-0.5 font-mono">${escapeHTML(formatM4Bytes(entry.sizeBytes))} · ${escapeHTML(formatM4Time(entry.modifiedAt))}</div>` : ''}
-              ${actions}
+              <div class="article-title font-medium text-slate-200 line-clamp-2">${entry.type === 'directory' ? '📁 ' : ''}${escapeHTML(lib?.documentTitle || entry.name)}</div>
+              ${entry.type !== 'directory' ? `<div class="article-meta">${escapeHTML(lib?.status !== 'active' && lib ? statusLabel : lib?.documentId ? '已入库' : '未入库')} · ${escapeHTML(formatM4Bytes(entry.sizeBytes))}</div>` : ''}
             </div>
-          </div>
-        `;
+            <button type="button" class="article-more" aria-label="文件更多操作" aria-haspopup="menu" aria-expanded="false" title="更多">⋯</button>
+          </div>`;
         div.onclick = (e) => {
           const cb = e.target.closest('.source-select-checkbox');
           if (cb) {
@@ -2665,35 +2655,18 @@
             updateSourceFileSelectionUI();
             return;
           }
-          const selectDirBtn = e.target.closest('[data-select-dir]');
-          if (selectDirBtn) {
-            e.stopPropagation();
-            const dirPath = selectDirBtn.dataset.selectDir;
-            // 递归获取该目录下所有未入库的 source_file ID 并勾选
-            m4Fetch(`/native/library-roots/${sourceFilesState.rootId}/source-file-ids?path=${encodeURIComponent(dirPath)}`)
-              .then(res => {
-                const ids = (res.data || []).map(r => r.sourceFileId);
-                for (const id of ids) selectedSourceFileIds.add(id);
-                updateSourceFileSelectionUI();
-                showToast(`已勾选 ${ids.length} 个文件`, 'info');
-              })
-              .catch(err => showToast(`全选失败: ${errorMessage(err)}`, 'error'));
-            return;
-          }
-          const actionBtn = e.target.closest('[data-source-action]');
-          if (actionBtn) {
-            e.stopPropagation();
-            handleSourceFileAction(actionBtn.dataset.sourceAction, entry);
-            return;
-          }
+          const more = e.target.closest('.article-more');
+          if (more) { e.stopPropagation(); openSourceEntryMenu(entry, more); return; }
           if (entry.type === 'directory') {
             loadSourceFiles(entry.relativePath);
-          }
+          } else if (lib?.attachmentId) { handleSourceFileAction('open', entry); }
         };
         div.onkeydown = (e) => {
-          if ((e.key === 'Enter' || e.key === ' ') && entry.type === 'directory') {
+          if (e.target !== div) return;
+          if (e.key === 'Enter' || e.key === ' ') {
             e.preventDefault();
-            loadSourceFiles(entry.relativePath);
+            if (entry.type === 'directory') loadSourceFiles(entry.relativePath);
+            else if (lib?.attachmentId) handleSourceFileAction('open', entry);
           }
         };
         container.appendChild(div);
@@ -3662,7 +3635,7 @@
         if (count) count.textContent = `${resolved.length} 篇`;
         container.replaceChildren();
         if (!resolved.length) {
-          container.innerHTML = '<div class="text-center text-slate-500 py-12 px-3 text-xs leading-relaxed">该主题下暂无可阅读的 PDF。<br>可在文库列表将文献归入本主题（行内「📚 主题」），或用「✨ AI 主题归类」批量采纳。</div>';
+          container.innerHTML = '<div class="text-center text-slate-500 py-12 px-3 text-xs leading-relaxed">该主题下暂无可阅读的 PDF。<br>可在文库列表将文献归入本主题（文章三点菜单中的“加入研究主题”），或用「✨ AI 主题归类」批量采纳。</div>';
           return;
         }
 
@@ -3678,23 +3651,22 @@
           const displayTitle = meta?.cleanTitle || rawTitle;
           // 与文库列表一致：主题视图的行也带多选勾选框（勾选后可针对性 AI 识别与归类）。
           const wrapper = document.createElement('div');
-          wrapper.className = 'w-full flex items-center gap-2 p-2.5 rounded text-xs transition border bg-slate-950/40 hover:bg-slate-900 border-slate-900 hover:border-indigo-800 text-slate-300 group';
-          wrapper.innerHTML = `
-            <input type="checkbox" class="item-select-checkbox w-3.5 h-3.5 rounded border-slate-700 bg-slate-900 text-indigo-500 focus:ring-0 cursor-pointer flex-shrink-0" ${selectedDocumentKeys.has(item.key) ? 'checked' : ''} data-item-key="${escapeHTML(item.key)}" title="勾选加入针对性AI识别与归类">
-            <button type="button" class="flex-1 min-w-0 text-left p-1 rounded text-xs transition group">
-              <div class="font-medium text-slate-200 group-hover:text-indigo-300 line-clamp-2 leading-snug">${escapeHTML(displayTitle)}</div>
-              ${meta?.cleanTitle && meta.cleanTitle !== rawTitle ? `<div class="text-[10px] text-slate-500 truncate mt-0.5" title="${escapeHTML(rawTitle)}">${escapeHTML(rawTitle)}</div>` : ''}
-              <div class="flex items-center justify-between gap-2 mt-1.5 text-[10px] text-slate-500">
-                <span class="px-1.5 py-0.5 rounded bg-indigo-950/70 border border-indigo-900 text-indigo-300">PDF</span>
-                <span class="font-mono truncate">${escapeHTML(attachment.data?.filename || attachment.key || '')}</span>
-              </div>
-            </button>`;
+          wrapper.className = 'w-full p-2.5 rounded text-xs transition border bg-slate-950/40 hover:bg-slate-900 border-slate-900 hover:border-indigo-800 text-slate-300 group';
+          wrapper.classList.add('article-row');
+          wrapper.innerHTML = `<div class="flex items-start gap-2">
+            <input type="checkbox" class="item-select-checkbox w-3.5 h-3.5 mt-1 flex-shrink-0" data-item-key="${escapeHTML(item.key)}" ${selectedDocumentKeys.has(item.key) ? 'checked' : ''} aria-label="选择文章">
+            <button type="button" class="min-w-0 flex-1 text-left article-open">
+              <div class="article-title font-medium text-slate-200 line-clamp-2">${escapeHTML(displayTitle)}</div>
+              ${meta?.institution || meta?.year ? `<div class="article-meta">${escapeHTML([meta?.institution,meta?.year].filter(Boolean).join(' · '))}</div>` : ''}
+            </button><button type="button" class="article-more" aria-label="文章更多操作" aria-haspopup="menu" aria-expanded="false">⋯</button>
+          </div>`;
           wrapper.querySelector('.item-select-checkbox').addEventListener('change', event => {
             if (event.target.checked) selectedDocumentKeys.add(item.key);
             else selectedDocumentKeys.delete(item.key);
             updateLibrarySelectionUI();
           });
-          wrapper.querySelector('button').onclick = () => openItem(item, doc);
+          wrapper.querySelector('.article-open').onclick = () => openItem(item, doc);
+          wrapper.querySelector('.article-more').onclick = event => openArticleMenu(item, event.currentTarget);
           container.appendChild(wrapper);
         }
         updateLibrarySelectionUI();

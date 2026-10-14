@@ -45,7 +45,7 @@ assert.match(html, /function docMetaKey\(/);
 assert.match(html, /function openDocMetaModal\(/);
 assert.match(html, /async function saveDocMetaModal\(/);
 assert.match(html, /async function extractDocumentChineseMetadata\(/);
-assert.match(html, /btn-item-edit-meta/);
+assert.match(html, /openDocMetaModal\(item\)/);
 assert.match(html, /function openQuickEvidencePopover\(/, 'Canvas cards must support in-place evidence quick verification popover');
 assert.match(html, /function openQuickImportModal\(/, 'Canvas and Inbox must support quick DOI/arXiv/URL import');
 assert.match(html, /async function resolveQuickImport\(\)/, 'Quick import must resolve metadata and duplicate detection');
@@ -266,10 +266,10 @@ assert.match(html, /id="btn-source-new-dir"/);
 assert.match(html, /async function loadSourceFiles\(/, 'M4 source-files view must load the real directory tree');
 assert.match(html, /async function applyLibraryFilter\(/, 'M4 library must support 未分类/无 PDF/文件缺失/回收站 filters');
 assert.match(html, /async function libraryAiClassifyFlow\(/, 'AI topic suggestion must be a library-level batch operation');
-assert.match(html, /data-native-action="rename-original"/, 'library items must expose explicit original-file rename');
-assert.match(html, /data-native-action="trash"/, 'library items must expose trash actions');
-assert.match(html, /data-native-action="restore"/, 'library items must expose restore actions');
-assert.match(html, /原始文件名（磁盘文件名）/, 'library items must display the original disk filename');
+assert.match(html, /handleSourceFileAction\('rename',entry\)/, 'library items must expose explicit original-file rename');
+assert.match(html, /handleSourceFileAction\('trash',entry\)/, 'library items must expose trash actions');
+assert.match(html, /handleSourceFileAction\('restore',entry\)/, 'library items must expose restore actions');
+assert.match(html, /item.sourceFile\?\.filename/, 'library items must display the original disk filename');
 
 // --- Behavioral test: libraryAiClassifyFlow applies >=0.7 suggestions via batch-topics ---
 {
@@ -1905,7 +1905,7 @@ assert.match(html, /function getHeaders\(extra = \{\}\) \{\s*return \{\s*'Accept
 
 // [M4 UX] Manual topic binding entry on native library rows; the topic-tab
 // empty state must not reference the retired inbox.
-assert.ok(html.includes('data-native-action="add-topic"'), 'library rows must expose the manual 主题 binding button');
+assert.ok(html.includes('openAddToTopicModal(item)'), 'library rows must expose the manual 主题 binding button');
 assert.equal((html.match(/id=["']add-to-topic-modal["']/g) || []).length, 1, 'add-to-topic modal must exist exactly once');
 assert.ok(html.includes('openAddToTopicModal(item)'), 'library row clicks must wire openAddToTopicModal');
 assert.ok(html.includes('btn-confirm-add-to-topic'), 'add-to-topic confirm button must exist');
