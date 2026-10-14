@@ -35,12 +35,11 @@
       doc.overview = overview;
     }
     const current = [...documents.values()].find(doc => doc.attachmentKey === attachmentKey) || null;
-    const byId = new Map([...documents.values()].flatMap(doc => doc.nodes.map(entry => [entry.node.id, doc.key])));
-    const relations = edges.filter(edge => byId.has(edge.sourceNodeId) && byId.has(edge.targetNodeId) && byId.get(edge.sourceNodeId) !== byId.get(edge.targetNodeId));
-    return { current, documents: [...documents.values()].filter(doc => doc.overview), relations };
+    return { current };
   }
+
   function mount(root, callbacks) {
-    let context = null, tab = 'guide', lastKey = null, draft = '', openKeys = new Set();
+    let context = null, tab = 'guide', lastKey = null, draft = '';
     const el = (tag, className, text) => { const e = document.createElement(tag); if(className)e.className=className;if(text!==undefined)e.textContent=text;return e; };
     const button = (text, action, className='reading-guide-link') => { const b=el('button',className,text);b.type='button';b.onclick=action;return b; };
     function sourceLink(entry) {
@@ -52,10 +51,8 @@
       if(mode==='step')wrapper.appendChild(el('span','reading-guide-number',String(index+1)));
       const body=el('div');
       body.appendChild(el('h4','',entry.node.title.replace(/^(章节|概念|论点)\s*·\s*/,'')));
-      body.appendChild(el('p','reading-guide-gist',gist(entry.node.body)));
-      const detail=el('details');detail.dataset.openKey=entry.node.id;detail.open=openKeys.has(entry.node.id);
-      detail.appendChild(el('summary','','展开解释与证据'));
-      detail.addEventListener('toggle',()=>{if(detail.open)openKeys.add(entry.node.id);else openKeys.delete(entry.node.id);});
+
+      const detail=el('div','reading-guide-explanation');
       detail.appendChild(el('p','reading-guide-body',entry.node.body));
       if(entry.source.quoteSnapshot){
         const quote=el('blockquote');
@@ -92,29 +89,18 @@
       const save=button('保存笔记',async()=>{if(!draft.trim())return;const savedKey=lastKey,savedText=draft;save.disabled=true;try{await callbacks.saveNote(savedText);if(lastKey===savedKey && draft===savedText){draft='';input.value='';}}catch(error){callbacks.error(error);}finally{save.disabled=false;render(context);}},'reading-guide-button');
       save.disabled=!context.attachmentKey || !context.ready;form.appendChild(save);container.appendChild(form);
     }
-    function renderCompare(container,model){
-      if(model.documents.length<2){container.appendChild(section('先加入另一篇文章','从左侧勾选两篇或更多文献，点击“绘制对比导图”；完成分析后，这里按同一维度比较真实结果。'));return;}
-      const documents=model.documents.slice(0,5);const wrapper=el('div','reading-guide-table-wrap');const table=el('table');
-      const header=el('tr');header.appendChild(el('th','','比较维度'));documents.forEach(d=>header.appendChild(el('th','',d.title)));const thead=el('thead');thead.appendChild(header);table.appendChild(thead);
-      const tbody=el('tbody');
-      [['研究问题',d=>d.guide.question],['核心结论',d=>d.guide.takeaway || d.groups.claim.map(e=>gist(e.node.body)).join('\n')],['证据与方法',d=>d.guide.method],['适用边界',d=>d.guide.limitations]].forEach(([label,get])=>{const row=el('tr');row.appendChild(el('th','',label));documents.forEach(d=>row.appendChild(el('td','',get(d)||'原分析未单列')));tbody.appendChild(row);});table.appendChild(tbody);wrapper.appendChild(table);container.appendChild(wrapper);
-      const s=section('已经建立的跨文章关联');
-      const labels={supports:'支持',contradicts:'分歧',extends:'补充',same_method:'同类方法',context_differs:'口径不同',related:'相关'};
-      for(const relation of model.relations){const source=context.nodes.find(n=>n.id===relation.sourceNodeId);const target=context.nodes.find(n=>n.id===relation.targetNodeId);const item=el('div','reading-guide-relation');item.appendChild(el('p','',`${labels[relation.relation]||relation.relation}：${relation.label||'未提供关联说明'}`));item.appendChild(el('p','reading-guide-muted',`${source?.title || ''} → ${target?.title || ''}`));const ref=context.sources.get(source?.sourceRefId);if(ref)item.appendChild(button('查看来源 ↗',()=>callbacks.jump(ref)));s.appendChild(item);}
-      if(!model.relations.length)s.appendChild(el('p','reading-guide-muted','尚未生成跨文章关联。表格展示原有分析，不自动推断共识或矛盾。'));container.appendChild(s);
-    }
     function render(next){
       if(!next)return;const scroll=root.scrollTop;
       context=next;const key=next.attachmentKey;
       const changed = lastKey !== key;
-      if(changed){draft='';tab='guide';openKeys=new Set();lastKey=key;root.scrollTop=0;}
+      if(changed){draft='';tab='guide';lastKey=key;root.scrollTop=0;}
       const model=buildModel(next);root.replaceChildren();
       root.appendChild(el('p','reading-guide-document',next.title || '请从文库打开一篇文章'));
       const tabs=el('div','reading-guide-tabs');tabs.setAttribute('role','tablist');tabs.setAttribute('aria-label','文章理解');
       const content=el('div','reading-guide-content');content.id='reading-guide-content';content.setAttribute('role','tabpanel');
-      [['guide','导读'],['notes','我的标注'],['compare','多篇对比']].forEach(([value,label])=>{const b=button(label,()=>{tab=value;render(context);},'reading-guide-tab');b.id=`reading-guide-tab-${value}`;b.setAttribute('role','tab');b.setAttribute('aria-selected',String(tab===value));b.setAttribute('aria-controls',content.id);tabs.appendChild(b);});root.appendChild(tabs);content.setAttribute('aria-labelledby',`reading-guide-tab-${tab}`);root.appendChild(content);
-      if(!next.attachmentKey && tab!=='compare'){content.appendChild(section('打开文章，开始阅读','导读跟随当前文章，保留你的标注与原文位置。'));}
-      else if(tab==='guide')renderGuide(content,model.current);else if(tab==='notes')renderNotes(content,model.current);else renderCompare(content,model);
+      [['guide','导读'],['notes','我的标注']].forEach(([value,label])=>{const b=button(label,()=>{tab=value;render(context);},'reading-guide-tab');b.id=`reading-guide-tab-${value}`;b.setAttribute('role','tab');b.setAttribute('aria-selected',String(tab===value));b.setAttribute('aria-controls',content.id);tabs.appendChild(b);});root.appendChild(tabs);content.setAttribute('aria-labelledby',`reading-guide-tab-${tab}`);root.appendChild(content);
+      if(!next.attachmentKey){content.appendChild(section('打开文章，开始阅读','导读跟随当前文章，保留你的标注与原文位置。'));}
+      else if(tab==='guide')renderGuide(content,model.current);else renderNotes(content,model.current);
       if(!changed)root.scrollTop=scroll;
     }
     return { render };

@@ -346,7 +346,7 @@
         <div id="library-selection-bar" class="hidden flex items-center justify-between px-2 py-1 bg-indigo-950/50 border border-indigo-900/60 rounded text-[11px] text-indigo-200">
           <span>已勾选 <b id="library-selected-count" class="text-white font-mono">0</b> 篇文献</span>
           <div class="flex items-center gap-2">
-            <button id="btn-library-batch-map" type="button" class="text-purple-300 hover:text-white font-medium underline text-[10px]" title="对所选文献在画板绘制知识导图与对比">🗺️ 绘制对比导图</button>
+            <button id="btn-library-batch-map" type="button" class="text-purple-300 hover:text-white font-medium underline text-[10px]" title="分别为所选文献生成导读">生成所选导读</button>
             <button id="btn-select-all-visible" type="button" class="text-indigo-300 hover:text-white underline text-[10px]">全选当前</button>
             <button id="btn-clear-selection" type="button" class="text-slate-400 hover:text-slate-200 text-[10px]">取消勾选</button>
           </div>
@@ -1227,8 +1227,8 @@
       if (countEl) countEl.textContent = count;
       const btnBatchMap = document.getElementById('btn-library-batch-map');
       if (btnBatchMap) {
-        btnBatchMap.textContent = count > 1 ? `🗺️ 对比导图 (${count})` : '🗺️ 绘制导图';
-        btnBatchMap.title = count > 1 ? `对勾选的 ${count} 篇文献在画板绘制对比综合导图，标出共识与分歧` : '对勾选的文献在画板绘制知识导图';
+        btnBatchMap.textContent = count > 1 ? `生成所选导读 (${count})` : '生成导读';
+        btnBatchMap.title = count > 1 ? `分别理解勾选的 ${count} 篇文献，不自动对比` : '为勾选的文献生成导读';
       }
       if (btnClassify && !btnClassify.disabled) {
         btnClassify.textContent = count > 0 ? `✨ AI 识别已选 (${count})` : '✨ AI 识别与归类';
@@ -3277,7 +3277,7 @@
       const btnBatchMap = document.getElementById('btn-library-batch-map');
       const keys = Array.from(selectedDocumentKeys);
       if (btnBatchMap) btnBatchMap.textContent = '⏳ 绘制中...';
-      setCanvasSaveState(`准备为 ${keys.length} 篇文献绘制导图与对比…`);
+      setCanvasSaveState(`准备为 ${keys.length} 篇文献分别生成导读…`);
 
       let processed = 0;
 
@@ -3338,7 +3338,7 @@
             } catch (err) { throw err; }
             if (!pages.length) continue;
 
-            setCanvasSaveState(`AI 对比与融合 [${processed + 1}/${keys.length}] 《${title.slice(0, 14)}》…`);
+            setCanvasSaveState(`AI 阅读文章 [${processed + 1}/${keys.length}] 《${title.slice(0, 14)}》…`);
             await canvasFetch(`/boards/${canvasBoard.id}/ai/document-map`, {
               method: 'POST',
               body: {
@@ -3356,8 +3356,8 @@
         updateLibrarySelectionUI();
 
         if (processed > 0) {
-          showToast(`✨ 已完成 ${processed} 篇文献的导图绘制与对比融合！`, 'success');
-          setCanvasSaveState(`✨ 导图对比完成（处理 ${processed} 篇）`, 'ok');
+          showToast(`✨ 已完成 ${processed} 篇文献的导读生成！`, 'success');
+          setCanvasSaveState(`✨ 导读完成（处理 ${processed} 篇）`, 'ok');
         } else {
           showToast('所选文献未能成功提取 PDF 内容', 'error');
           setCanvasSaveState('绘制导图失败', 'error');
@@ -7084,14 +7084,8 @@
       if (docBtn) {
         docBtn.disabled = !currentAttachment || !currentReaderInstance
           || !canvasReady || !aiConfig.configured || aiDocumentGenerationInFlight;
-        const hasExistingCards = canvasNodes.size > 0;
-        if (hasExistingCards) {
-          docBtn.textContent = readingGuideEnabled ? '阅读全文' : '➕ 对比补充';
-          docBtn.title = '以当前画板为基础，分析新文献并补充对比、标出相同点与矛盾点';
-        } else {
-          docBtn.textContent = readingGuideEnabled ? '阅读全文' : '🗺️ 绘制导图';
-          docBtn.title = '提取当前 PDF 核心观点与结构，生成知识导图';
-        }
+        docBtn.textContent = readingGuideEnabled ? '阅读全文' : '🗺️ 绘制导图';
+        docBtn.title = '理解当前文章的问题、推理、结论及原文依据';
       }
       const organizeBtn = document.getElementById('btn-canvas-ai-organize');
       if (organizeBtn) {

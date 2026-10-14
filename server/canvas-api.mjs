@@ -3726,7 +3726,7 @@ ${textSnippet.slice(0, 8000) || '无'}`;
 
         // Stage 2: Board-Specific Relation Synthesis (runs for both fresh analysis and cache hit)
         let boardRelations = [];
-        if (existingNodes.length > 0) {
+        if (body.inferBoardRelations === true && existingNodes.length > 0) {
           try {
             const cardsBrief = [
               ...(baseGraph.sections || []).map(s => `[${s.id}] (章节) ${s.title}: ${s.body.slice(0, 1500)}`),

@@ -220,8 +220,8 @@ assert.match(html, /canvas-node-gist/,
 assert.match(html, /if \(key === 'o'\)/,
   'outline mode must have a dedicated keyboard shortcut');
 const canvasApi = fs.readFileSync(new URL('../server/canvas-api.mjs', import.meta.url), 'utf8');
-assert.match(fs.readFileSync(new URL('../server/reading-policy.mjs', import.meta.url), 'utf8'), /每个 body 的第一句必须是不超过 40 字的核心结论句/,
-  'document-map prompt must require a concise first sentence so compact cards get a real gist');
+assert.match(fs.readFileSync(new URL('../server/reading-policy.mjs', import.meta.url), 'utf8'), /每个 body 用连贯的自然段把观点讲清楚/,
+  'document-map prompt must explain the reasoning in connected prose');
 
 // --- T1 Topic Workspaces, Research Inbox, and Batch Actions ---
 // --- T3 Cross-Report Relations & Progressive Expansion ---
@@ -1990,8 +1990,7 @@ assert.match(html, /id="btn-library-batch-map"/, 'Library selection bar must pro
 assert.match(html, /function libraryBatchMapFlow\(/, 'libraryBatchMapFlow must exist');
 assert.match(html, /function extractAttachmentPdfPages\(/, 'extractAttachmentPdfPages must exist for multi-document extraction');
 assert.match(html, /function autoFitAllCanvasNodes\(/, 'autoFitAllCanvasNodes must exist for compact content height');
-assert.match(html, /docBtn\.textContent = readingGuideEnabled \? '阅读全文' : '➕ 对比补充'/, 'toolbar button must dynamically shift to 对比补充 when board has cards');
-assert.match(html, /docBtn\.textContent = readingGuideEnabled \? '阅读全文' : '🗺️ 绘制导图'/, 'toolbar button must dynamically shift to 绘制导图 when board is empty');
+assert.match(html, /docBtn\.textContent = readingGuideEnabled \? '阅读全文' : '🗺️ 绘制导图'/, 'toolbar must keep reading focused on the current article');
 assert.match(html, /text-rose-300 text-\[9px\]">分歧<\/span>/, 'canvas card must support 分歧 relation badge');
 assert.match(html, /text-emerald-300 text-\[9px\]">共识<\/span>/, 'canvas card must support 共识 relation badge');
 assert.match(html, /text-blue-300 text-\[9px\]">补充<\/span>/, 'canvas card must support 补充 relation badge');

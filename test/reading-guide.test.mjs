@@ -29,7 +29,7 @@ const data={nodes,sources,edges,attachmentKey:'att-a',title:'当前文章',ready
 const model=buildModel(data);
 assert.equal(model.current.guide.question,'结构化问题');
 assert.equal(model.current.nodes.length,2,'single-article view must exclude another attachment');
-assert.equal(model.documents.length,2);assert.equal(model.relations.length,1);
+
 assert.equal(overviewParts('【研究问题】\n问题\n【核心发现】\n发现\n【限制】\n限制').takeaway,'发现','legacy heading format must remain readable');
 assert.equal(buildModel({...data,attachmentKey:'not-analyzed'}).current,null,'never silently show another article');
 function walk(root){return [root,...root.children.flatMap(walk)];}
@@ -45,14 +45,15 @@ find(root,e=>e.tag==='button'&&e.textContent==='可点击的证据').onclick();
 assert.equal(jumped.quoteSnapshot,'可点击的证据');
 controller.render(data);
 
-find(root,e=>e.tag==='details').open=true;const details=find(root,e=>e.tag==='details');details.listeners.toggle();
-controller.render(data);assert.equal(find(root,e=>e.tag==='details').open,true,'expanded explanation survives data refresh');
+assert.match(root.textContent,/这是推理第一步。随后解释。/,'full explanation is visible by default');
+assert.equal(walk(root).some(e=>e.tag==='details'),false,'explanations must not require repeated expansion');
+assert.equal(root.textContent.split('这是推理第一步。').length-1,1,'do not repeat a gist before the explanation');
+assert.doesNotMatch(root.textContent,/多篇对比|已建立的补充关系/,'unrelated articles must not be forced into comparisons');
 find(root,e=>e.tag==='button'&&e.textContent==='我的标注').onclick();
 let input=find(root,e=>e.tag==='textarea');input.value='<img src=x onerror=alert(1)> 我的问题';input.oninput();
 root.scrollTop=123;controller.render(data);input=find(root,e=>e.tag==='textarea');assert.match(input.value,/我的问题/);assert.equal(root.scrollTop,123);
 await find(root,e=>e.tag==='button'&&e.textContent==='保存笔记').onclick();assert.match(saved,/我的问题/);assert.equal(error,null);
-find(root,e=>e.tag==='button'&&e.textContent==='多篇对比').onclick();assert.match(root.textContent,/已建立的补充关系/);assert.match(root.textContent,/另一问题/);
 controller.render({...data,attachmentKey:'att-b',title:'B'});assert.equal(root.scrollTop,0);assert.match(root.textContent,/另一结论/);assert.doesNotMatch(root.textContent,/结构化结论/);
 controller.render({...data,attachmentKey:'missing'});assert.match(root.textContent,/还没有这篇文章/);
 assert.equal(walk(root).some(e=>e.tag==='img'),false,'user content never becomes executable markup');
-console.log('✅ Guided reading: per-article isolation, legacy fallback, evidence, comparison, draft/expansion preservation and navigation passed');
+console.log('✅ Guided reading: per-article isolation, legacy fallback, visible prose, evidence, no forced comparison, draft preservation and navigation passed');
