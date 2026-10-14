@@ -113,11 +113,9 @@ assert.match(html, /_primaryView\?\.find/,
   'clicking an AI citation must ask Reader to highlight the exact quoted text');
 assert.match(html, /async function locatePdfEvidence\(pageIndex, quote, pageDataCache = null\)/,
   'exact evidence navigation must derive PDF rectangles from the real character layer');
-assert.match(html, /ALT-AI-EVIDENCE-HIGHLIGHT/,
-  'exact evidence navigation must render a stable session-only Reader highlight');
-assert.match(html, /readOnly: true,[\s\S]*isExternal: true/,
-  'the evidence highlight must not become a writable Altero annotation');
-assert.match(html, /AI 卡片原文证据（临时定位，不写回文库）/);
+assert.match(html, /await reader\.navigate\(\{ position \}\)/,
+  'exact evidence navigation must use Reader position highlighting');
+// Non-persistence and no synthetic selection are verified behaviorally in evidence-navigation.test.mjs.
 assert.ok(html.includes("currentReaderInstance?.textPages ? '块' : 'p.'"), 'text blocks must not be displayed as PDF printed pages');
 assert.match(html, /\/boards\/\$\{canvasBoard\.id\}\/ai\/document-map/,
   'the current PDF must be able to create a full understanding canvas');

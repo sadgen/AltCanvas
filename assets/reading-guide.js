@@ -57,7 +57,12 @@
       detail.appendChild(el('summary','','展开解释与证据'));
       detail.addEventListener('toggle',()=>{if(detail.open)openKeys.add(entry.node.id);else openKeys.delete(entry.node.id);});
       detail.appendChild(el('p','reading-guide-body',entry.node.body));
-      if(entry.source.quoteSnapshot)detail.appendChild(el('blockquote','',entry.source.quoteSnapshot));
+      if(entry.source.quoteSnapshot){
+        const quote=el('blockquote');
+        const link=button(entry.source.quoteSnapshot,()=>callbacks.jump(entry.source),'reading-guide-quote');
+        link.title='定位并临时高亮原文';
+        quote.appendChild(link);detail.appendChild(quote);
+      }
       detail.appendChild(sourceLink(entry));
       detail.appendChild(button('编辑笔记',()=>callbacks.edit(entry.node)));
       body.appendChild(detail);wrapper.appendChild(body);return wrapper;

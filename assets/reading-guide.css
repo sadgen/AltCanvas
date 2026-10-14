@@ -30,3 +30,6 @@
 #annotations-pane.guided-mode .canvas-toolbar > :not(#btn-canvas-ai-document):not(#btn-canvas-import):not(#btn-canvas-reanalyze) { display:none!important; }
 #annotations-pane.guided-mode #canvas-cards { display:none; }
 @media(max-width:820px) { #reading-guide { padding:16px; } #reading-guide textarea { font-size:16px; } }
+
+.reading-guide-quote{display:block;width:100%;text-align:left;color:inherit;font:inherit;white-space:pre-wrap;cursor:pointer;background:none;border:0;padding:0}
+.reading-guide-quote:hover,.reading-guide-quote:focus-visible{color:#c4b5fd;text-decoration:underline;text-underline-offset:3px}

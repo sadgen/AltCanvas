@@ -6893,6 +6893,11 @@
         await Promise.resolve(reader.navigate({ pageIndex }));
         const evidenceQuery = cleanAnnotationText(sourceRef.quoteSnapshot || sourceRef.position?.textQuote || '').slice(0, 240);
         const highlighted = evidenceQuery ? await showPdfEvidenceHighlight(sourceRef, pageIndex) : false;
+        browserDebug.report({ level: 'info', source: 'reader.evidence-location',
+          message: `Evidence navigation: page=${pageIndex + 1}, hasQuote=${Boolean(evidenceQuery)}, highlighted=${highlighted}` });
+        if (!highlighted && evidenceQuery) {
+          showToast('已定位页面，但未能精确高亮该引用', 'info');
+        }
         if (!highlighted && evidenceQuery && currentReaderInstance?._primaryView?.find) {
           currentReaderInstance._primaryView.find({
             query: evidenceQuery,
@@ -7180,30 +7185,14 @@
 
     async function showPdfEvidenceHighlight(sourceRef, pageIndex) {
       const quote = cleanAnnotationText(sourceRef?.quoteSnapshot || sourceRef?.position?.textQuote || '');
-      if (!quote || !currentReaderInstance) return false;
-      if (currentReaderInstance.textPages) return currentReaderInstance.highlightQuote(pageIndex, quote);
+      const reader = currentReaderInstance;
+      if (!quote || !reader) return false;
+      if (reader.textPages) return reader.highlightQuote(pageIndex, quote);
       const position = await locatePdfEvidence(pageIndex, quote);
-      if (!position) return false;
-      const annotationId = 'ALT-AI-EVIDENCE-HIGHLIGHT';
-      const timestamp = new Date().toISOString();
-      currentReaderInstance.setAnnotations([{
-        id: annotationId,
-        type: 'highlight',
-        color: '#a28ae5',
-        pageIndex,
-        pageLabel: String(pageIndex + 1),
-        sortIndex: `${String(pageIndex).padStart(5, '0')}|000000|00000`,
-        position,
-        text: quote,
-        comment: 'AI 卡片原文证据（临时定位，不写回文库）',
-        tags: [],
-        dateCreated: timestamp,
-        dateModified: timestamp,
-        readOnly: true,
-        isExternal: true
-      }]);
-      currentReaderInstance._primaryView?.navigate({ position });
-      currentReaderInstance.setSelectedAnnotations?.([annotationId]);
+      if (!position || currentReaderInstance !== reader) return false;
+      // The reader's position navigation paints a transient highlight itself.
+      // Never insert a synthetic annotation: evidence already belongs to its guide card.
+      await reader.navigate({ position });
       return true;
     }
 

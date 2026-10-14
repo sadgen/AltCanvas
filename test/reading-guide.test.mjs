@@ -39,6 +39,12 @@ const controller=mount(root,{jump:source=>{jumped=source;},saveNote:async value=
 controller.render(data);
 assert.match(root.textContent,/结构化结论/);assert.match(root.textContent,/明确边界/);assert.doesNotMatch(root.textContent,/另一问题/);
 find(root,e=>e.tag==='button'&&e.textContent.includes('引用待核验')).onclick();assert.equal(jumped.attachmentKey,'att-a');
+const withQuote={...data,sources:new Map([...sources].map(([key,value])=>[key,key==='a-step-source'?{...value,quoteSnapshot:'可点击的证据'}:value]))};
+controller.render(withQuote);
+find(root,e=>e.tag==='button'&&e.textContent==='可点击的证据').onclick();
+assert.equal(jumped.quoteSnapshot,'可点击的证据');
+controller.render(data);
+
 find(root,e=>e.tag==='details').open=true;const details=find(root,e=>e.tag==='details');details.listeners.toggle();
 controller.render(data);assert.equal(find(root,e=>e.tag==='details').open,true,'expanded explanation survives data refresh');
 find(root,e=>e.tag==='button'&&e.textContent==='我的标注').onclick();
