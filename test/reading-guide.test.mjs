@@ -29,6 +29,9 @@ const data={nodes,sources,edges,attachmentKey:'att-a',title:'当前文章',ready
 const model=buildModel(data);
 assert.equal(model.current.guide.question,'结构化问题');
 assert.equal(model.current.nodes.length,2,'single-article view must exclude another attachment');
+const argumentModel=buildModel({...data,nodes:[...nodes,{id:'a-later-step',title:'章节 · 后续论证',body:'下一步',sourceRefId:'a-later-source',zIndex:3}],sources:new Map([...sources,['a-later-source',{libraryType:'native',libraryId:'local',attachmentKey:'att-a',position:{pageStart:1}}]])});
+assert.equal(argumentModel.current.groups.section[0].node.id,'a-step','argument order must not be reordered by PDF page number');
+
 
 assert.equal(overviewParts('【研究问题】\n问题\n【核心发现】\n发现\n【限制】\n限制').takeaway,'发现','legacy heading format must remain readable');
 assert.equal(buildModel({...data,attachmentKey:'not-analyzed'}).current,null,'never silently show another article');
@@ -37,6 +40,8 @@ function find(root, predicate){const value=walk(root).find(predicate);assert.ok(
 const root=new Element('section');let jumped=null,saved=null,error=null;
 const controller=mount(root,{jump:source=>{jumped=source;},saveNote:async value=>{saved=value;},error:value=>{error=value;},edit(){},jumpAnnotation(){}});
 controller.render(data);
+assert.ok(root.textContent.indexOf('结构化结论') < root.textContent.indexOf('这些结论是怎样论证出来的？'),'conclusion must precede the argument');
+assert.doesNotMatch(root.textContent,/作者想解决什么问题？/,'background must not be a separate section ahead of the argument');
 assert.match(root.textContent,/结构化结论/);assert.match(root.textContent,/明确边界/);assert.doesNotMatch(root.textContent,/另一问题/);
 find(root,e=>e.tag==='button'&&e.textContent.includes('引用待核验')).onclick();assert.equal(jumped.attachmentKey,'att-a');
 const withQuote={...data,sources:new Map([...sources].map(([key,value])=>[key,key==='a-step-source'?{...value,quoteSnapshot:'可点击的证据'}:value]))};

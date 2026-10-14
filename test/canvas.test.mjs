@@ -638,19 +638,19 @@ try {
   // Strict unversioned cache isolation: unversioned request must NOT match a versioned cache record
   store.saveDocumentAnalysis(canvasActorKey('https://issuer.example', 'api-subject'), {
     libraryType: 'user', libraryId: '42', itemKey: 'DOC_VERSIONED', attachmentKey: 'PDF_V2_ONLY',
-    attachmentVersion: 2, model: 'mock-model', promptVersion: 'altcanvas-document-map-v6',
+    attachmentVersion: 2, model: 'mock-model', promptVersion: 'altcanvas-document-map-v7',
     status: 'ready', documentTitle: 'Version 2 Only', pageCount: 1, graph: { overview: 'Version 2 Analysis' }
   });
 
   const unversionedLookup = store.getDocumentAnalysis(canvasActorKey('https://issuer.example', 'api-subject'), {
     libraryType: 'user', libraryId: '42', attachmentKey: 'PDF_V2_ONLY', attachmentVersion: null,
-    model: 'mock-model', promptVersion: 'altcanvas-document-map-v6'
+    model: 'mock-model', promptVersion: 'altcanvas-document-map-v7'
   });
   assert.equal(unversionedLookup, null, 'Unversioned lookup must not match versioned cache record');
 
   const mismatchedVersionLookup = store.getDocumentAnalysis(canvasActorKey('https://issuer.example', 'api-subject'), {
     libraryType: 'user', libraryId: '42', attachmentKey: 'PDF_V2_ONLY', attachmentVersion: 3,
-    model: 'mock-model', promptVersion: 'altcanvas-document-map-v6'
+    model: 'mock-model', promptVersion: 'altcanvas-document-map-v7'
   });
   assert.equal(mismatchedVersionLookup, null, 'Version 3 lookup must not match version 2 cache record');
 
@@ -845,7 +845,7 @@ try {
 
   // Now project a reduced analysis for DOC_CROSS with 0 claims (so crossClaimNode is soft-deleted)
   const reducedAnalysis = store.projectDocumentAnalysisToBoard(canvasActorKey('https://issuer.example', 'api-subject'), boardInTopic2.id, {
-    model: 'mock-model', promptVersion: 'altcanvas-document-map-v6',
+    model: 'mock-model', promptVersion: 'altcanvas-document-map-v7',
     document: { libraryType: 'user', libraryId: '42', itemKey: 'DOC_CROSS', attachmentKey: 'PDF_CROSS', pageCount: 1 },
     graph: {
       inferBoardRelations: true,
@@ -882,7 +882,7 @@ try {
   // Verify global document analysis cache is NOT polluted with board-specific existing:<nodeId> relations
   const globalAnalysis = store.getDocumentAnalysis(canvasActorKey('https://issuer.example', 'api-subject'), {
     libraryType: 'user', libraryId: '42', attachmentKey: 'PDF_CROSS', attachmentVersion: 1,
-    model: 'mock-model', promptVersion: 'altcanvas-document-map-v6'
+    model: 'mock-model', promptVersion: 'altcanvas-document-map-v7'
   });
   assert.ok(globalAnalysis);
   assert.ok(globalAnalysis.graph.relations.every(r => !String(r.from || '').startsWith('existing:') && !String(r.to || '').startsWith('existing:')),
@@ -2232,7 +2232,7 @@ try {
 
   store.saveDocumentAnalysis(canvasActorKey('https://issuer.example', 'api-subject'), {
     libraryType: 'user', libraryId: '42', itemKey: 'DOC_A', attachmentKey: 'PDF_A', attachmentVersion: 1,
-    model: 'mock-model', promptVersion: 'altcanvas-document-map-v6', status: 'ready',
+    model: 'mock-model', promptVersion: 'altcanvas-document-map-v7', status: 'ready',
     documentTitle: 'DeepSeek-V3 架构解析', pageCount: 10,
     graph: {
       title: 'DeepSeek-V3 架构解析', overview: 'MoE 架构与 MLA 注意力机制。', evidenceQuote: 'MLA 注意力大幅减少 KV 缓存。', evidencePage: 3,
@@ -2245,7 +2245,7 @@ try {
 
   store.saveDocumentAnalysis(canvasActorKey('https://issuer.example', 'api-subject'), {
     libraryType: 'user', libraryId: '42', itemKey: 'DOC_B', attachmentKey: 'PDF_B', attachmentVersion: 1,
-    model: 'mock-model', promptVersion: 'altcanvas-document-map-v6', status: 'ready',
+    model: 'mock-model', promptVersion: 'altcanvas-document-map-v7', status: 'ready',
     documentTitle: 'Kimi k1.5 强化学习技术报告', pageCount: 12,
     graph: {
       title: 'Kimi k1.5 强化学习技术报告', overview: '长上下文强化学习与推理扩展。', evidenceQuote: 'RL 驱动长链推理。', evidencePage: 2,
@@ -2314,7 +2314,7 @@ try {
   assert.doesNotThrow(() => {
     store.saveDocumentAnalysis(canvasActorKey('https://issuer.example', 'api-subject'), {
       libraryType: 'user', libraryId: '42', itemKey: 'DOC_A', attachmentKey: 'PDF_A', attachmentVersion: 1,
-      model: 'mock-model', promptVersion: 'altcanvas-document-map-v6', status: 'ready',
+      model: 'mock-model', promptVersion: 'altcanvas-document-map-v7', status: 'ready',
       documentTitle: 'DeepSeek-V3 架构解析（刷新分析）', pageCount: 10,
       graph: {
         title: 'DeepSeek-V3 架构解析（刷新分析）', overview: '刷新后的 MoE 概览。', evidenceQuote: 'MLA 创新说明。', evidencePage: 4,
@@ -2329,7 +2329,7 @@ try {
   });
   store.saveDocumentAnalysis(canvasActorKey('https://issuer.example', 'api-subject'), {
     libraryType: 'group', libraryId: '7', itemKey: 'DOC_A', attachmentKey: 'PDF_GROUP_A', attachmentVersion: 1,
-    model: 'mock-model', promptVersion: 'altcanvas-document-map-v6', status: 'ready',
+    model: 'mock-model', promptVersion: 'altcanvas-document-map-v7', status: 'ready',
     documentTitle: 'Group 7 内部研报 DOC_A', pageCount: 5,
     graph: {
       title: 'Group 7 内部研报 DOC_A', overview: '组文库独有报告内容。', evidenceQuote: '组文库证据。', evidencePage: 2,
@@ -2425,7 +2425,7 @@ try {
   });
   store.saveDocumentAnalysis(canvasActorKey('https://issuer.example', 'api-subject'), {
     libraryType: 'user', libraryId: '42', itemKey: 'DOC_OTHER_WS', attachmentKey: 'ATT_OTHER_WS', attachmentVersion: 1,
-    model: 'mock-model', promptVersion: 'altcanvas-document-map-v6', status: 'ready', documentTitle: 'Other WS Doc',
+    model: 'mock-model', promptVersion: 'altcanvas-document-map-v7', status: 'ready', documentTitle: 'Other WS Doc',
     pageCount: 3, graph: { overview: 'Other WS Overview', claims: [{ title: 'Other Claim', body: 'Other Body' }] }
   });
   const otherWsUnits = store.listTopicKnowledgeUnits(canvasActorKey('https://issuer.example', 'api-subject'), otherTopicWs.id);
@@ -2443,7 +2443,7 @@ try {
   // Stale attachment/analysis focalUnitId rejection (when doc attachment has updated and old unit is inactive)
   const supersededAnalysis = store.saveDocumentAnalysis(canvasActorKey('https://issuer.example', 'api-subject'), {
     libraryType: 'user', libraryId: '42', itemKey: 'DOC_STALE_ATTACH_TEST', attachmentKey: 'ATT_SUPERSEDED', attachmentVersion: 1,
-    model: 'mock-model', promptVersion: 'altcanvas-document-map-v6', status: 'ready', documentTitle: 'Old Version Doc',
+    model: 'mock-model', promptVersion: 'altcanvas-document-map-v7', status: 'ready', documentTitle: 'Old Version Doc',
     pageCount: 2, graph: { overview: 'Old Overview' }
   });
   const supersededUnit = store.db.prepare('SELECT * FROM knowledge_units WHERE analysis_id = ?').get(supersededAnalysis.id);
@@ -2454,7 +2454,7 @@ try {
   });
   store.saveDocumentAnalysis(canvasActorKey('https://issuer.example', 'api-subject'), {
     libraryType: 'user', libraryId: '42', itemKey: 'DOC_STALE_ATTACH_TEST', attachmentKey: 'ATT_ACTIVE_NEW', attachmentVersion: 2,
-    model: 'mock-model', promptVersion: 'altcanvas-document-map-v6', status: 'ready', documentTitle: 'New Version Doc',
+    model: 'mock-model', promptVersion: 'altcanvas-document-map-v7', status: 'ready', documentTitle: 'New Version Doc',
     pageCount: 2, graph: { overview: 'New Active Overview' }
   });
   const staleUnitRecallRes = await call(handler, `/canvas/workspaces/${otherTopicWs.id}/related-knowledge`, {
@@ -2511,7 +2511,7 @@ try {
 
   store.saveDocumentAnalysis(canvasActorKey('https://issuer.example', 'api-subject'), {
     libraryType: 'user', libraryId: '42', itemKey: 'DOC_SWITCH', attachmentKey: 'PDF_OLD', attachmentVersion: 10,
-    model: 'mock-model', promptVersion: 'altcanvas-document-map-v6', status: 'ready',
+    model: 'mock-model', promptVersion: 'altcanvas-document-map-v7', status: 'ready',
     documentTitle: '旧附件研报', pageCount: 5,
     graph: { title: '旧附件研报', overview: '旧附件内容。', evidenceQuote: '旧证据。', evidencePage: 1, sections: [], concepts: [], claims: [], relations: [] }
   });
@@ -2527,7 +2527,7 @@ try {
 
   store.saveDocumentAnalysis(canvasActorKey('https://issuer.example', 'api-subject'), {
     libraryType: 'user', libraryId: '42', itemKey: 'DOC_SWITCH', attachmentKey: 'PDF_NEW', attachmentVersion: 1,
-    model: 'mock-model', promptVersion: 'altcanvas-document-map-v6', status: 'ready',
+    model: 'mock-model', promptVersion: 'altcanvas-document-map-v7', status: 'ready',
     documentTitle: '新附件研报', pageCount: 8,
     graph: { title: '新附件研报', overview: '新附件全新内容。', evidenceQuote: '新证据。', evidencePage: 2, sections: [], concepts: [], claims: [], relations: [] }
   });
@@ -2542,7 +2542,7 @@ try {
   // 9. Version upgrade invalidates older knowledge units in topic recall
   store.saveDocumentAnalysis(canvasActorKey('https://issuer.example', 'api-subject'), {
     libraryType: 'user', libraryId: '42', itemKey: 'DOC_B', attachmentKey: 'PDF_B', attachmentVersion: 2, // Upgrade to version 2
-    model: 'mock-model', promptVersion: 'altcanvas-document-map-v6', status: 'ready',
+    model: 'mock-model', promptVersion: 'altcanvas-document-map-v7', status: 'ready',
     documentTitle: 'Kimi k1.5 强化学习技术报告 (V2)', pageCount: 15,
     graph: {
       title: 'Kimi k1.5 强化学习技术报告 (V2)', overview: 'V2 全新长链强化学习与推理扩展。', evidenceQuote: 'V2 证据。', evidencePage: 5,

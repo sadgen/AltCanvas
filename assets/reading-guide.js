@@ -27,7 +27,7 @@
       doc.nodes.push(entry); doc.groups[entry.kind]?.push(entry);
     }
     for (const doc of documents.values()) {
-      for (const entries of Object.values(doc.groups)) entries.sort((a,b) => (a.source.position?.pageStart || 1)-(b.source.position?.pageStart || 1) || a.node.zIndex-b.node.zIndex);
+      for (const entries of Object.values(doc.groups)) entries.sort((a,b) => (['section','claim'].includes(a.kind) ? 0 : (a.source.position?.pageStart || 1)-(b.source.position?.pageStart || 1)) || (a.node.zIndex || 0)-(b.node.zIndex || 0));
       const overview = doc.groups.overview[0];
       const parsed = overviewParts(overview?.node.body || '');
       doc.guide = { ...parsed, ...Object.fromEntries(Object.entries(overview?.source.position?.readingGuide || {}).filter(([,value]) => clean(value))) };
@@ -66,17 +66,16 @@
     }
     function section(title,text) { const s=el('section','reading-guide-section');s.appendChild(el('h3','',title));if(text)s.appendChild(el('p','reading-guide-body',text));return s; }
     function renderGuide(container, doc) {
-      if(!doc?.overview){container.appendChild(section('还没有这篇文章的导读', '点击“阅读全文”，生成研究问题、推理主线、关键结论和适用边界。'));return;}
+      if(!doc?.overview){container.appendChild(section('还没有这篇文章的导读', '点击“阅读全文”，先看结论，再读具体论证、原文依据和适用边界。'));return;}
       const takeaway=doc.guide.takeaway || gist(doc.groups.claim[0]?.node.body || '');
-      if(takeaway){const s=section('一句话结论',takeaway);s.classList.add('reading-guide-takeaway');s.appendChild(sourceLink(doc.overview));container.appendChild(s);}
-      if(doc.guide.question)container.appendChild(section('作者想解决什么问题？',doc.guide.question));
-      if(!doc.guide.question || !takeaway){const fallback=section('全文概览',doc.overview.node.body);fallback.appendChild(sourceLink(doc.overview));container.appendChild(fallback);}
-      const steps=section('作者如何得出结论？');
+      if(takeaway){const s=section('结论',takeaway);s.classList.add('reading-guide-takeaway');if(doc.guide.question)s.appendChild(el('p','reading-guide-muted',`针对的问题：${doc.guide.question}`));s.appendChild(sourceLink(doc.overview));container.appendChild(s);}
+      if(!takeaway){const fallback=section('全文概览',doc.overview.node.body);fallback.appendChild(sourceLink(doc.overview));container.appendChild(fallback);}
+      if(doc.groups.claim.length){const s=section('结论的具体含义');doc.groups.claim.forEach((entry,i)=>s.appendChild(entryDetail(entry,i,'claim')));container.appendChild(s);}
+      const steps=section('这些结论是怎样论证出来的？');
       doc.groups.section.forEach((entry,i)=>steps.appendChild(entryDetail(entry,i)));
       if(!doc.groups.section.length)steps.appendChild(el('p','reading-guide-muted','原分析未单列推理步骤，可重新分析。'));
       container.appendChild(steps);
       if(doc.groups.concept.length){const s=section('理解文章需要的概念');doc.groups.concept.forEach((entry,i)=>s.appendChild(entryDetail(entry,i,'concept')));container.appendChild(s);}
-      if(doc.groups.claim.length){const s=section('关键结论与证据');doc.groups.claim.forEach((entry,i)=>s.appendChild(entryDetail(entry,i,'claim')));container.appendChild(s);}
       container.appendChild(section('成立条件与未解问题',doc.guide.limitations || '原分析未单列适用边界；请查看结论中的条件说明，或重新分析。'));
     }
     function renderNotes(container,doc){

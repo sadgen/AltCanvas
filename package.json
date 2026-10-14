@@ -1,6 +1,6 @@
 {
   "name": "altcanvas",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "description": "Self-hosted AI research workspace with native library, file, and canvas management",
   "type": "module",
   "main": "scripts/dev-server.mjs",
