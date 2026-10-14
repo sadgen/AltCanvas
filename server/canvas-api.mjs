@@ -1,3 +1,4 @@
+import { getFileLocation } from './file-location.mjs';
 import { buildEvidenceCatalog, formatEvidenceCatalog } from './evidence-catalog.mjs';
 import crypto from 'node:crypto';
 import { documentMime, documentExtension, extractTextDocument, validateDocumentBytes } from './document-formats.mjs';
@@ -2856,6 +2857,14 @@ export function createCanvasHandler(store, {
           }
         }
         json(res, 200, { data: results });
+        return;
+      }
+
+      match = /^\/canvas\/native\/(documents|source-files)\/([0-9a-f-]+)\/file-location$/.exec(pathname);
+      if (match && method === 'GET') {
+        const location = getFileLocation(store, actor.actorKey, match[1] === 'documents'
+          ? { documentId: match[2] } : { sourceFileId: match[2] });
+        json(res, 200, { data: location }, { 'Cache-Control': 'no-store' });
         return;
       }
 

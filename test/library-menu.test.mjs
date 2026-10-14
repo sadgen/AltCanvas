@@ -53,4 +53,21 @@ await config.actions.find(entry => entry.label === '重命名原始文件').run(
 assert.equal(action, 'rename');
 assert.ok(config.details.includes('original.pdf'), 'raw filename belongs in the menu');
 assert.ok(config.actions.some(entry => entry.label === '加入研究主题'));
-console.log('✅ Library menu positioning, keyboard, safe text, closing and article actions passed');
+const pathHelper = html.slice(html.indexOf('    async function openFilePathMenu('), html.indexOf('    function openArticleMenu('));
+let copied, requested;
+const locations = [{ label: '服务器原文路径', path: '/mnt/reports/report.pdf', onDemand: false },
+  { label: '5.233（Z盘）', path: 'Z:\\hermesagent_shares\\金融研究_paper\\report.pdf', onDemand: false }];
+const pathWiring = vm.createContext({ window: { location: { hostname: '192.168.5.237' } },
+  m4Fetch: async endpoint => { requested = endpoint; return { data: { filename: 'report.pdf', locations } }; },
+  AltCanvasLibraryMenu: { open(_trigger, value) { config = value; } },
+  AltCanvasFilePathCopy: { copy: async value => { copied = value; } }, showToast() {}, errorMessage: err => err.message });
+vm.runInContext(pathHelper, pathWiring);
+await pathWiring.openFilePathMenu('/native/documents/doc-1/file-location', anchor);
+assert.equal(requested, '/native/documents/doc-1/file-location');
+await config.actions[1].run();
+assert.equal(copied, locations[1].path, 'selected agent must receive its own exact path');
+pathWiring.AltCanvasFilePathCopy.copy = async () => { throw new Error('clipboard blocked'); };
+await config.actions[0].run();
+assert.equal(config.title, '手动复制原文路径');
+assert.ok(config.details.includes(locations[0].path), 'blocked clipboard must expose a selectable path');
+console.log('✅ Library menu positioning, keyboard, safe text, article actions and agent path selection passed');

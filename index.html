@@ -8,6 +8,7 @@
   <script src="/assets/reading-guide.js"></script>
   <script src="/assets/ai-wait.js"></script>
   <script src="/assets/library-menu.js"></script>
+  <script src="/assets/file-path-copy.js"></script>
   <link rel="stylesheet" href="/assets/library-list.css">
   <link rel="icon" type="image/svg+xml" href="/assets/logo.svg">
   <link rel="apple-touch-icon" href="/assets/logo.svg">
@@ -2371,12 +2372,33 @@
     }
     document.getElementById('btn-library-more')?.addEventListener('click',event=>openLibraryMenu(event.currentTarget));
 
+    async function openFilePathMenu(endpoint, trigger) {
+      const result = await m4Fetch(endpoint);
+      const location = result.data;
+      if (!location?.locations?.length) throw new Error('这篇文章没有可用的原文路径');
+      const details = [location.filename,
+        location.cloudUnavailable ? '暂未核实 SeaDrive 副本，请选择服务器或共享目录路径' : '选择 agent 能访问的目录路径'];
+      const actions = location.locations.map(entry => ({
+        label: entry.onDemand ? '复制 SeaDrive 路径' : entry.label === '服务器原文路径' ? `复制服务器路径（${window.location.hostname}）` : `复制${entry.label}路径`,
+        run: async () => {
+          try { await AltCanvasFilePathCopy.copy(entry.path); } catch {
+            AltCanvasLibraryMenu.open(trigger, {title:'手动复制原文路径',details:['请选中下面的路径，按 Ctrl+C 复制',entry.path],actions:[],error:err=>showToast(errorMessage(err),'error')});
+            return;
+          }
+          showToast(entry.onDemand ? '已复制 SeaDrive 路径；打开单篇文件时按需下载' : '已复制原文路径', 'success');
+        }
+      }));
+      AltCanvasLibraryMenu.open(trigger, { title: '复制原文路径', details, actions,
+        error: err => showToast(errorMessage(err), 'error') });
+    }
+
     function openArticleMenu(item, trigger) {
       const lib = item.sourceFile || {};
       const details = [item.sourceFile?.filename || item.data?.filename || item.data?.title,
         (item.topics || []).map(t => t.name || t.workspace_name).filter(Boolean).join(' / '), `文档编号：${item.key}`];
       const actions = [{ label: '编辑标题与来源', run: () => openDocMetaModal(item) }];
       if (item.isNative) {
+        actions.unshift({label:'复制原文路径…',run:()=>openFilePathMenu(`/native/documents/${item.key}/file-location`,trigger)});
         actions.push({ label: '加入研究主题', run: () => openAddToTopicModal(item) });
         if (item.sourceFile) {
           const entry = { relativePath:lib.relativePath || '', name:lib.filename || '', library:lib };
@@ -2403,6 +2425,7 @@
       else if (!(lib.sourceFileId || lib.id)) {
         actions.push({label:'扫描文库后操作此文件',run:()=>sourceScanFlow()});
       } else {
+        actions.push({label:'复制原文路径…',run:()=>openFilePathMenu(`/native/source-files/${lib.sourceFileId || lib.id}/file-location`,trigger)});
         actions.push(lib.attachmentId ? {label:'打开阅读',run:()=>handleSourceFileAction('open',entry)} : {label:'加入文库',run:()=>handleSourceFileAction('enroll',entry)});
         actions.push({label:'重命名原始文件',run:()=>handleSourceFileAction('rename',entry)},
           {label:'移动原始文件',run:()=>handleSourceFileAction('move',entry)});
