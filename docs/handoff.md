@@ -2625,3 +2625,8 @@ generate-topics 5.9s）以 sadgen 会话真实复测全部 200，分类与中文
 - 修复合并后自动发布的阻碍：workflow 在测试前缺少根项目 npm ci，新增 fflate 依赖使干净 runner 会失败。补依赖安装和根 lockfile 缓存键；同步纠正 README 中过时的导读顺序/展开/强行比较/AI 输入描述，清除历史文档尾部空白。
 - 当前候选代码的 Linux 隔离环境干净安装、完整 18 套测试、47 源码语法与整个合并差异空白检查通过。未做 Docker 双架构实际构建/GHCR 发布/重复人工 UI 验收；详见 docs/merge-readiness-2026-10-15.md。
 - 结论具备合并条件。本轮只提交并推送检查修复到功能分支，不修改 master，也不切换生产分支。master push 会触发发布；后续合并应核对 CI 再切换生产，同一数据目录与 CPA 配置保持。
+
+### 部署模式确认：仅源码/systemd
+
+- 用户明确只使用当前部署模式，镜像以后再考虑。以本条为最新约定：删除 Docker 自动发布工作流，新增 `.github/workflows/test.yml`，master push、面向 master 的 PR 及手动运行仅执行 Node 22、npm ci、npm test；只授予 contents:read，不登录 GHCR、不构建或发布镜像。
+- 保留 Dockerfile/compose 作未来备选，README 部署章节改为 5.237 源码更新、在线备份、现有编译资源和 systemd 重启验证。此变更无需重启生产，不修改数据或 CPA 配置；也不执行主分支合并。

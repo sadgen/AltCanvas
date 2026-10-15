@@ -151,22 +151,31 @@ must use HTTPS in production.
 
 ## Deployment
 
-Builds require compiled Reader and Web Library assets. CI builds both
-submodules before constructing the runtime image:
+The current production deployment runs the source directly on 192.168.5.237,
+in `/home/sadgen/Projects/AltCanvas`, managed by the user systemd service
+`altcanvas.service`. GitHub Actions runs tests for master pushes and pull
+requests; it does not build or publish images or deploy the service.
+
+Before updating production, keep a rollback commit and back up the live
+SQLite database with SQLite's online backup mechanism, its encryption key,
+and private configuration. Update the checkout to the reviewed commit, then:
 
 ```sh
-npm run build:vendor
-docker compose build
-docker compose up -d
+npm ci --omit=dev
+npm test
+systemctl --user restart altcanvas.service
+systemctl --user is-active altcanvas.service
 ```
 
-`docker-compose.yml` mounts `${ALTCANVAS_DATA_DIR:-./data}` at `/app/data`
-(SQLite database, sessions, blob store) and mounts
-`${ALTCANVAS_LIBRARY_DIR:-./library}` read-write at `/app/library` as the
-default native research library root, exposed to the service through
-`NATIVE_LIBRARY_ROOTS=/app/library|研究文库`. Additional library roots can be
-configured by mounting more directories and extending `NATIVE_LIBRARY_ROOTS`
-with their server-side absolute paths.
+Keep the existing `.env`, data directory, native library mounts and compiled
+Reader assets. Verify the homepage, reader and logs after restart. A fresh
+checkout requires the vendor submodules and compiled distributions; use
+`npm run build:vendor` when those assets need building. Test CI exercises the
+backend and UI behavior tests without building the vendor distributions.
+
+`Dockerfile` and `docker-compose.yml` are retained as optional configuration
+for future container deployment. They are not used by the current production
+service, and no image publication is configured.
 
 After adding or changing Tailwind utility classes, rebuild the checked-in CSS:
 
