@@ -2668,3 +2668,10 @@ generate-topics 5.9s）以 sadgen 会话真实复测全部 200，分类与中文
 - 新增 UI 控件行为测试：真实顶部下拉、分类清空/重建、文件页/全屏/手机返回文库、A→B/返回全部竞态、画板失败、设置事件单次绑定、三点菜单操作、日期单输入保存；Linux 隔离最终完整20套测试通过，本地相关行为测试通过，HTML静态ID无重复。
 - 上线前在线备份 backups/release-20261016-049，旧提交2260cc7；documents=289/attachments=289/annotations=1/workspaces=4/nodes=201/source_files=287/topic_documents=382/document_metas=289，.env/加密主密钥同目录私有备份。只改UI与状态管理，无schema迁移、批量AI、原文改名或内容删除。生产结果随后补充。
 - 临时开发诊断 library.category-filter 仅记录过滤结果数量，用户复验后移除。人工最短复验：Ctrl+F5 → 顶部切换两个分类看左侧篇数/文章 → 未分类/全部 → 右栏三点菜单检查全屏/恢复三栏/高级画板。屏幕布局仍待用户实机认可。
+
+
+### v0.4.9 上线确认
+
+- 应用提交d549d71已推送master，并通过局域网Git bundle在5.237快进部署；GitHub Actions测试成功（run38768041568），生产最终完整20套测试通过。服务重启后active，首页/reader/导读CSS/文库CSS均HTTP200。
+- 与备份逐表全字段内容hash核对（本次包含publication_date），全部业务数据、AI设置、.env与加密主密钥均不变；schema仍v14，外键正常。没有执行批量AI或文件操作。
+- 静态响应与真实顶部事件/分类状态/菜单行为已验证；用户实机分类切换和整体布局仍待反馈。临时 library.category-filter 诊断保留至用户复验后移除。
