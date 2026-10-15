@@ -2630,3 +2630,11 @@ generate-topics 5.9s）以 sadgen 会话真实复测全部 200，分类与中文
 
 - 用户明确只使用当前部署模式，镜像以后再考虑。以本条为最新约定：删除 Docker 自动发布工作流，新增 `.github/workflows/test.yml`，master push、面向 master 的 PR 及手动运行仅执行 Node 22、npm ci、npm test；只授予 contents:read，不登录 GHCR、不构建或发布镜像。
 - 保留 Dockerfile/compose 作未来备选，README 部署章节改为 5.237 源码更新、在线备份、现有编译资源和 systemd 重启验证。此变更无需重启生产，不修改数据或 CPA 配置；也不执行主分支合并。
+
+## 2026-10-15 合并并切换生产到 master
+
+- 用户明确要求“合并”。再次刷新远端后，master=497ffb0，功能分支=0ef40d1，无分叉（0/136）；已本地快进合并并推送 origin/master，未改写历史，保留原功能分支。
+- 合并提交 0ef40d1 的 GitHub Actions `AltCanvas Tests` 全部通过（run 38735918955），只安装依赖与执行测试，没有构建/发布镜像。相对旧生产 cc296ba 仅修改 CI 与文档，应用行为代码相同。
+- 生产上线前在线备份 `backups/release-20261015-master`，回滚提交 cc296ba；documents=285、attachments=285、annotations=1、workspaces=4、nodes=65、source_files=287，为切换前当前数据。加密密钥同备份目录保存，私有 .env 单独做 SHA256 校验，未输出凭据。
+- 5.237 `/home/sadgen/Projects/AltCanvas` 已切换到 master 并快进至同一提交（GitHub 连接不稳定，使用局域网 Git bundle 传递完全相同 Git 对象）。npm ci --omit=dev、生产完整18套测试、systemd 重启均成功。在线复核数据计数、AI 设置与 .env 校验值均不变，首页/reader/会话接口 HTTP 200，工作区干净。
+- 后续默认生产分支为 master，仍采用源码 + systemd 部署，不重新导入文章、不生成导读、不下载 SeaDrive；本段交接通过后续仅文档提交同步。
