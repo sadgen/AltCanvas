@@ -2649,3 +2649,10 @@ generate-topics 5.9s）以 sadgen 会话真实复测全部 200，分类与中文
 - AI 归类返回 ok:false 时明确失败，不再仅凭 HTTP 200 宣称归类保存成功；成功/失败后刷新文库。已有文章需勾选后识别以补日期，默认增量识别仍跳过已完成文献，避免无请求的全库 AI 回填。
 - 新增日期校验/旧库升级/重启持久化/账号隔离、分类标签、201篇分页、分类与画板解耦/缓存更新/切换竞态、真实前端批量采纳与失败响应行为测试；两种分类 API 与 agent 脚本增加日期测试。Linux 隔离环境完整19套测试通过；Windows 相关行为测试通过（本地Node22.11需要 --experimental-sqlite；目录权限测试以Linux为准）。
 - 上线前已在线备份 backups/release-20261016-048，旧提交70db675；documents=289/attachments=289/annotations=1/workspaces=4/nodes=201/source_files=287/topic_documents=382/document_metas=289，为当前含软删除记录的全表计数。加密主密钥和私有.env同目录0600备份；上线不执行AI回填。生产验证结果随后补充。人工最短复验：Ctrl+F5 → 查看标题下的分类 → 下拉切换分类 → 勾选一篇封面有日期的文章，点 AI 识别与归类，确认名称日期和刷新保留；回复完成/看日志后读取生产日志。尚未宣称屏幕效果获用户验收。
+
+
+### v0.4.8 上线确认
+
+- 应用提交9742bd1已推送master，经局域网Git bundle在5.237快进部署同一提交；GitHub Actions测试通过（run 38765513817），生产完整19套测试通过，systemd用户服务active，首页/reader/会话/list.css均HTTP200。
+- schema已迁移到v14；与上线前在线备份逐表内容hash核对，documents/attachments/annotations/workspaces/nodes/source_files/topic_documents/document_metas原有字段完全不变，AI设置及私有.env/加密主密钥校验一致，外键检查无异常。未批量重跑AI，未改任何原文文件。
+- 真实生产分类查询核心函数逐页核对全部有效分类关系，所有返回文章均属于所选分类；前端实际屏幕显示与AI识别后名称日期仍待用户按上段最短步骤验收。回复完成/看日志后继续直接查生产.debug日志。
