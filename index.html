@@ -237,11 +237,11 @@
 
       <!-- Topic Workspace Selector & Settings -->
       <div id="topic-selector-container" class="flex items-center gap-1.5 text-xs">
-        <span class="text-slate-400 font-medium mobile-hide">主题:</span>
-        <select id="select-topic-workspace" class="bg-slate-900 text-slate-200 border border-slate-700 rounded px-2 py-1 text-xs focus:outline-none focus:border-indigo-500 max-w-[160px] truncate" title="选择当前研究主题">
-          <option value="">加载主题中...</option>
+        <label for="select-topic-workspace" class="text-slate-400 font-medium mobile-hide">分类</label>
+        <select id="select-topic-workspace" class="bg-slate-900 text-slate-200 border border-slate-700 rounded px-2 py-1 text-xs focus:outline-none focus:border-indigo-500 max-w-[160px] truncate" title="按分类筛选文库，选择分类后同步分析画板" aria-label="文库分类">
+          <option value="">全部分类</option>
         </select>
-        <button id="btn-open-topic-settings" type="button" class="p-1 text-slate-400 hover:text-indigo-300 hover:bg-slate-800 rounded transition" title="主题设置、Collection 绑定与文献管理" aria-label="主题设置">
+        <button id="btn-open-topic-settings" type="button" disabled class="p-1 text-slate-400 hover:text-indigo-300 hover:bg-slate-800 rounded transition disabled:opacity-40" title="选择分类后管理名称、规则和所属文章" aria-label="管理当前分类">
           <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
         </button>
       </div>
@@ -258,17 +258,11 @@
     <!-- Right Controls: Inbox, View Toggles, Auth & Settings -->
     <div class="flex items-center gap-2 text-xs">
       <!-- Research Inbox Trigger -->
-      <!-- Panes Maximize/Expand Toggle -->
-      <button id="btn-toggle-canvas-max" type="button" class="mobile-hide px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded border border-slate-700 flex items-center gap-1 transition" title="切换画板全屏或三栏分栏布局">
-        <svg id="icon-canvas-maximize" class="w-3.5 h-3.5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path></svg>
-        <span id="label-canvas-maximize">全屏画板</span>
-      </button>
-
       <!-- Native PDF Upload Trigger -->
       <input type="file" id="native-pdf-file-input" accept=".pdf,.txt,.epub,application/pdf,text/plain,application/epub+zip" class="hidden">
-      <button id="btn-upload-pdf-top" type="button" class="px-2.5 py-1 bg-emerald-950/80 hover:bg-emerald-900 text-emerald-300 border border-emerald-700/60 rounded transition flex items-center gap-1.5 shadow-sm" title="直接上传本地 PDF 文献到原生文库">
+      <button id="btn-upload-pdf-top" type="button" class="px-2.5 py-1 bg-emerald-950/80 hover:bg-emerald-900 text-emerald-300 border border-emerald-700/60 rounded transition flex items-center gap-1.5 shadow-sm" title="上传 PDF、TXT 或 EPUB 到文库">
         <svg class="w-3.5 h-3.5 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path></svg>
-        <span>上传 PDF</span>
+        <span>上传文件</span>
       </button>
 
       <!-- Connection & Auth Status -->
@@ -322,15 +316,6 @@
             <button id="btn-library-toggle-select-all" type="button" class="px-2.5 py-1 rounded bg-slate-900 text-slate-400 hover:text-indigo-300 whitespace-nowrap transition" title="全选/取消全选当前列表中的文献（勾选后可用「✨ AI 识别与归类」针对性识别）">全选</button>
           </div>
           <button id="btn-library-ai-classify" type="button" class="px-2.5 py-1 rounded bg-purple-950/70 text-purple-300 border border-purple-800/60 hover:bg-purple-900/70 whitespace-nowrap transition text-[11px] font-medium" title="对选中文件（未选时默认识别未分类文件）执行 AI 识别与归类">✨ AI 识别与归类</button>
-        </div>
-
-        <!-- 文库分类：按实际归类关系筛选全部文章格式 -->
-        <div class="flex items-center gap-1.5">
-          <label for="select-library-topic" class="text-xs text-slate-400">分类</label>
-          <select id="select-library-topic" class="flex-1 min-w-0 bg-slate-900 text-slate-200 border border-slate-700 rounded px-2 py-1.5 text-xs focus:outline-none focus:border-indigo-500" title="按分类筛选文章">
-            <option value="">全部分类</option>
-          </select>
-          <button id="btn-manage-library-topic" type="button" class="text-[11px] text-slate-400 hover:text-indigo-300 whitespace-nowrap">管理</button>
         </div>
 
         <!-- 排序与多选状态栏 -->
@@ -437,15 +422,12 @@
     <aside id="annotations-pane" aria-label="研究标注白板" class="w-96 bg-slate-950 flex flex-col flex-shrink-0">
       <div class="p-3 border-b border-slate-800 flex items-center justify-between">
         <div class="flex items-center gap-2">
-          <span class="text-xs font-semibold text-indigo-400 tracking-wider uppercase">文章理解</span>
+          <span id="reading-pane-title" class="text-xs font-semibold text-indigo-400 tracking-wider uppercase">文章理解</span>
           <span id="annotations-count" class="text-[10px] px-1.5 py-0.5 bg-indigo-950 text-indigo-300 rounded border border-indigo-800">0</span>
         </div>
         <div class="flex items-center gap-1">
-          <button id="btn-reading-view" type="button" class="text-[11px] text-slate-400 px-2 py-1">高级画板</button>
           <span id="canvas-save-state" class="text-[10px] text-slate-500">未连接</span>
-          <button id="btn-refresh-cards" type="button" title="重新加载画板" aria-label="重新加载画板" class="text-slate-400 hover:text-slate-200 text-xs p-1 rounded hover:bg-slate-900">
-            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
-          </button>
+          <button id="btn-reading-more" type="button" class="article-more" title="导读与画板操作" aria-label="导读更多操作" aria-haspopup="menu" aria-expanded="false">⋯</button>
         </div>
       </div>
 
@@ -761,15 +743,15 @@
       <div class="flex items-center justify-between border-b border-slate-800 pb-3">
         <h3 id="topic-settings-title" class="text-sm font-semibold text-slate-100 flex items-center gap-2">
           <svg class="w-4 h-4 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4"></path></svg>
-          研究主题设置与 Collection 绑定
+          分类设置
         </h3>
         <button id="btn-close-topic-settings" type="button" aria-label="关闭" class="text-slate-500 hover:text-slate-300 text-lg leading-none">&times;</button>
       </div>
 
       <!-- Navigation Tabs -->
       <div class="flex items-center gap-1 bg-slate-950 p-0.5 rounded border border-slate-800 text-xs">
-        <button type="button" class="topic-tab px-3 py-1.5 rounded font-medium transition bg-indigo-600 text-white" data-tab="meta">主题属性</button>
-        <button type="button" class="topic-tab px-3 py-1.5 rounded font-medium transition text-slate-400 hover:text-slate-200" data-tab="docs">主题文献管理</button>
+        <button type="button" class="topic-tab px-3 py-1.5 rounded font-medium transition bg-indigo-600 text-white" data-tab="meta">分类规则</button>
+        <button type="button" class="topic-tab px-3 py-1.5 rounded font-medium transition text-slate-400 hover:text-slate-200" data-tab="docs">所属文章</button>
       </div>
 
       <!-- Tab 1: Metadata -->
@@ -831,15 +813,9 @@
           <label class="block text-slate-400 mb-1">易读中文名 (规范标题)</label>
           <input id="input-doc-meta-clean-title" type="text" placeholder="例如：【中金公司】人形机器人产业链深度（2024）" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:outline-none focus:border-blue-500">
         </div>
-        <div class="grid grid-cols-2 gap-2">
-          <div>
+        <div>
             <label class="block text-slate-400 mb-1">机构 / 作者来源</label>
             <input id="input-doc-meta-institution" type="text" placeholder="例如：中金公司" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:outline-none focus:border-blue-500">
-          </div>
-          <div>
-            <label class="block text-slate-400 mb-1">发布年份</label>
-            <input id="input-doc-meta-year" type="text" placeholder="例如：2024" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:outline-none focus:border-blue-500">
-          </div>
         </div>
         <div>
           <label for="input-doc-meta-publication-date" class="block text-slate-400 mb-1">发布日期</label>
@@ -990,7 +966,7 @@
       </div>
       <p id="file-name-modal-hint" class="text-[11px] text-slate-400 leading-relaxed"></p>
       <div>
-        <label for="file-name-modal-input" class="block text-slate-300 font-medium mb-1 text-xs">新的原始文件名（保持 .pdf 扩展名）</label>
+        <label for="file-name-modal-input" class="block text-slate-300 font-medium mb-1 text-xs">新的原始文件名（保留原扩展名）</label>
         <input id="file-name-modal-input" type="text" autocomplete="off" spellcheck="false"
           class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:outline-none focus:border-indigo-500 font-mono text-xs"
           placeholder="例如 report-2024.pdf" />
@@ -1755,8 +1731,7 @@
       document.getElementById('doc-meta-item-key').value = item.key;
       document.getElementById('input-doc-meta-clean-title').value = meta?.cleanTitle || rawName;
       document.getElementById('input-doc-meta-institution').value = meta?.institution || '';
-      document.getElementById('input-doc-meta-year').value = meta?.year || '';
-      document.getElementById('input-doc-meta-publication-date').value = meta?.publicationDate || '';
+      document.getElementById('input-doc-meta-publication-date').value = meta?.publicationDate || meta?.year || '';
       document.getElementById('input-doc-meta-report-title').value = meta?.reportTitle || '';
       document.getElementById('input-doc-meta-subtitle').value = meta?.subtitle || '';
       document.getElementById('input-doc-meta-summary').value = meta?.summary || '';
@@ -1777,8 +1752,8 @@
         return;
       }
       const institution = document.getElementById('input-doc-meta-institution').value.trim();
-      const year = document.getElementById('input-doc-meta-year').value.trim();
       const publicationDate = document.getElementById('input-doc-meta-publication-date').value.trim();
+      const year = /^\d{4}/.exec(publicationDate)?.[0] || '';
       const reportTitle = document.getElementById('input-doc-meta-report-title').value.trim();
       const subtitle = document.getElementById('input-doc-meta-subtitle').value.trim();
       const summary = document.getElementById('input-doc-meta-summary').value.trim();
@@ -1885,8 +1860,7 @@
             if (currentEditingMetaItem?.key === metaKey) {
               document.getElementById('input-doc-meta-clean-title').value = result.data.cleanTitle || '';
               document.getElementById('input-doc-meta-institution').value = result.data.institution || '';
-              document.getElementById('input-doc-meta-year').value = result.data.year || '';
-              document.getElementById('input-doc-meta-publication-date').value = result.data.publicationDate || '';
+              document.getElementById('input-doc-meta-publication-date').value = result.data.publicationDate || result.data.year || '';
               document.getElementById('input-doc-meta-report-title').value = result.data.reportTitle || '';
               document.getElementById('input-doc-meta-subtitle').value = result.data.subtitle || '';
               document.getElementById('input-doc-meta-summary').value = result.data.summary || '';
@@ -2020,8 +1994,10 @@
     };
 
     // Topic Workspace & Settings Bindings
-    document.getElementById('select-topic-workspace')?.addEventListener('change', e => {
-      switchTopicWorkspace(e.target.value);
+    document.getElementById('select-topic-workspace')?.addEventListener('change', event => {
+      selectLibraryCategory(event.target.value).catch(err => {
+        showToast(`分类筛选失败: ${errorMessage(err)}`, 'error');
+      });
     });
     document.getElementById('btn-library-view-all')?.addEventListener('click', () => switchLibraryView('all'));
     document.getElementById('btn-library-view-files')?.addEventListener('click', () => switchLibraryView('files'));
@@ -2047,8 +2023,9 @@
       chip.addEventListener('click', () => {
         // 筛选 chips 与主题筛选互斥：点 chip 即退出主题筛选模式。
         libraryTopicFilter = '';
-        const topicSelect = document.getElementById('select-library-topic');
-        if (topicSelect) topicSelect.value = '';
+        ++topicWorkspaceSwitchToken;
+        renderTopicWorkspaceSelector();
+        updateCanvasAiToolbar();
         applyLibraryFilter(chip.dataset.libFilter).catch(err => {
           showToast(`文库筛选失败: ${errorMessage(err)}`, 'error');
         });
@@ -2083,20 +2060,6 @@
     });
     document.getElementById('btn-library-batch-map')?.addEventListener('click', () => libraryBatchMapFlow());
     document.getElementById('btn-library-ai-classify')?.addEventListener('click', () => libraryAiClassifyFlow());
-    document.getElementById('select-library-topic')?.addEventListener('change', async event => {
-      libraryTopicFilter = event.target.value;
-      libraryFilterState = 'all';
-      libraryFilteredItems = null;
-      document.querySelectorAll('.lib-filter-chip').forEach(chip => {
-        const active = !libraryTopicFilter && chip.dataset.libFilter === 'all';
-        chip.className = `lib-filter-chip px-2.5 py-1 rounded whitespace-nowrap transition ${active ? 'bg-blue-600 text-white' : 'bg-slate-900 text-slate-400 hover:text-slate-200'}`;
-      });
-      const workspaceId = libraryTopicFilter;
-      await refreshCurrentLibraryView();
-      if (libraryTopicFilter !== workspaceId) return;
-      if (workspaceId && workspaceId !== canvasWorkspace?.id) await switchTopicWorkspace(workspaceId);
-    });
-    document.getElementById('btn-manage-library-topic')?.addEventListener('click', () => openTopicSettingsModal('docs'));
     document.getElementById('btn-close-add-to-topic')?.addEventListener('click', closeAddToTopicModal);
     document.getElementById('btn-cancel-add-to-topic')?.addEventListener('click', closeAddToTopicModal);
     document.getElementById('btn-confirm-add-to-topic')?.addEventListener('click', async () => {
@@ -2134,16 +2097,6 @@
     document.getElementById('btn-save-topic-meta')?.addEventListener('click', saveTopicMetadata);
     document.getElementById('btn-delete-topic')?.addEventListener('click', deleteCurrentTopic);
 
-    document.getElementById('btn-open-topic-settings')?.addEventListener('click', () => openTopicSettingsModal('meta'));
-    document.getElementById('btn-close-topic-settings')?.addEventListener('click', closeTopicSettingsModal);
-    document.querySelectorAll('.topic-tab').forEach(btn => {
-      btn.addEventListener('click', () => switchTopicSettingsTab(btn.dataset.tab));
-    });
-    document.getElementById('btn-save-topic-meta')?.addEventListener('click', saveTopicMetadata);
-    document.getElementById('btn-delete-topic')?.addEventListener('click', deleteCurrentTopic);
-
-
-    document.getElementById('btn-toggle-canvas-max')?.addEventListener('click', toggleCanvasMaximize);
     document.getElementById('btn-canvas-cross-report')?.addEventListener('click', () => openCrossReportRelationsModal());
     document.getElementById('btn-close-cross-report')?.addEventListener('click', closeCrossReportRelationsModal);
     document.getElementById('btn-cancel-cross-report')?.addEventListener('click', closeCrossReportRelationsModal);
@@ -2383,14 +2336,28 @@
     function openLibraryMenu(trigger) {
       const sort=document.getElementById('select-library-sort');
       const actions=[{label:'刷新列表',run:()=>refreshCurrentLibraryView()},
-        {label:'AI 识别与归类',disabled:document.getElementById('btn-library-ai-classify').disabled,run:()=>libraryAiClassifyFlow()},
         {label:'全选 / 取消全选',run:()=>document.getElementById('btn-library-toggle-select-all').click()},
-        {label:'管理研究主题',run:()=>document.getElementById('btn-manage-library-topic').click()},
         {label:'查看回收站',run:()=>document.querySelector('[data-lib-filter="trash"]').click()}];
       for(const [value,label] of [['recent','按最新文件排序'],['oldest','按最早文件排序'],['title','按名称排序']]) {
         actions.push({label,run:()=>{sort.value=value;sort.dispatchEvent(new Event('change',{bubbles:true}));}});
       }
       AltCanvasLibraryMenu.open(trigger,{title:'文库操作',actions,error:err=>showToast(errorMessage(err),'error')});
+    }
+
+    function openReadingMenu(trigger) {
+      const reanalyze = document.getElementById('btn-canvas-reanalyze');
+      const actions = [
+        { label: readingGuideEnabled ? '打开高级画板' : '返回文章导读', run: () => setReadingView(!readingGuideEnabled) },
+        { label: '重新生成导读', disabled: reanalyze.hidden || reanalyze.disabled, run: () => generateCurrentPdfUnderstandingCanvas(true) },
+        { label: '刷新内容', disabled: !canvasReady, run: () => loadCanvasSnapshot() }
+      ];
+      if (!mobileMedia.matches) actions.push({
+        label: canvasMaximized ? '恢复三栏' : (readingGuideEnabled ? '全屏导读' : '全屏画板'), run: toggleCanvasMaximize
+      });
+      AltCanvasLibraryMenu.open(trigger, {
+        title: readingGuideEnabled ? '导读操作' : '画板操作', actions,
+        error: err => showToast(errorMessage(err), 'error')
+      });
     }
     document.getElementById('btn-library-more')?.addEventListener('click',event=>openLibraryMenu(event.currentTarget));
 
@@ -2462,6 +2429,8 @@
       const container = document.getElementById('items-container');
       const useFiltered = libraryFilterState !== 'all' && Array.isArray(libraryFilteredItems);
       const filtered = sortLibraryItems(useFiltered ? libraryFilteredItems : allItems);
+      const count = document.getElementById('topic-library-count');
+      if (count) count.textContent = `${filtered.length} 篇`;
 
       container.innerHTML = '';
       if (filtered.length === 0) {
@@ -3611,8 +3580,8 @@
           ? (showingFiles ? 'bg-emerald-600 text-white' : 'bg-blue-600 text-white')
           : 'text-slate-400 hover:text-slate-200'}`;
       });
-      if (showingFiles) void openLibraryFilesView();
-      else void refreshCurrentLibraryView();
+      if (showingFiles) return openLibraryFilesView();
+      return refreshCurrentLibraryView();
     }
 
     // 文库与主题分类合并后的统一刷新入口：主题下拉有值 → 主题 PDF 视图；
@@ -3620,6 +3589,27 @@
     function refreshCurrentLibraryView() {
       if (libraryTopicFilter) return loadTopicLibraryDocuments();
       return applyLibraryFilter(libraryFilterState === 'all' ? 'all' : libraryFilterState);
+    }
+
+    async function selectLibraryCategory(workspaceId) {
+      ++topicWorkspaceSwitchToken;
+      libraryTopicFilter = workspaceId || '';
+      libraryFilterState = 'all';
+      libraryFilteredItems = null;
+      renderTopicWorkspaceSelector();
+      updateCanvasAiToolbar();
+      if (canvasMaximized) toggleCanvasMaximize();
+      if (mobileMedia.matches) setMobilePane('library');
+      document.querySelectorAll('.lib-filter-chip').forEach(chip => {
+        const active = !libraryTopicFilter && chip.dataset.libFilter === 'all';
+        chip.className = `lib-filter-chip px-2.5 py-1 rounded whitespace-nowrap transition ${active ? 'bg-blue-600 text-white' : 'bg-slate-900 text-slate-400 hover:text-slate-200'}`;
+      });
+      // The global category selector always opens the filtered document list,
+      // including when the user was browsing physical source files.
+      if (currentLibraryView === 'files') await switchLibraryView('all');
+      else await refreshCurrentLibraryView();
+      if (libraryTopicFilter !== (workspaceId || '')) return;
+      if (workspaceId && workspaceId !== canvasWorkspace?.id) await switchTopicWorkspace(workspaceId);
     }
 
     // 文库列表排序（当前排序模式下对 native 条目排序）。
@@ -3709,6 +3699,9 @@
           return { doc: { libraryType: 'native', libraryId: 'local', itemKey: doc.id }, item };
         });
         if (count) count.textContent = `${resolved.length} 篇`;
+        if (typeof browserDebug !== 'undefined') browserDebug.report({
+          level: 'info', source: 'library.category-filter', message: `Category documents loaded: count=${resolved.length}`
+        });
         container.replaceChildren();
         if (!resolved.length) {
           container.innerHTML = '<div class="text-center text-slate-500 py-12 px-3 text-xs leading-relaxed">该分类下暂无文章。<br>可在文章三点菜单中“加入研究主题”，或用「✨ AI 识别与归类」。</div>';
@@ -4879,63 +4872,61 @@
       }
     }
 
-    function renderTopicWorkspaceSelector(selectedId = null) {
-      const currentId = selectedId || canvasWorkspace?.id || userWorkspaces[0]?.id;
-      for (const selectId of ['select-topic-workspace', 'select-library-topic']) {
-        const select = document.getElementById(selectId);
-        if (!select) continue;
-        select.replaceChildren();
-        if (selectId === 'select-library-topic') {
-          // 文库筛选保留"全部主题"空选项，选中态跟随 libraryTopicFilter
-          //（而不是画板主题），否则用户的筛选会被重建覆盖。
-          const allOption = document.createElement('option');
-          allOption.value = '';
-          allOption.textContent = '全部分类';
-          select.appendChild(allOption);
-        }
-        for (const ws of userWorkspaces) {
-          const option = document.createElement('option');
-          option.value = ws.id;
-          option.textContent = ws.name;
-          const isSelected = selectId === 'select-library-topic'
-            ? ws.id === libraryTopicFilter
-            : ws.id === currentId;
-          if (isSelected) option.selected = true;
-          select.appendChild(option);
-        }
+    function renderTopicWorkspaceSelector() {
+      const select = document.getElementById('select-topic-workspace');
+      if (!select) return;
+      select.replaceChildren();
+      const allOption = document.createElement('option');
+      allOption.value = '';
+      allOption.textContent = '全部分类';
+      select.appendChild(allOption);
+      for (const ws of userWorkspaces) {
+        const option = document.createElement('option');
+        option.value = ws.id;
+        option.textContent = ws.name;
+        select.appendChild(option);
       }
+      select.value = libraryTopicFilter;
+      const settings = document.getElementById('btn-open-topic-settings');
+      if (settings) settings.disabled = !libraryTopicFilter;
     }
 
+    let topicWorkspaceSwitchToken = 0;
     async function switchTopicWorkspace(workspaceId) {
       if (!workspaceId || canvasWorkspace?.id === workspaceId) return;
+      const switchToken = ++topicWorkspaceSwitchToken;
       try {
         setCanvasSaveState('切换主题…');
         const target = userWorkspaces.find(w => w.id === workspaceId) || await canvasFetch(`/workspaces/${workspaceId}`);
-        canvasWorkspace = target;
-        localStorage.setItem(`altcanvas.activeWorkspace.${config.userId}`, workspaceId);
-
         let boards = await canvasFetch(`/workspaces/${workspaceId}/boards`);
+        if (switchToken !== topicWorkspaceSwitchToken) return;
         if (!boards.length) {
           const createdBoard = await canvasFetch(`/workspaces/${workspaceId}/boards`, {
-            method: 'POST', body: { name: `${canvasWorkspace.name} · 分析画板` }
+            method: 'POST', body: { name: `${target.name} · 分析画板` }
           });
           boards = [createdBoard];
         }
+        if (switchToken !== topicWorkspaceSwitchToken) return;
+        canvasWorkspace = target;
         canvasBoard = boards[0];
+        localStorage.setItem(`altcanvas.activeWorkspace.${config.userId}`, workspaceId);
         localStorage.setItem(`altcanvas.canvasBoard.${config.userId}`, canvasBoard.id);
 
         await loadCanvasSnapshot();
-        renderTopicWorkspaceSelector(workspaceId);
-        if (currentLibraryView !== 'files') await refreshCurrentLibraryView();
-        showToast(`已切换至主题「${canvasWorkspace.name}」`, 'info');
+        if (switchToken !== topicWorkspaceSwitchToken) return;
+        renderTopicWorkspaceSelector();
+        updateCanvasAiToolbar();
       } catch (err) {
+        if (switchToken !== topicWorkspaceSwitchToken) return;
         reportApplicationError('topics.switch', err);
         showToast(`切换主题失败: ${errorMessage(err)}`, 'error');
       }
     }
 
     async function openTopicSettingsModal(initialTab = 'meta') {
-      if (!canvasWorkspace) return;
+      if (!libraryTopicFilter) return;
+      if (canvasWorkspace?.id !== libraryTopicFilter) await switchTopicWorkspace(libraryTopicFilter);
+      if (canvasWorkspace?.id !== libraryTopicFilter) return;
       currentTopicTab = initialTab;
       const modal = document.getElementById('topic-settings-modal');
       modal.classList.remove('hidden');
@@ -5014,6 +5005,7 @@
         showToast(`主题「${canvasWorkspace.name}」已删除`, 'success');
         userWorkspaces = userWorkspaces.filter(w => w.id !== canvasWorkspace.id);
         closeTopicSettingsModal();
+        await selectLibraryCategory('');
         await switchTopicWorkspace(userWorkspaces[0]?.id);
       } catch (err) {
         reportApplicationError('topics.delete', err);
@@ -5042,7 +5034,7 @@
           // Match by composite document identity, independent of the currently open reader document.
           const matchItem = allItems.find(i => i.key === doc.itemKey && isSameLibrary(normalizeLibraryContext(i), docLib));
           const meta = documentMetas.get(docMetaKey(docLib.libraryType, docLib.libraryId, doc.itemKey));
-          const title = matchItem?.data?.title || meta?.cleanTitle || `文献 #${doc.itemKey}`;
+          const title = meta?.cleanTitle || matchItem?.data?.title || `文献 #${doc.itemKey}`;
           item.innerHTML = `
             <div class="min-w-0 flex-1">
               <div class="font-medium text-slate-200 truncate" title="${escapeHTML(title)}">${escapeHTML(title)}</div>
@@ -5122,7 +5114,6 @@
       const readerPane = document.getElementById('reader-pane');
       const dividerLib = document.getElementById('divider-library');
       const dividerAnn = document.getElementById('divider-annotations');
-      const label = document.getElementById('label-canvas-maximize');
 
       if (canvasMaximized) {
         libPane.classList.add('hidden');
@@ -5130,14 +5121,12 @@
         if (dividerLib) dividerLib.classList.add('hidden');
         if (dividerAnn) dividerAnn.classList.add('hidden');
         document.getElementById('annotations-pane').style.width = '100%';
-        label.textContent = '分栏视图';
       } else {
         libPane.classList.remove('hidden');
         readerPane.classList.remove('hidden');
         if (dividerLib) dividerLib.classList.remove('hidden');
         if (dividerAnn) dividerAnn.classList.remove('hidden');
         document.getElementById('annotations-pane').style.width = '';
-        label.textContent = '全屏画板';
       }
     }
 
@@ -5562,7 +5551,7 @@
       closeCanvasNodeDetail();
       document.getElementById('annotations-pane').classList.toggle('guided-mode', guided);
       document.getElementById('reading-guide').classList.toggle('hidden', !guided);
-      document.getElementById('btn-reading-view').textContent = guided ? '高级画板' : '返回导读';
+      document.getElementById('reading-pane-title').textContent = guided ? '文章理解' : '高级画板';
       renderCanvas();
       updateCanvasAiToolbar();
     }
@@ -5572,7 +5561,7 @@
       if (!root || !globalThis.AltCanvasReadingGuide) return;
       document.getElementById('annotations-pane').classList.toggle('guided-mode', readingGuideEnabled);
       root.classList.toggle('hidden', !readingGuideEnabled);
-      document.getElementById('btn-reading-view').textContent = readingGuideEnabled ? '高级画板' : '返回导读';
+      document.getElementById('reading-pane-title').textContent = readingGuideEnabled ? '文章理解' : '高级画板';
       if (!readingGuideController) readingGuideController = AltCanvasReadingGuide.mount(root, {
         jump: source => jumpToDocumentSource(source),
         jumpAnnotation: id => jumpToSourceAnnotation({ ...normalizeLibraryContext(currentDocumentLibrary), itemKey: currentItem?.key, attachmentKey: currentAttachment?.key, annotationKey: id, position: getAnnotationPosition(currentAnnotationsMap.get(id)?.data || {}) }),
@@ -7127,13 +7116,14 @@
       document.getElementById('btn-canvas-ai-synthesize').disabled = disabled;
       const docBtn = document.getElementById('btn-canvas-ai-document');
       const reanalyzeBtn = document.getElementById('btn-canvas-reanalyze');
+      const workspaceReady = canvasReady && (!libraryTopicFilter || canvasWorkspace?.id === libraryTopicFilter);
       if (reanalyzeBtn) {
         reanalyzeBtn.hidden = ![...canvasNodes.values()].some(n => n.type === 'ai_output' && canvasSources.get(n.sourceRefId)?.attachmentKey === currentAttachment?.key);
-        reanalyzeBtn.disabled = !canvasReady || !currentReaderInstance || !aiConfig.configured || aiDocumentGenerationInFlight;
+        reanalyzeBtn.disabled = !workspaceReady || !currentReaderInstance || !aiConfig.configured || aiDocumentGenerationInFlight;
       }
       if (docBtn) {
         docBtn.disabled = !currentAttachment || !currentReaderInstance
-          || !canvasReady || !aiConfig.configured || aiDocumentGenerationInFlight;
+          || !workspaceReady || !aiConfig.configured || aiDocumentGenerationInFlight;
         docBtn.textContent = readingGuideEnabled ? '阅读全文' : '🗺️ 绘制导图';
         docBtn.title = '理解当前文章的问题、推理、结论及原文依据';
       }
@@ -7958,8 +7948,7 @@
       document.getElementById('btn-canvas-history').onclick = showProvenanceHistory;
       document.getElementById('btn-close-provenance').onclick = () => document.getElementById('provenance-modal').classList.add('hidden');
       document.getElementById('btn-done-provenance').onclick = () => document.getElementById('provenance-modal').classList.add('hidden');
-      document.getElementById('btn-reading-view').onclick = () => setReadingView(!readingGuideEnabled);
-      document.getElementById('btn-refresh-cards').onclick = () => loadCanvasSnapshot().catch(err => showToast(`刷新画板失败: ${errorMessage(err)}`, 'error'));
+      document.getElementById('btn-reading-more').onclick = event => openReadingMenu(event.currentTarget);
       document.getElementById('btn-canvas-zoom-in').onclick = () => setCanvasZoom(canvasViewport().zoom * 1.2);
       document.getElementById('btn-canvas-zoom-out').onclick = () => setCanvasZoom(canvasViewport().zoom / 1.2);
       document.getElementById('btn-canvas-outline').onclick = () => setCanvasOutlineMode(!canvasOutlineMode);
@@ -8048,7 +8037,7 @@
         resolveQuickImport();
       }
     });
-    document.getElementById('btn-quick-import-topic')?.addEventListener('click', () => executeQuickImport(currentTopicWorkspaceId));
+    document.getElementById('btn-quick-import-topic')?.addEventListener('click', () => executeQuickImport(canvasWorkspace?.id));
     document.getElementById('btn-quick-import-directory')?.addEventListener('click', () => executeQuickDirectoryImport());
     document.getElementById('quick-import-modal')?.addEventListener('click', event => {
       if (event.target === event.currentTarget) closeQuickImportModal();

@@ -11,7 +11,8 @@
 .library-menu-danger { color:#fda4af; }
 
 .article-row > div { width:100%; }
-#library-pane #btn-refresh,#library-pane #btn-library-toggle-select-all,#library-pane #btn-manage-library-topic,#library-pane [data-lib-filter="trash"],#library-pane #select-library-sort,#library-pane label[for="select-library-sort"] { display:none; }
+#library-pane #btn-refresh,#library-pane #btn-library-toggle-select-all,#library-pane [data-lib-filter="trash"],#library-pane #select-library-sort,#library-pane label[for="select-library-sort"] { display:none; }
 .article-topics { font-size:12px; line-height:1.5; color:#a5b4fc; margin-top:4px; overflow-wrap:anywhere; }
 
 .library-menu-info { user-select:text; }
+#doc-meta-panel { max-height:calc(100dvh - 2rem); overflow-y:auto; }
