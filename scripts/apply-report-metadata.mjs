@@ -34,7 +34,7 @@ export function applyReportMetadata(list, { store: provided, username, logFn = c
       }))];
       const meta = { ...metadataKey(doc.id), ...existing, attachmentKey: attachment?.id || null,
         attachmentVersion: attachment?.version ?? null, source: 'ai_classification' };
-      for (const field of ['cleanTitle','institution','reportTitle','subtitle','year','summary']) {
+      for (const field of ['cleanTitle','institution','reportTitle','subtitle','year','publicationDate','summary']) {
         if (item[field] !== undefined) {
           if (typeof item[field] !== 'string') throw new TypeError(`${field} must be a string`);
           meta[field] = item[field].trim().slice(0, field === 'summary' ? 4000 : 500);

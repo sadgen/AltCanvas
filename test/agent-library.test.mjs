@@ -36,7 +36,8 @@ try {
   const docs = result.enrolled;
   assert.throws(() => applyReportMetadata([{ filename: 'report', cleanTitle: '错误标题' }], options), /ambiguous/);
   assert.equal(store.listDocumentMetas(actor, { libraryType: 'native', libraryId: 'local' }).length, 0);
-  applyReportMetadata([{ documentId: docs[0].documentId, cleanTitle: '明确文章', topics: [] }], options);
+  applyReportMetadata([{ documentId: docs[0].documentId, cleanTitle: '明确文章', publicationDate: '2025-06-18', topics: [] }], options);
+  assert.equal(store.getDocumentMeta(actor, { libraryType: 'native', libraryId: 'local', itemKey: docs[0].documentId }).cleanTitle, '明确文章（2025-06-18）');
   assert.equal(store.db.prepare('SELECT count(*) n FROM topic_documents WHERE item_key=? AND deleted_at IS NULL').get(docs[0].documentId).n, 0, 'no match must not insert the default topic');
   store.saveDocumentMeta(actor, { libraryType: 'native', libraryId: 'local', itemKey: docs[0].documentId, cleanTitle: '人工标题', institution: '人工来源', source: 'manual' });
   result = applyReportMetadata([{ documentId: docs[0].documentId, cleanTitle: '被覆盖', topic: topic.id }], options);
@@ -70,9 +71,10 @@ try {
   const secondTopic = store.createWorkspace(actor, { name: '投资研究' });
   result = await syncResearchLibrary({ ...options, scan, extractSnippet: () => '正文', aiCompletion: async () => JSON.stringify({
     classifications: { [good]: [{ workspaceId: topic.id, confidence: .9 }, { workspaceId: secondTopic.id, confidence: .8 }, { workspaceId: 'unowned-topic', confidence: .99 }] },
-    documentMetadata: { [good]: { cleanTitle: '多主题文章' } }
+    documentMetadata: { [good]: { cleanTitle: '多主题文章', publicationDate: '2026-10-15' } }
   }) });
   assert.equal(result.classifiedCount, 1);
+  assert.equal(store.getDocumentMeta(actor, { libraryType: 'native', libraryId: 'local', itemKey: good }).cleanTitle, '多主题文章（2026-10-15）');
   assert.equal(store.db.prepare('SELECT count(*) n FROM topic_documents WHERE item_key=? AND deleted_at IS NULL').get(good).n, 2, 'only real owned topics may be bound, preserving multiple matches');
   store.createUser({ username: 'second-admin', password: 'StrongPass456!' });
   await assert.rejects(enrollResearchLibrary({ store, scan, logFn() {} }), /Specify one administrator/);

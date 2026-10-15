@@ -1941,7 +1941,7 @@ assert.ok(!html.includes('btn-library-view-topics'), 'the separate 主题分类 
 assert.ok(!html.includes('library-topics-panel') && !html.includes('topic-library-items'),
   'removed topic-tab panels must not linger in the DOM');
 assert.ok(html.includes('let libraryTopicFilter'), 'the topic filter must keep its own selection state');
-assert.ok(html.includes("allOption.textContent = '全部主题'"), 'the topic filter must offer an all-topics empty state');
+assert.ok(html.includes("allOption.textContent = '全部分类'"), 'the topic filter must offer an all-topics empty state');
 assert.ok(html.includes('id="select-library-sort"'), 'the library must expose a sort control');
 assert.ok(html.includes('function sortLibraryItems'), 'library items must be sortable');
 assert.ok(html.includes('libraryItemTimestamp'), 'sorting must support timestamp modes');

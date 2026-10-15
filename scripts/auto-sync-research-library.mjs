@@ -5,6 +5,7 @@ import { scanLibraryRoot } from '../server/library-scanner.mjs';
 import { requestAiCompletion, getAiPublicConfig } from '../server/ai-provider.mjs';
 import { openFileInsideRoot } from '../server/native-fs.mjs';
 import { extractTextDocument } from '../server/document-formats.mjs';
+import { PUBLICATION_DATE_INSTRUCTION } from '../server/document-metadata.mjs';
 import { enrollResearchLibrary } from './auto-enroll-library.mjs';
 import { openAgentStore, resolveAgentActor, resolveAgentRoot, boundedLimit, metadataKey, isMain } from './agent-library-runtime.mjs';
 
@@ -35,8 +36,9 @@ async function runClassificationBatch({ store, actorKey, entries, workspaces, ai
     '    {"workspaceId": "ws-1", "workspaceName": "主题名称", "confidence": 0.92, "reason": "匹配纳入规则：聚焦于大模型逻辑推理机制"}',
     '  ]',
     '}, "documentMetadata": {',
-    '  "entry-id-1": {"cleanTitle": "【机构】规范中文标题（2025）", "institution": "机构", "reportTitle": "中文主标题", "subtitle": "", "year": "2025", "summary": "一句话中文摘要"}',
+    '  "entry-id-1": {"cleanTitle": "【机构】规范中文标题（2025-06-18）", "institution": "机构", "reportTitle": "中文主标题", "subtitle": "", "year": "2025", "publicationDate": "2025-06-18", "summary": "一句话中文摘要"}',
     '}}',
+    PUBLICATION_DATE_INSTRUCTION,
     '【规则】',
     '1. 优先匹配已有主题，符合核心内容才给 confidence >=0.7；命中排除规则不推荐；无法合理覆盖可返回空数组，禁止硬塞；',
     '2. reason 简述推荐或不推荐的核心理由（30字以内）；',
@@ -72,7 +74,7 @@ async function runClassificationBatch({ store, actorKey, entries, workspaces, ai
   for (const entry of entries) {
     const meta = metaMap[entry.id];
     if (!meta || typeof meta.cleanTitle !== 'string' || !meta.cleanTitle.trim() || !Array.isArray(classMap[entry.id])) throw new Error('AI omitted a document result');
-    for (const field of ['institution','reportTitle','year','summary']) if (meta[field] !== undefined && typeof meta[field] !== 'string') throw new Error('Invalid metadata field');
+    for (const field of ['institution','reportTitle','year','publicationDate','summary']) if (meta[field] !== undefined && typeof meta[field] !== 'string') throw new Error('Invalid metadata field');
     const classifications = (classMap[entry.id] || []).filter(c => c && c.workspaceId);
 
     // 规范化元数据
@@ -88,6 +90,7 @@ async function runClassificationBatch({ store, actorKey, entries, workspaces, ai
       institution,
       reportTitle,
       year,
+      publicationDate: meta.publicationDate || '',
       summary,
       classifications
     });
@@ -140,7 +143,7 @@ export async function syncResearchLibrary({ targetRootName = '投研报告', use
             const topics=[...new Set(result.classifications.filter(c=>allowedTopics.has(c.workspaceId) && Number.isFinite(c.confidence) && c.confidence>=0.7 && c.confidence<=1).map(c=>c.workspaceId))];
             store.saveDocumentMeta(actorKey,{...metadataKey(entry.id),attachmentKey:entry.attachmentId,attachmentVersion:entry.attachmentVersion,
               cleanTitle:result.cleanTitle.slice(0,500),institution:result.institution.slice(0,500),reportTitle:result.reportTitle.slice(0,500),
-              year:result.year.slice(0,40),summary:result.summary.slice(0,4000),source:'ai_classification'});
+              year:result.year.slice(0,40),publicationDate:result.publicationDate,summary:result.summary.slice(0,4000),source:'ai_classification'});
             // No match means unclassified; never force a default topic.
             if (topics.length) store.addDocumentTopics(actorKey,entry.id,topics,{origin:'ai_suggestion'});
             classifiedCount++;

@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { documentMime } from './document-formats.mjs';
+import { normalizePublicationDate, titleWithPublicationDate } from './document-metadata.mjs';
 import fs from 'fs';
 import path from 'path';
 import { DatabaseSync } from 'node:sqlite';
@@ -295,6 +296,7 @@ function documentMetaRow(row) {
     reportTitle: row.report_title || '',
     subtitle: row.subtitle || '',
     year: row.year || '',
+    publicationDate: row.publication_date || '',
     summary: row.summary || '',
     source: row.source || 'ai',
     createdAt: row.created_at,
@@ -1165,7 +1167,7 @@ export class CanvasStore {
       ) STRICT;
     `);
     const current = this.db.prepare('SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations').get().version;
-    if (current > 13) {
+    if (current > 14) {
       throw new Error(`Canvas database schema ${current} is newer than this server supports`);
     }
     if (current < 1) {
@@ -1704,6 +1706,16 @@ export class CanvasStore {
           orphaned: inboxReport.orphanedEntries
         })}`);
       }
+    }
+    if (current < 14) {
+      this.transaction(() => {
+        const columns = this.db.prepare('PRAGMA table_info(document_metas)').all();
+        // Some historical migration fixtures contain only the table under test.
+        if (columns.length && !columns.some(column => column.name === 'publication_date')) {
+          this.db.exec("ALTER TABLE document_metas ADD COLUMN publication_date TEXT NOT NULL DEFAULT ''");
+        }
+        this.db.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(14, nowIso());
+      });
     }
   }
 
@@ -3637,10 +3649,12 @@ export class CanvasStore {
   saveDocumentMeta(actorKey, {
     libraryType, libraryId, itemKey, attachmentKey = null, attachmentVersion = null,
     doi = null, cleanTitle, institution = '', reportTitle = '',
-    subtitle = '', year = '', summary = '', source = 'ai'
+    subtitle = '', year = '', publicationDate, summary = '', source = 'ai'
   }) {
     const timestamp = nowIso();
     const existing = this.getDocumentMeta(actorKey, { libraryType, libraryId, itemKey });
+    publicationDate = normalizePublicationDate(publicationDate ?? existing?.publicationDate ?? '');
+    if (source !== 'manual') cleanTitle = titleWithPublicationDate(cleanTitle, publicationDate);
     let metaId;
     this.transaction(() => {
       if (existing) {
@@ -3655,6 +3669,7 @@ export class CanvasStore {
             report_title = ?,
             subtitle = ?,
             year = ?,
+            publication_date = ?,
             summary = ?,
             source = ?,
             updated_at = ?
@@ -3662,16 +3677,16 @@ export class CanvasStore {
         `).run(attachmentKey !== undefined ? attachmentKey : existing.attachmentKey,
                attachmentVersion !== undefined ? attachmentVersion : existing.attachmentVersion,
                doi !== undefined ? doi : existing.doi,
-               cleanTitle, institution, reportTitle, subtitle, year, summary, source, timestamp, metaId);
+               cleanTitle, institution, reportTitle, subtitle, year, publicationDate, summary, source, timestamp, metaId);
       } else {
         metaId = id();
         this.db.prepare(`
           INSERT INTO document_metas
             (id, owner_key, library_type, library_id, item_key, attachment_key, attachment_version,
-             doi, clean_title, institution, report_title, subtitle, year, summary, source, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             doi, clean_title, institution, report_title, subtitle, year, publication_date, summary, source, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(metaId, actorKey, libraryType, libraryId, itemKey, attachmentKey, attachmentVersion,
-               doi || null, cleanTitle, institution, reportTitle, subtitle, year, summary, source, timestamp, timestamp);
+               doi || null, cleanTitle, institution, reportTitle, subtitle, year, publicationDate, summary, source, timestamp, timestamp);
       }
       this.db.prepare(`
         UPDATE inbox_entries SET

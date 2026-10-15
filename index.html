@@ -314,7 +314,7 @@
         </div>
 
         <!-- M4 library view filters -->
-        <div class="flex items-center justify-between gap-1.5 pb-1">
+        <div class="flex items-center justify-between flex-wrap gap-1.5 pb-1">
           <div id="library-filter-chips" class="flex gap-1 text-[11px]">
             <button data-lib-filter="all" class="lib-filter-chip px-2.5 py-1 rounded bg-blue-600 text-white whitespace-nowrap transition">全部</button>
             <button data-lib-filter="unclassified" class="lib-filter-chip px-2.5 py-1 rounded bg-slate-900 text-slate-400 hover:text-slate-200 whitespace-nowrap transition">未分类</button>
@@ -324,10 +324,11 @@
           <button id="btn-library-ai-classify" type="button" class="px-2.5 py-1 rounded bg-purple-950/70 text-purple-300 border border-purple-800/60 hover:bg-purple-900/70 whitespace-nowrap transition text-[11px] font-medium" title="对选中文件（未选时默认识别未分类文件）执行 AI 识别与归类">✨ AI 识别与归类</button>
         </div>
 
-        <!-- 主题筛选（合并原「主题分类」Tab）：选择主题即只显示该主题下可阅读的 PDF -->
+        <!-- 文库分类：按实际归类关系筛选全部文章格式 -->
         <div class="flex items-center gap-1.5">
-          <select id="select-library-topic" class="flex-1 min-w-0 bg-slate-900 text-slate-200 border border-slate-700 rounded px-2 py-1.5 text-xs focus:outline-none focus:border-indigo-500" title="按主题筛选：只显示该主题下可阅读的 PDF；切换主题会同步画板">
-            <option value="">全部主题</option>
+          <label for="select-library-topic" class="text-xs text-slate-400">分类</label>
+          <select id="select-library-topic" class="flex-1 min-w-0 bg-slate-900 text-slate-200 border border-slate-700 rounded px-2 py-1.5 text-xs focus:outline-none focus:border-indigo-500" title="按分类筛选文章">
+            <option value="">全部分类</option>
           </select>
           <button id="btn-manage-library-topic" type="button" class="text-[11px] text-slate-400 hover:text-indigo-300 whitespace-nowrap">管理</button>
         </div>
@@ -839,6 +840,10 @@
             <label class="block text-slate-400 mb-1">发布年份</label>
             <input id="input-doc-meta-year" type="text" placeholder="例如：2024" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:outline-none focus:border-blue-500">
           </div>
+        </div>
+        <div>
+          <label for="input-doc-meta-publication-date" class="block text-slate-400 mb-1">发布日期</label>
+          <input id="input-doc-meta-publication-date" type="text" placeholder="YYYY-MM-DD；也可只填年月或年份" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:outline-none focus:border-blue-500">
         </div>
         <div>
           <label class="block text-slate-400 mb-1">报告核心主题 / 主标题</label>
@@ -1751,6 +1756,7 @@
       document.getElementById('input-doc-meta-clean-title').value = meta?.cleanTitle || rawName;
       document.getElementById('input-doc-meta-institution').value = meta?.institution || '';
       document.getElementById('input-doc-meta-year').value = meta?.year || '';
+      document.getElementById('input-doc-meta-publication-date').value = meta?.publicationDate || '';
       document.getElementById('input-doc-meta-report-title').value = meta?.reportTitle || '';
       document.getElementById('input-doc-meta-subtitle').value = meta?.subtitle || '';
       document.getElementById('input-doc-meta-summary').value = meta?.summary || '';
@@ -1772,6 +1778,7 @@
       }
       const institution = document.getElementById('input-doc-meta-institution').value.trim();
       const year = document.getElementById('input-doc-meta-year').value.trim();
+      const publicationDate = document.getElementById('input-doc-meta-publication-date').value.trim();
       const reportTitle = document.getElementById('input-doc-meta-report-title').value.trim();
       const subtitle = document.getElementById('input-doc-meta-subtitle').value.trim();
       const summary = document.getElementById('input-doc-meta-summary').value.trim();
@@ -1790,6 +1797,7 @@
             cleanTitle,
             institution,
             year,
+            publicationDate,
             reportTitle,
             subtitle,
             summary
@@ -1802,7 +1810,7 @@
         const updated = await res.json();
         if (updated.data) {
           documentMetas.set(docMetaKey(updated.data.libraryType, updated.data.libraryId, updated.data.itemKey), updated.data);
-          renderItems();
+          await refreshCurrentLibraryView();
           if (currentItem?.key === itemKey) {
             document.getElementById('current-doc-title').textContent = updated.data.cleanTitle;
           }
@@ -1870,7 +1878,7 @@
           const result = await res.json();
           if (result.data) {
             documentMetas.set(docMetaKey(result.data.libraryType, result.data.libraryId, result.data.itemKey), result.data);
-            renderItems();
+            await refreshCurrentLibraryView();
             if (currentItem?.key === metaKey) {
               document.getElementById('current-doc-title').textContent = result.data.cleanTitle;
             }
@@ -1878,6 +1886,7 @@
               document.getElementById('input-doc-meta-clean-title').value = result.data.cleanTitle || '';
               document.getElementById('input-doc-meta-institution').value = result.data.institution || '';
               document.getElementById('input-doc-meta-year').value = result.data.year || '';
+              document.getElementById('input-doc-meta-publication-date').value = result.data.publicationDate || '';
               document.getElementById('input-doc-meta-report-title').value = result.data.reportTitle || '';
               document.getElementById('input-doc-meta-subtitle').value = result.data.subtitle || '';
               document.getElementById('input-doc-meta-summary').value = result.data.summary || '';
@@ -2076,9 +2085,16 @@
     document.getElementById('btn-library-ai-classify')?.addEventListener('click', () => libraryAiClassifyFlow());
     document.getElementById('select-library-topic')?.addEventListener('change', async event => {
       libraryTopicFilter = event.target.value;
+      libraryFilterState = 'all';
+      libraryFilteredItems = null;
+      document.querySelectorAll('.lib-filter-chip').forEach(chip => {
+        const active = !libraryTopicFilter && chip.dataset.libFilter === 'all';
+        chip.className = `lib-filter-chip px-2.5 py-1 rounded whitespace-nowrap transition ${active ? 'bg-blue-600 text-white' : 'bg-slate-900 text-slate-400 hover:text-slate-200'}`;
+      });
       const workspaceId = libraryTopicFilter;
+      await refreshCurrentLibraryView();
+      if (libraryTopicFilter !== workspaceId) return;
       if (workspaceId && workspaceId !== canvasWorkspace?.id) await switchTopicWorkspace(workspaceId);
-      else await refreshCurrentLibraryView();
     });
     document.getElementById('btn-manage-library-topic')?.addEventListener('click', () => openTopicSettingsModal('docs'));
     document.getElementById('btn-close-add-to-topic')?.addEventListener('click', closeAddToTopicModal);
@@ -2350,12 +2366,18 @@
       }
     }
 
-    function compactArticleSubtitle(meta, title, topics = []) {
+    function compactArticleSubtitle(meta, title) {
       const values = [meta?.institution, meta?.year].filter(Boolean).map(String);
       const unique = values.filter(value => !String(title).includes(value));
       if (unique.length) return unique.join(' · ');
       if (values.length) return '';
-      return topics.slice(0,1).map(topic => topic.name || topic.workspace_name).filter(Boolean).join('');
+      return '';
+    }
+
+    function articleTopicsMarkup(item) {
+      const names = (item.topics || []).map(topic => topic.name || topic.workspaceName || topic.workspace_name).filter(Boolean);
+      const label = names.length ? names.join('、') : '未分类';
+      return `<div class="article-topics" title="${escapeHTML(label)}">分类：${escapeHTML(label)}</div>`;
     }
 
     function openLibraryMenu(trigger) {
@@ -2470,13 +2492,14 @@
         const isChecked = selectedDocumentKeys.has(item.key);
 
         div.classList.add('article-row');
-        const subtitle = compactArticleSubtitle(meta, displayTitle, item.topics || []);
+        const subtitle = compactArticleSubtitle(meta, displayTitle);
         div.innerHTML = `
           <div class="flex items-start gap-2">
             <input type="checkbox" class="item-select-checkbox mt-1 w-3.5 h-3.5 rounded cursor-pointer flex-shrink-0" ${isChecked ? 'checked' : ''} data-item-key="${escapeHTML(item.key)}" aria-label="选择文章">
             <div class="min-w-0 flex-1">
               <div class="article-title font-medium text-slate-200 line-clamp-2">${escapeHTML(displayTitle)}</div>
               ${subtitle ? `<div class="article-meta">${escapeHTML(subtitle)}</div>` : ''}
+              ${articleTopicsMarkup(item)}
               ${item.sourceFile && item.sourceFile.status !== 'active' ? `<div class="article-meta text-amber-300">${escapeHTML(M4_SOURCE_STATUS_LABELS[item.sourceFile.status] || item.sourceFile.status)}</div>` : ''}
             </div>
             <button type="button" class="article-more" aria-label="文章更多操作" aria-haspopup="menu" aria-expanded="false" title="更多">⋯</button>
@@ -3129,6 +3152,7 @@
     };
 
     async function applyLibraryFilter(filter) {
+      ++topicLibraryLoadToken; // Discard an in-flight response from the previous category.
       libraryFilterState = M4_FILTER_QUERY.hasOwnProperty(filter) ? filter : 'all';
       document.querySelectorAll('.lib-filter-chip').forEach(chip => {
         const active = chip.dataset.libFilter === libraryFilterState;
@@ -3145,12 +3169,11 @@
         return;
       }
       const query = M4_FILTER_QUERY[libraryFilterState];
-      const payload = await m4Fetch(`/native/documents?${query}&limit=200`).catch(err => {
+      const docs = await fetchFilteredNativeDocuments(query).catch(err => {
         renderNativeLibraryError(err);
         return null;
       });
-      if (!payload) return;
-      const docs = payload.data || [];
+      if (!docs) return;
       const items = docs.map(doc => {
         const item = nativeDocumentToLibraryItem(doc);
         if (item) {
@@ -3160,6 +3183,17 @@
         return item;
       }).filter(Boolean);
       renderFilteredNativeItems(items, '此筛选下暂无文献');
+    }
+
+    async function fetchFilteredNativeDocuments(query) {
+      const docs = [];
+      for (let page = 0; page < 100; page++) {
+        const payload = await m4Fetch(`/native/documents?${query}&limit=200&offset=${page * 200}`);
+        const chunk = payload.data || [];
+        docs.push(...chunk);
+        if (chunk.length < 200) return docs;
+      }
+      throw new Error('分类文献超过分页安全上限，请缩小范围');
     }
 
     // M4: 文库级 AI 主题归类（提炼主题体系 + 高置信度建议一键采纳）
@@ -3455,8 +3489,8 @@
             }
             const gen = await m4Fetch(endpoint, { method: 'POST', body: { documentIds, documentTexts: batchTexts } });
             const data = gen.data || {};
+            rememberDocumentMetas(data.documentMetas);
             totals.created += (data.createdWorkspaces || []).length;
-            totals.batches += 1;
             // 产品规则：识别 = 取名 + 归类一起完成。每篇文献采纳所有实质相关的
             // 主题建议（置信度 ≥0.7，保留既有关系，支持多主题），避免
             // 强制将弱相关文献塞入任意主题。
@@ -3474,7 +3508,9 @@
                 method: 'POST', body: { documentIds: [...ids], topicIds: [workspaceId] }
               });
               totals.applied += (res.data || []).filter(r => r.ok).length;
+              if ((res.data || []).some(r => !r.ok)) throw new Error('部分文献归类未保存，请重试');
             }
+            totals.batches += 1;
             break;
           } catch (err) {
             // 一批失败不拖垮整体：已完成批次的命名与归类都已生效。
@@ -3510,10 +3546,10 @@
           selectedDocumentKeys.clear();
           updateLibrarySelectionUI();
         }
-        if (!totals.batches) {
+        if (totals.failedBatches) {
+          showToast(`AI 部分完成：已处理 ${totals.batches}/${totals.batches + totals.failedBatches} 批，${totals.failedBatches} 批失败（可重试续跑）`, 'error');
+        } else if (!totals.batches) {
           showToast(isSelectedMode ? '所选文献暂无有效内容' : '当前文献均已完成 AI 识别与归类', 'info');
-        } else if (totals.failedBatches) {
-          showToast(`AI 部分完成：已处理 ${totals.batches - totals.failedBatches}/${totals.batches} 批，${totals.failedBatches} 批失败（可重试续跑）`, 'error');
         } else {
           showToast(`AI 完成：识别 ${totals.analyzed} 篇文献（已提取中文名并归入宏观大类），提炼 ${totals.created} 个新分类，采纳 ${totals.applied} 条归类`, 'success');
         }
@@ -3526,6 +3562,7 @@
       } catch (err) {
         if (err.code === 'ai_not_configured') showToast('AI 模型尚未配置', 'error');
         else showToast(`AI 识别归类失败: ${errorMessage(err)}`, 'error');
+        await refreshCurrentLibraryView().catch(() => {});
       } finally {
         if (btn) { btn.disabled = false; updateLibrarySelectionUI(); }
       }
@@ -3538,7 +3575,7 @@
       const meta = documentMetas.get(docMetaKey(item.libraryType || 'native', item.libraryId || 'local', item.key));
       document.getElementById('add-to-topic-doc-name').textContent =
         `文献：${meta?.cleanTitle || item.data?.title || item.key}`;
-      const alreadyIn = new Set((item.topics || []).map(t => t.workspaceId || t.id));
+      const alreadyIn = new Set((item.topics || []).map(t => t.workspaceId || t.workspace_id || t.id));
       const select = document.getElementById('add-to-topic-select');
       select.innerHTML = (userWorkspaces || [])
         .map(w => `<option value="${escapeHTML(w.id)}"${alreadyIn.has(w.id) ? ' disabled' : ''}>${escapeHTML(w.name)}${alreadyIn.has(w.id) ? '（已加入）' : ''}</option>`)
@@ -3654,18 +3691,27 @@
     async function loadTopicLibraryDocuments() {
       const container = document.getElementById('items-container');
       const count = document.getElementById('topic-library-count');
-      if (!container || !canvasWorkspace) return;
+      const workspaceId = libraryTopicFilter;
+      if (!container || !workspaceId) return;
       const loadToken = ++topicLibraryLoadToken;
-      container.innerHTML = '<div class="text-center text-slate-500 py-12 text-xs animate-pulse">正在筛选主题 PDF…</div>';
+      container.innerHTML = '<div class="text-center text-slate-500 py-12 text-xs animate-pulse">正在筛选分类…</div>';
       if (count) count.textContent = '加载中';
       try {
-        const docs = await canvasFetch(`/workspaces/${canvasWorkspace.id}/documents`);
-        const resolved = (await Promise.all(docs.map(doc => resolveTopicLibraryPdf(doc).catch(() => null)))).filter(Boolean);
-        if (loadToken !== topicLibraryLoadToken) return;
+        const docs = await fetchFilteredNativeDocuments(`topicId=${encodeURIComponent(workspaceId)}`);
+        const metas = await canvasFetch('/documents/metadata?libraryType=native&libraryId=local');
+        if (loadToken !== topicLibraryLoadToken || libraryTopicFilter !== workspaceId) return;
+        rememberDocumentMetas(metas);
+        const resolved = docs.map(doc => {
+          const item = nativeDocumentToLibraryItem(doc);
+          const idx = allItems.findIndex(existing => existing.key === item.key);
+          if (idx >= 0) allItems[idx] = item;
+          else allItems.push(item);
+          return { doc: { libraryType: 'native', libraryId: 'local', itemKey: doc.id }, item };
+        });
         if (count) count.textContent = `${resolved.length} 篇`;
         container.replaceChildren();
         if (!resolved.length) {
-          container.innerHTML = '<div class="text-center text-slate-500 py-12 px-3 text-xs leading-relaxed">该主题下暂无可阅读的 PDF。<br>可在文库列表将文献归入本主题（文章三点菜单中的“加入研究主题”），或用「✨ AI 主题归类」批量采纳。</div>';
+          container.innerHTML = '<div class="text-center text-slate-500 py-12 px-3 text-xs leading-relaxed">该分类下暂无文章。<br>可在文章三点菜单中“加入研究主题”，或用「✨ AI 识别与归类」。</div>';
           return;
         }
 
@@ -3674,13 +3720,13 @@
           .map(item => resolved.find(r => r.item === item))
           .filter(Boolean);
 
-        for (const { doc, item, attachment } of sortedResolved) {
+        for (const { doc, item } of sortedResolved) {
           const docLib = normalizeLibraryContext(doc);
           const meta = documentMetas.get(docMetaKey(docLib.libraryType, docLib.libraryId, doc.itemKey));
           const rawTitle = item.data?.title || item.data?.filename || `文献 #${doc.itemKey}`;
           const displayTitle = meta?.cleanTitle || rawTitle;
           const subtitle = compactArticleSubtitle(meta, displayTitle);
-          // 与文库列表一致：主题视图的行也带多选勾选框（勾选后可针对性 AI 识别与归类）。
+          // 与文库列表一致：分类视图的行也带多选勾选框（勾选后可针对性 AI 识别与归类）。
           const wrapper = document.createElement('div');
           wrapper.className = 'w-full p-2.5 rounded text-xs transition border bg-slate-950/40 hover:bg-slate-900 border-slate-900 hover:border-indigo-800 text-slate-300 group';
           wrapper.classList.add('article-row');
@@ -3689,6 +3735,7 @@
             <button type="button" class="min-w-0 flex-1 text-left article-open">
               <div class="article-title font-medium text-slate-200 line-clamp-2">${escapeHTML(displayTitle)}</div>
               ${subtitle ? `<div class="article-meta">${escapeHTML(subtitle)}</div>` : ''}
+              ${articleTopicsMarkup(item)}
             </button><button type="button" class="article-more" aria-label="文章更多操作" aria-haspopup="menu" aria-expanded="false">⋯</button>
           </div>`;
           wrapper.querySelector('.item-select-checkbox').addEventListener('change', event => {
@@ -3702,9 +3749,9 @@
         }
         updateLibrarySelectionUI();
       } catch (err) {
-        if (loadToken !== topicLibraryLoadToken) return;
-        count.textContent = '读取失败';
-        container.innerHTML = `<div class="text-center text-rose-400 py-10 px-3 text-xs">主题 PDF 加载失败：${escapeHTML(errorMessage(err))}</div>`;
+        if (loadToken !== topicLibraryLoadToken || libraryTopicFilter !== workspaceId) return;
+        if (count) count.textContent = '读取失败';
+        container.innerHTML = `<div class="text-center text-rose-400 py-10 px-3 text-xs">分类加载失败：${escapeHTML(errorMessage(err))}</div>`;
         reportApplicationError('topics.library-load', err);
       }
     }
@@ -4843,7 +4890,7 @@
           //（而不是画板主题），否则用户的筛选会被重建覆盖。
           const allOption = document.createElement('option');
           allOption.value = '';
-          allOption.textContent = '全部主题';
+          allOption.textContent = '全部分类';
           select.appendChild(allOption);
         }
         for (const ws of userWorkspaces) {

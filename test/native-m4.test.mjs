@@ -222,7 +222,7 @@ async function main() {
   try {
     store = new CanvasStore(dbPath);
     const version = store.db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v;
-    assert.equal(version, 13, 'fresh database must migrate straight to v13');
+    assert.equal(version, 14, 'fresh database must migrate straight to v14');
     const tables = new Set(
       store.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(r => r.name)
     );
@@ -240,7 +240,7 @@ async function main() {
     // Idempotent reopen: closing and opening again must not re-run or break.
     store.close();
     store = new CanvasStore(dbPath);
-    assert.equal(store.db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v, 13);
+    assert.equal(store.db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v, 14);
     console.log('✅ Schema v13 fresh database migration and idempotent reopen passed');
   } catch (err) {
     try { store?.close(); } catch {}
@@ -545,7 +545,7 @@ async function testV12Migration() {
   const store = new CanvasStore(dbPath);
   try {
     const version = store.db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v;
-    assert.equal(version, 13, 'v12 database must upgrade to v13');
+    assert.equal(version, 14, 'v12 database must upgrade to v14');
 
     // Attachment survived the rebuild with identical fields and mapped kind.
     const att = store.db.prepare('SELECT * FROM attachments WHERE id = ?').get(attId);
@@ -565,7 +565,7 @@ async function testV12Migration() {
     // Idempotent reopen after rebuild.
     store.close();
     const reopened = new CanvasStore(dbPath);
-    assert.equal(reopened.db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v, 13);
+    assert.equal(reopened.db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get().v, 14);
     assert.ok(reopened.db.prepare('SELECT * FROM attachments WHERE id = ?').get(attId));
     assert.ok(reopened.db.prepare('SELECT * FROM annotations WHERE id = ?').get(annId));
     reopened.close();

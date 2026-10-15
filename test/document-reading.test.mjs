@@ -113,11 +113,11 @@ try {
   const html=fs.readFileSync(new URL('../index.html',import.meta.url),'utf8');
   const body=html.match(/async function refreshLibraryMetadataWithAi\(documentIds = null, \{ onProgress = null, force = false \} = \{\}\) \{([\s\S]*?)\n    \}/)[1];
   const writes=[];
-  const flow=new Function('allItems','documentMetas','docMetaKey','currentDocumentLibrary','config','AI_REFRESH_TEXT_MAX_DOCS','AI_REFRESH_BATCH_SIZE','extractAttachmentPdfText','isReadableAttachment','m4Fetch','showToast',`return (async()=>{const documentIds=null, onProgress=null, force=false;${body}})()`);
+  const flow=new Function('allItems','documentMetas','docMetaKey','currentDocumentLibrary','config','AI_REFRESH_TEXT_MAX_DOCS','AI_REFRESH_BATCH_SIZE','extractAttachmentPdfText','isReadableAttachment','m4Fetch','showToast','rememberDocumentMetas',`return (async()=>{const documentIds=null, onProgress=null, force=false;${body}})()`);
   await flow([{isNative:true,key:doc.id,children:[{key:'att',data:{contentType:'application/pdf'}}]}],new Map(),()=>'',null,{},50,4,async()=> '正文',()=>true,async(url,options)=>{
     if(url.includes('generate-topics')) return {data:{classifications:{[doc.id]:[{workspaceId:t1.id,confidence:.9},{workspaceId:t2.id,confidence:.8},{workspaceId:'weak',confidence:.2}]}}};
     writes.push(options.body);return {data:[{ok:true}]};
-  },()=>{});
+  },()=>{},()=>{});
   assert.deepEqual(writes.map(w=>w.topicIds[0]),[t1.id,t2.id]);
 
   const board=store.createBoard(actor,t1.id,{name:'阅读图'});

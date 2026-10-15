@@ -1,4 +1,5 @@
 import { getFileLocation } from './file-location.mjs';
+import { normalizePublicationDate, PUBLICATION_DATE_INSTRUCTION } from './document-metadata.mjs';
 import { buildEvidenceCatalog, formatEvidenceCatalog } from './evidence-catalog.mjs';
 import crypto from 'node:crypto';
 import { documentMime, documentExtension, extractTextDocument, validateDocumentBytes } from './document-formats.mjs';
@@ -422,6 +423,7 @@ function saveClassificationDocumentMetas(store, actorKey, entries, parsed) {
       reportTitle: metaFieldValue(candidate.reportTitle || candidate.chineseTitle).slice(0, 300),
       subtitle: metaFieldValue(candidate.subtitle).slice(0, 300),
       year: metaFieldValue(candidate.year || entry.year || '').slice(0, 50),
+      publicationDate: normalizePublicationDate(candidate.publicationDate),
       summary: String(candidate.summary || '').trim().slice(0, 5000),
       source: 'ai_classification'
     }));
@@ -1180,8 +1182,9 @@ async function runAiClassification({ store, actorKey, targetEntries, workspaces,
     '    {"workspaceId": "ws-1", "workspaceName": "主题名称", "confidence": 0.92, "reason": "匹配纳入规则：聚焦于大模型逻辑推理机制"}',
     '  ]',
     '}, "documentMetadata": {',
-    '  "entry-id-1": {"cleanTitle": "【机构】规范中文标题（2025）", "institution": "机构", "reportTitle": "中文主标题", "subtitle": "", "year": "2025", "summary": "一句话中文摘要"}',
+    '  "entry-id-1": {"cleanTitle": "【机构】规范中文标题（2025-06-18）", "institution": "机构", "reportTitle": "中文主标题", "subtitle": "", "year": "2025", "publicationDate": "2025-06-18", "summary": "一句话中文摘要"}',
     '}}',
+    PUBLICATION_DATE_INSTRUCTION,
     '【规则】',
     '1. 优先匹配已有主题，符合核心内容才给 confidence >=0.7；命中排除规则不推荐；无法合理覆盖可返回空数组，禁止硬塞；',
     '2. reason 简述推荐或不推荐的核心理由（30字以内）；',
@@ -1239,6 +1242,7 @@ async function runAiTopicGeneration({ store, actorKey, targetEntries, maxTopics 
   const existingWorkspaces = store.listWorkspaces(actorKey);
   const systemPrompt = [
     '你是资深学术研究与产业分析专家。请根据给定的文献列表，自动规划一套极度精炼、高层次的研究大类体系（Topic Taxonomy）。',
+    PUBLICATION_DATE_INSTRUCTION,
     '【已有主题优先与多主题原则】',
     '1. 必须首先尝试全部现有主题，只要其范围合理覆盖就复用；禁止换个近义名新增主题。',
     '2. 每篇可归入多个实质相关主题，confidence >=0.7 表示核心内容匹配；弱相关不推荐，不强制归入最高分。',
@@ -1264,7 +1268,7 @@ async function runAiTopicGeneration({ store, actorKey, targetEntries, maxTopics 
     '    ]',
     '  },',
     '  "documentMetadata": {',
-    '    "entry-id-1": { "cleanTitle": "【机构】规范中文标题（2025）", "institution": "机构", "reportTitle": "中文主标题", "subtitle": "", "year": "2025", "summary": "一句话中文摘要" }',
+    '    "entry-id-1": { "cleanTitle": "【机构】规范中文标题（2025-06-18）", "institution": "机构", "reportTitle": "中文主标题", "subtitle": "", "year": "2025", "publicationDate": "2025-06-18", "summary": "一句话中文摘要" }',
     '  }',
     '}'
   ].join('\n');
@@ -3441,6 +3445,10 @@ export function createCanvasHandler(store, {
         const year = body.year !== undefined
           ? string(body.year, 'year', { max: 50 }).trim()
           : (existing?.year || '');
+        const publicationDate = body.publicationDate !== undefined
+          ? string(body.publicationDate, 'publicationDate', { max: 32 }).trim()
+          : (existing?.publicationDate || '');
+        if (publicationDate && !normalizePublicationDate(publicationDate)) throw new TypeError('发布日期须为有效的 YYYY-MM-DD、YYYY-MM 或 YYYY');
         const summary = body.summary !== undefined
           ? string(body.summary, 'summary', { max: 5000 }).trim()
           : (existing?.summary || '');
@@ -3462,6 +3470,7 @@ export function createCanvasHandler(store, {
           reportTitle,
           subtitle,
           year,
+          publicationDate,
           summary,
           source: 'manual'
         });
@@ -3515,8 +3524,8 @@ export function createCanvasHandler(store, {
 1. 机构来源 (institution)：提取发布机构（如中金公司、华泰证券、麦肯锡、高盛、清华大学等；无法确认则留空，不编造或使用未知机构占位）。
 2. 报告主标题 (reportTitle)：提取核心中文研报主标题。如果原标题是无意义文件名或含糊名称（如"周报"、"专题研究"），请根据正文提取精炼准确的业务研报名称。
 3. 副标题 (subtitle)：若有细分方向或具体副标题则提取，否则留空字符串 ""。
-4. 年份 (year)：提取发布年份（如 2024；无法确认则留空字符串 ""）。
-5. 规范中文标题 (cleanTitle)：组合成【机构】主标题：副标题 (年份) 格式。例如：【中金公司】人形机器人产业链深度：从核心零部件到整机制造（2024）。
+4. 年份 (year)：提取发布年份（如 2024；无法确认则留空字符串 ""）。${PUBLICATION_DATE_INSTRUCTION}
+5. 规范中文标题 (cleanTitle)：组合成【机构】主标题：副标题（发布日期）格式。例如：【中金公司】人形机器人产业链深度：从核心零部件到整机制造（2024-06-18）。仅有年份时只保留年份。
 6. 一句话摘要 (summary)：只描述首页可以确认的论述主题，不把首页推测当作全文核心结论。
 
 必须严格返回合法 JSON 对象，格式如下：
@@ -3525,7 +3534,8 @@ export function createCanvasHandler(store, {
   "reportTitle": "报告主标题",
   "subtitle": "副标题",
   "year": "2024",
-  "cleanTitle": "【机构名】报告主标题：副标题（2024）",
+  "publicationDate": "2024-06-18",
+  "cleanTitle": "【机构名】报告主标题：副标题（2024-06-18）",
   "summary": "文档主题（仅首页可确认的内容）"
 }
 
@@ -3576,6 +3586,7 @@ ${textSnippet.slice(0, 8000) || '无'}`;
             reportTitle,
             subtitle,
             year,
+            publicationDate: normalizePublicationDate(parsed?.publicationDate),
             summary,
             source: 'ai'
           });
