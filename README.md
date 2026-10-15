@@ -10,7 +10,7 @@ archived implementation is preserved on the git tag
 
 ## Highlights & Features
 
-- **Structured reading guide (v0.4)** — The right pane follows the opened article and shows its question, takeaway, reasoning, evidence and limits in reading order. Explanations expand inline. Separate tabs keep annotations and actual cross-document comparisons accessible; the existing canvas remains available through the advanced view. Old analyses render without migration; reanalysis adds the versioned structured fields.
+- **Structured reading guide (v0.4.7)** — The right pane follows the opened article, leads with its conclusions, then explains their meaning, supporting arguments, necessary concepts and limits in continuous readable paragraphs. Evidence links locate and temporarily highlight the original text. Annotations have their own tab; the existing canvas remains available through the advanced view. Full reading does not automatically compare unrelated articles. Old analyses render without migration; reanalysis adds the versioned structured fields.
 
 - **Reading workflow (v0.3)** — PDF, TXT and EPUB can enter the same native library. TXT/EPUB use a safe plain-text chapter view with persistent annotations and text-block navigation. Metadata recognition uses the opening pages; classification reuses existing topics and supports multiple topics per document. Necessary new topics require an explanation and a matching document.
 - **Trustworthy document coverage** — Full-document mapping reads beyond 40 pages, rejects documents over the analysis budget explicitly, and marks unmatched quotes as awaiting verification. Reanalysis bypasses the versioned AI cache while preserving manually edited source cards. The CPA connection settings stay unchanged.
@@ -27,7 +27,7 @@ archived implementation is preserved on the git tag
 
 ## Current status
 
-M4 (native file and library management) is in final acceptance (CONDITIONAL PASS pending re-audit and manual verification). AltCanvas runs as a single
+The deployed release is v0.4.7, with automated coverage for the native library, file management and reading guide. UI acceptance follows the human-operated workflow in `docs/human-in-loop-debugging.md`; automated checks do not replace that acceptance. AltCanvas runs as a single
 Node.js service with local-account authentication, an independent SQLite
 Canvas database, content-addressed PDF storage under `data/blobs/`, and
 server-configured native library roots (`NATIVE_LIBRARY_ROOTS`) that point at
@@ -108,8 +108,7 @@ per-user Canvas data store and are never returned to or persisted by the browser
 endpoints such as a local Ollama instance additionally require the administrator
 flags `ALLOW_PRIVATE_AI_HOSTS=true` and `ALLOW_INSECURE_AI=true`.
 For stronger separation between encrypted AI settings and data backups, set a
-high-entropy `AI_SETTINGS_SECRET` outside the data directory. AI requests send
-only explicitly selected Canvas card content and source quote snapshots; a
+high-entropy `AI_SETTINGS_SECRET` outside the data directory. Depending on the requested action, AI requests send opening-page text for metadata recognition, full extracted article text for reading guides, or selected Canvas content and source quotes; a
 plain-HTTP private-network endpoint exposes that traffic to the local network.
 
 ## Production configuration

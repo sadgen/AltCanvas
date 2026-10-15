@@ -32,8 +32,12 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: |
+            package-lock.json
             vendor/reader/package-lock.json
             vendor/web-library/package-lock.json
+
+      - name: Install AltCanvas dependencies
+        run: npm ci
 
       - name: Run AltCanvas tests
         run: npm test
